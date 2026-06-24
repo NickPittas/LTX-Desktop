@@ -37,6 +37,7 @@ from runtime_config.model_download_specs import (
 )
 
 if TYPE_CHECKING:
+    from handlers.model_profiles_handler import ModelProfilesHandler
     from runtime_config.runtime_config import RuntimeConfig
     from state.app_state_types import AppState
 
@@ -54,8 +55,10 @@ class ModelsHandler(StateHandlerBase):
         state: AppState,
         lock: RLock,
         config: RuntimeConfig,
+        model_profiles_handler: ModelProfilesHandler | None = None,
     ) -> None:
         super().__init__(state, lock, config)
+        self._model_profiles = model_profiles_handler
 
     def _ordered_cp_ids(self, cp_ids: set[ModelCheckpointID]) -> list[ModelCheckpointID]:
         return [cp_id for cp_id in ALL_MODEL_CP_IDS if cp_id in cp_ids]
@@ -147,6 +150,10 @@ class ModelsHandler(StateHandlerBase):
 
     def get_ltx_recommendation(self) -> LtxRecommendationResponse:
         self._ensure_local_model_mode()
+
+        # If a valid active official profile exists, no download needed
+        if self._model_profiles is not None and self._model_profiles.has_valid_active_official_profile():
+            return LtxOkRecommendationResponse(status="ok")
 
         current_model_id = self._current_downloaded_ltx_model_id()
         latest_model_id = get_latest_ltx_model_id()

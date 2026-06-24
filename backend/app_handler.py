@@ -13,6 +13,7 @@ from handlers import (
     HuggingFaceAuthHandler,
     IcLoraHandler,
     ImageGenerationHandler,
+    ModelProfilesHandler,
     ModelsHandler,
     PipelinesHandler,
     SuggestGapPromptHandler,
@@ -102,6 +103,12 @@ class AppHandler:
         # Handlers (wired in dependency order)
         # ============================================================
 
+        self.model_profiles = ModelProfilesHandler(
+            state=self.state,
+            lock=self._lock,
+            config=config,
+        )
+
         self.settings = SettingsHandler(
             state=self.state,
             lock=self._lock,
@@ -112,6 +119,7 @@ class AppHandler:
             state=self.state,
             lock=self._lock,
             config=config,
+            model_profiles_handler=self.model_profiles,
         )
 
         self.hf_auth = HuggingFaceAuthHandler(
@@ -213,9 +221,10 @@ class AppHandler:
         self.load_persistent_state(default_settings)
 
     def load_persistent_state(self, default_settings: AppSettings) -> None:
-        """Load persisted state from disk (settings, HF auth token, etc.)."""
+        """Load persisted state from disk (settings, HF auth token, model profiles, etc.)."""
         self.settings.load_settings(default_settings)
         self.hf_auth.load_token()
+        self.model_profiles.load_profiles()
 
 
 @dataclass

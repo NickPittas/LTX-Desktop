@@ -274,6 +274,99 @@ class LtxInsufficientFundsErrorResponse(BaseModel):
 
 
 # ============================================================
+# Model Profile Types
+# ============================================================
+
+
+ModelProfileId: TypeAlias = str
+ModelProfileFamily: TypeAlias = Literal["ltx-2", "ltx-2.3", "ltxv2", "custom"]
+ModelProfileSource: TypeAlias = Literal["official", "kijai", "quantstack", "custom"]
+ModelProfileTransformerFormat: TypeAlias = Literal["official_safetensors", "split_safetensors", "gguf"]
+ModelProfileTextEncoderFormat: TypeAlias = Literal["hf_folder", "safetensors", "gguf", "api"]
+ModelProfileCapability: TypeAlias = Literal[
+    "t2v", "i2v", "a2v", "retake", "ic_lora", "local_text", "gguf"
+]
+
+
+class ModelComponentPaths(BaseModel):
+    transformer: str | None = None
+    transformer_format: ModelProfileTransformerFormat = "official_safetensors"
+    transformer_quantization: str | None = None
+    upsampler: str | None = None
+    text_encoder_root: str | None = None
+    text_encoder_format: ModelProfileTextEncoderFormat = "api"
+    text_projection: str | None = None
+    embeddings_connector: str | None = None
+    video_vae: str | None = None
+    audio_vae: str | None = None
+    vocoder: str | None = None
+    ic_lora_union: str | None = None
+    ic_lora_motion_track: str | None = None
+    ic_lora_ingredients: str | None = None
+    ic_lora_hdr: str | None = None
+    ic_lora_hdr_scene_embeddings: str | None = None
+    ic_lora_lipdub: str | None = None
+    ic_lora_in_outpainting: str | None = None
+    official_adapters: dict[str, str] = Field(default_factory=dict)
+    depth_processor: str | None = None
+    pose_processor: str | None = None
+    person_detector: str | None = None
+
+
+class ModelProfilePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    name: str
+    family: ModelProfileFamily = "ltx-2.3"
+    source: ModelProfileSource = "official"
+    components: ModelComponentPaths = Field(default_factory=ModelComponentPaths)
+    capabilities: list[ModelProfileCapability] = Field(default_factory=lambda: ["t2v"])
+    notes: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class ModelProfilePatchPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = None
+    family: ModelProfileFamily | None = None
+    source: ModelProfileSource | None = None
+    components: ModelComponentPaths | None = None
+    capabilities: list[ModelProfileCapability] | None = None
+    notes: str | None = None
+
+
+def _default_model_profiles() -> list[ModelProfilePayload]:
+    return []
+
+
+class ModelProfilesResponse(BaseModel):
+    active_model_profile_id: str | None = None
+    profiles: list[ModelProfilePayload] = Field(default_factory=_default_model_profiles)
+
+
+class ModelProfileValidationIssuePayload(BaseModel):
+    field: str
+    issue: str
+
+
+def _default_model_profile_issues() -> list[ModelProfileValidationIssuePayload]:
+    return []
+
+
+class ModelProfileValidationResponse(BaseModel):
+    valid: bool = True
+    issues: list[ModelProfileValidationIssuePayload] = Field(default_factory=_default_model_profile_issues)
+
+
+class ModelProfileActivateResponse(BaseModel):
+    status: str = "ok"
+    active_model_profile_id: str | None = None
+
+
+# ============================================================
 # Request Models
 # ============================================================
 

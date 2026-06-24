@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NewType, Protocol
 
-from api_types import ModelCheckpointID
+from api_types import ModelCheckpointID, ModelProfilePayload
 from state.conditioning_cache import ConditioningCache
 
 if TYPE_CHECKING:
@@ -230,6 +230,10 @@ HfAuthState = HfNotAuthenticated | HfOAuthPending | HfAuthenticated
 # ============================================================
 
 
+def _default_model_profiles() -> list[ModelProfilePayload]:
+    return []
+
+
 @dataclass
 class AppState:
     downloading_session: DownloadingSession | None
@@ -242,3 +246,5 @@ class AppState:
         default_factory=_default_completed_download_sessions
     )
     hf_auth_state: HfAuthState = field(default_factory=HfNotAuthenticated)
+    model_profiles: list[ModelProfilePayload] = field(default_factory=_default_model_profiles)
+    active_model_profile_id: str | None = None
