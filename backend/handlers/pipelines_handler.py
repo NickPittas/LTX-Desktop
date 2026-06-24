@@ -173,6 +173,8 @@ class PipelinesHandler(StateHandlerBase):
 
     def _create_video_pipeline(self, model_type: VideoPipelineModelType) -> VideoPipelineState:
         checkpoint_path, gemma_root, upsampler_path, cache_key = self._resolve_checkpoint_paths()
+        components = self._resolve_active_components()
+        transformer_format = components.transformer_format if components is not None else "safetensors"
 
         pipeline = self._fast_video_pipeline_class.create(
             checkpoint_path,
@@ -180,6 +182,7 @@ class PipelinesHandler(StateHandlerBase):
             upsampler_path,
             self.config.device,
             streaming_prefetch_count_for_mode(self.config.local_generations_mode),
+            transformer_format=transformer_format,
         )
 
         state = VideoPipelineState(

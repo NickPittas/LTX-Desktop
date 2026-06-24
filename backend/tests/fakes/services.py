@@ -459,6 +459,7 @@ class _FakeVideoPipelineBase:
         self.compile_calls = 0
         self.raise_on_generate: Exception | None = None
         self.last_checkpoint_path: CheckpointPath | None = None
+        self.last_transformer_format: str | None = None
 
     def _record_generate(self, payload: dict[str, Any]) -> None:
         self.generate_calls.append(payload)
@@ -495,11 +496,14 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
         upsampler_path: str,
         device: str | object,
         streaming_prefetch_count: int | None,
+        *,
+        transformer_format: str = "safetensors",
     ) -> "FakeFastVideoPipeline":
         pipeline = FakeFastVideoPipeline._singleton
         if pipeline is None:
             raise RuntimeError("FakeFastVideoPipeline singleton is not bound")
         pipeline.last_checkpoint_path = checkpoint_path
+        pipeline.last_transformer_format = transformer_format
         return pipeline
 
     def generate(

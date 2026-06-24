@@ -21,6 +21,8 @@ class FastVideoPipeline(Protocol):
         upsampler_path: str,
         device: torch.device,
         streaming_prefetch_count: int | None,
+        *,
+        transformer_format: str = "safetensors",
     ) -> "FastVideoPipeline":
         ...
 

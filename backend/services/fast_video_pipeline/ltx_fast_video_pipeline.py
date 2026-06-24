@@ -24,6 +24,8 @@ class LTXFastVideoPipeline:
         upsampler_path: str,
         device: torch.device,
         streaming_prefetch_count: int | None,
+        *,
+        transformer_format: str = "safetensors",
     ) -> "LTXFastVideoPipeline":
         return LTXFastVideoPipeline(
             checkpoint_path=checkpoint_path,
@@ -31,6 +33,7 @@ class LTXFastVideoPipeline:
             upsampler_path=upsampler_path,
             device=device,
             streaming_prefetch_count=streaming_prefetch_count,
+            transformer_format=transformer_format,
         )
 
     def __init__(
@@ -40,6 +43,8 @@ class LTXFastVideoPipeline:
         upsampler_path: str,
         device: torch.device,
         streaming_prefetch_count: int | None,
+        *,
+        transformer_format: str = "safetensors",
     ) -> None:
         from ltx_core.quantization import QuantizationPolicy
         from ltx_pipelines.distilled import DistilledPipeline
@@ -49,6 +54,7 @@ class LTXFastVideoPipeline:
         self._upsampler_path = upsampler_path
         self._device = device
         self._streaming_prefetch_count = streaming_prefetch_count
+        self._transformer_format = transformer_format
         self._quantization = QuantizationPolicy.fp8_cast() if device_supports_fp8(device) else None
 
         self.pipeline = DistilledPipeline(
@@ -59,6 +65,10 @@ class LTXFastVideoPipeline:
             device=device,
             quantization=self._quantization,
         )
+        if transformer_format == "gguf":
+            from services.patches.gguf_loader_fix import install_gguf_loader
+
+            install_gguf_loader(self.pipeline)
 
     def _run_inference(
         self,
@@ -145,3 +155,7 @@ class LTXFastVideoPipeline:
             quantization=self._quantization,
             torch_compile=True,
         )
+        if self._transformer_format == "gguf":
+            from services.patches.gguf_loader_fix import install_gguf_loader
+
+            install_gguf_loader(self.pipeline)
