@@ -102,6 +102,7 @@ class TextEncoderState:
 class VideoPipelineState:
     pipeline: FastVideoPipeline
     is_compiled: bool
+    cache_key: tuple[str, ...] = ()
 
 
 @dataclass

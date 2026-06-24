@@ -367,6 +367,91 @@ class ModelProfileActivateResponse(BaseModel):
 
 
 # ============================================================
+# Adapter Registry Types
+# ============================================================
+
+
+AdapterID: TypeAlias = Literal[
+    "distilled_lora_384",
+    "distilled_lora_384_1_1",
+    "union_control",
+    "motion_track_control",
+    "ingredients",
+    "water_simulation",
+    "decompression",
+    "deblur",
+    "colorization",
+    "day_to_night",
+    "in_outpainting",
+    "instant_shave",
+    "cross_eyed",
+    "hdr",
+    "hdr_scene_embeddings",
+    "lipdub",
+]
+AdapterKind: TypeAlias = Literal["lora", "ic_lora", "distilled_lora", "embeddings"]
+AdapterSource: TypeAlias = Literal["official", "kijai", "custom"]
+AdapterPipeline: TypeAlias = Literal[
+    "fast",
+    "union_control",
+    "motion_track_control",
+    "ingredients",
+    "water_simulation",
+    "decompression",
+    "deblur",
+    "colorization",
+    "day_to_night",
+    "in_outpainting",
+    "instant_shave",
+    "cross_eyed",
+    "hdr",
+    "lipdub",
+]
+AdapterStatus: TypeAlias = Literal["available", "missing"]
+
+
+def _default_adapter_pipelines() -> list[AdapterPipeline]:
+    return []
+
+
+class AdapterComponentPayload(BaseModel):
+    id: AdapterID
+    display_name: str
+    kind: AdapterKind
+    source: AdapterSource = "official"
+    repo_id: str
+    filename: str
+    expected_size_bytes: int
+    required_for: list[AdapterPipeline] = Field(default_factory=_default_adapter_pipelines)
+    optional_for: list[AdapterPipeline] = Field(default_factory=_default_adapter_pipelines)
+
+
+class AdapterStatusItem(AdapterComponentPayload):
+    status: AdapterStatus
+    path: str | None = None
+
+
+class AdapterRequirementItem(BaseModel):
+    adapter_id: AdapterID
+    display_name: str
+    satisfied: bool
+    path: str | None = None
+    downloadable: bool = True
+    repo_id: str
+    filename: str
+
+
+class AdapterStatusResponse(BaseModel):
+    adapters: list[AdapterStatusItem]
+
+
+class AdapterRecommendationResponse(BaseModel):
+    pipeline: AdapterPipeline
+    required: list[AdapterRequirementItem]
+    missing: list[AdapterID]
+
+
+# ============================================================
 # Request Models
 # ============================================================
 

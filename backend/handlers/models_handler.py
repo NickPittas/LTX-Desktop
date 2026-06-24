@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from threading import RLock
 from typing import TYPE_CHECKING
 
 from _routes._errors import HTTPError
 from api_types import (
+    AdapterComponentPayload,
+    AdapterID,
+    AdapterPipeline,
+    AdapterRecommendationResponse,
+    AdapterRequirementItem,
+    AdapterStatusItem,
+    AdapterStatusResponse,
     ImageGenRecommendationResponse,
     LtxDownloadRecommendationResponse,
     LtxIcLoraRecommendationResponse,
@@ -24,6 +32,8 @@ from runtime_config.model_download_specs import (
     DEPTH_PROCESSOR_CP_ID,
     IMG_GEN_MODEL_CP_ID,
     LTXLocalModelRelevant,
+    OFFICIAL_LTX23_ADAPTERS,
+    AdapterComponent,
     get_downloaded_ltx_model_id,
     get_ic_loras_cp_ids,
     get_latest_ltx_model_id,
@@ -78,6 +88,75 @@ class ModelsHandler(StateHandlerBase):
 
     def get_downloaded_checkpoints(self) -> set[ModelCheckpointID]:
         return {cp_id for cp_id in ALL_MODEL_CP_IDS if self.is_cp_downloaded(cp_id)}
+
+    def _adapter_payload(self, adapter: AdapterComponent) -> AdapterComponentPayload:
+        return AdapterComponentPayload(
+            id=adapter.id,
+            display_name=adapter.display_name,
+            kind=adapter.kind,
+            source=adapter.source,
+            repo_id=adapter.repo_id,
+            filename=adapter.filename,
+            expected_size_bytes=adapter.expected_size_bytes,
+            required_for=list(adapter.required_for),
+            optional_for=list(adapter.optional_for),
+        )
+
+    def _adapter_matches_pipeline(
+        self,
+        adapter: AdapterComponent,
+        pipeline: AdapterPipeline | None,
+    ) -> bool:
+        if pipeline is None:
+            return True
+        return pipeline in adapter.required_for or pipeline in adapter.optional_for
+
+    def resolve_adapter_path(self, adapter_id: AdapterID) -> Path | None:
+        adapter = OFFICIAL_LTX23_ADAPTERS[adapter_id]
+        configured_path = self.state.app_settings.adapter_paths.get(adapter_id)
+        if configured_path:
+            path = Path(configured_path)
+            if path.is_file():
+                return path
+        models_dir_path = self.models_dir / adapter.filename
+        return models_dir_path if models_dir_path.is_file() else None
+
+    def get_adapter_status(self, pipeline: AdapterPipeline | None = None) -> AdapterStatusResponse:
+        items: list[AdapterStatusItem] = []
+        for adapter in OFFICIAL_LTX23_ADAPTERS.values():
+            if not self._adapter_matches_pipeline(adapter, pipeline):
+                continue
+            path = self.resolve_adapter_path(adapter.id)
+            items.append(
+                AdapterStatusItem(
+                    **self._adapter_payload(adapter).model_dump(),
+                    status="available" if path is not None else "missing",
+                    path=None if path is None else str(path),
+                )
+            )
+        return AdapterStatusResponse(adapters=items)
+
+    def get_adapter_recommendation(self, pipeline: AdapterPipeline) -> AdapterRecommendationResponse:
+        required: list[AdapterRequirementItem] = []
+        missing: list[AdapterID] = []
+        for adapter in OFFICIAL_LTX23_ADAPTERS.values():
+            if pipeline not in adapter.required_for:
+                continue
+            path = self.resolve_adapter_path(adapter.id)
+            satisfied = path is not None
+            if not satisfied:
+                missing.append(adapter.id)
+            required.append(
+                AdapterRequirementItem(
+                    adapter_id=adapter.id,
+                    display_name=adapter.display_name,
+                    satisfied=satisfied,
+                    path=None if path is None else str(path),
+                    repo_id=adapter.repo_id,
+                    filename=adapter.filename,
+                )
+            )
+        return AdapterRecommendationResponse(pipeline=pipeline, required=required, missing=missing)
 
     def _get_required_ltx_cp_ids(self, model_id: LTXLocalModelId) -> set[ModelCheckpointID]:
         spec = get_ltx_model_spec(model_id)

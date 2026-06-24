@@ -6,10 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from api_types import ModelCheckpointID
+from api_types import AdapterID, ModelCheckpointID
 from runtime_config.model_download_specs import (
     ALL_MODEL_CP_IDS,
     ALL_LTX_LOCAL_MODEL_IDS,
+    OFFICIAL_LTX23_ADAPTERS,
     ModelCheckpointSpec,
     get_ic_loras_cp_ids,
     get_latest_ltx_model_id,
@@ -51,6 +52,40 @@ def test_ltx_model_cp_ids_include_deduped_ic_loras():
         spec.text_encoder_cp,
         "ltx-2.3-22b-ic-lora-union-control-ref0.5",
     )
+
+
+def test_official_ltx23_adapter_registry_is_complete():
+    expected_ids: set[AdapterID] = {
+        "distilled_lora_384",
+        "distilled_lora_384_1_1",
+        "union_control",
+        "motion_track_control",
+        "ingredients",
+        "water_simulation",
+        "decompression",
+        "deblur",
+        "colorization",
+        "day_to_night",
+        "in_outpainting",
+        "instant_shave",
+        "cross_eyed",
+        "hdr",
+        "hdr_scene_embeddings",
+        "lipdub",
+    }
+
+    assert set(OFFICIAL_LTX23_ADAPTERS) == expected_ids
+    for adapter_id, adapter in OFFICIAL_LTX23_ADAPTERS.items():
+        assert adapter.id == adapter_id
+        assert adapter.repo_id.startswith("Lightricks/")
+        assert adapter.filename.endswith(".safetensors")
+        assert adapter.expected_size_bytes > 0
+        assert adapter.required_for or adapter.optional_for
+
+
+def test_official_ltx23_hdr_requires_embedding_pair():
+    assert OFFICIAL_LTX23_ADAPTERS["hdr"].required_for == ("hdr",)
+    assert OFFICIAL_LTX23_ADAPTERS["hdr_scene_embeddings"].required_for == ("hdr",)
 
 
 def test_model_path_resolves_from_relative_path(tmp_path):

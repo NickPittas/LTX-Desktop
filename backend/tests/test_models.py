@@ -20,7 +20,10 @@ from runtime_config.model_download_specs import (
     resolve_model_path,
 )
 from state.app_state_types import DownloadSessionComplete, DownloadSessionError, DownloadingSession, FileDownloadRunning
+from tests.conftest import TEST_ADMIN_TOKEN
 from tests.http_error_assertions import assert_http_error
+
+_ADMIN_HEADERS = {"X-Admin-Token": TEST_ADMIN_TOKEN}
 
 
 def _current_ltx_spec():
@@ -87,6 +90,48 @@ class TestRecommendations:
         response = client.get("/api/models/img-gen-recommendation")
         assert response.status_code == 200
         assert response.json()["cp_to_download"] is None
+
+    def test_adapter_status_uses_user_path_then_models_dir(self, client, test_state, tmp_path):
+        override_path = tmp_path / "union.safetensors"
+        override_path.write_bytes(b"fake")
+        test_state.state.app_settings.adapter_paths["union_control"] = str(override_path)
+
+        models_dir_path = test_state.config.default_models_dir / "ltx-2.3-22b-ic-lora-hdr-0.9.safetensors"
+        models_dir_path.write_bytes(b"fake")
+
+        response = client.get("/api/models/adapters/status", headers=_ADMIN_HEADERS)
+        assert response.status_code == 200
+        adapters = {item["id"]: item for item in response.json()["adapters"]}
+        assert adapters["union_control"]["status"] == "available"
+        assert adapters["union_control"]["path"] == str(override_path)
+        assert adapters["hdr"]["status"] == "available"
+        assert adapters["hdr"]["path"] == str(models_dir_path)
+        assert adapters["lipdub"]["status"] == "missing"
+        assert adapters["lipdub"]["path"] is None
+
+    def test_adapter_recommendation_reports_pipeline_missing_items(self, client):
+        response = client.get(
+            "/api/models/adapters/recommendation",
+            params={"pipeline": "hdr"},
+            headers=_ADMIN_HEADERS,
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["pipeline"] == "hdr"
+        assert payload["missing"] == ["hdr", "hdr_scene_embeddings"]
+        assert [item["adapter_id"] for item in payload["required"]] == ["hdr", "hdr_scene_embeddings"]
+
+    def test_adapter_status_requires_admin(self, client):
+        response = client.get("/api/models/adapters/status")
+        assert_http_error(response, status_code=403, code="HTTP_403", message="Admin token required")
+
+    def test_legacy_ic_lora_recommendation_uses_union_control(self, client, create_fake_model_files):
+        create_fake_model_files()
+        response = client.get("/api/models/ltx-ic-lora-recommendation")
+        assert response.status_code == 200
+        assert response.json() == {
+            "cps_to_download": ["ltx-2.3-22b-ic-lora-union-control-ref0.5", DEPTH_PROCESSOR_CP_ID]
+        }
 
     def test_text_encoder_recommendation(self, client, create_fake_model_files, test_state):
         create_fake_model_files()

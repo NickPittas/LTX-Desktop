@@ -184,7 +184,7 @@ function AppContent() {
   const shouldAutoFinalizeForcedFirstRun =
     isForcedFirstRun && isLoaded && settings.hasLtxApiKey && !isFinalizingFirstRun && !firstRunFinalizeError
 
-  const areRequiredModelsDownloaded = useCallback(async () => {
+  const areModelsReady = useCallback(async () => {
     const [ltxResult, imgGenResult] = await Promise.all([
       ApiClient.getLtxRecommendation(),
       ApiClient.getImgGenRecommendation(),
@@ -199,13 +199,9 @@ function AppContent() {
   }, [])
 
   const handleMissingModelsComplete = useCallback(async () => {
-    const allDownloaded = await areRequiredModelsDownloaded()
-    if (!allDownloaded) {
-      throw new Error('Required models are still missing. Please finish downloading before continuing.')
-    }
     await handleFirstRunComplete()
     setRequiredModelsGate('ready')
-  }, [areRequiredModelsDownloaded, handleFirstRunComplete])
+  }, [handleFirstRunComplete])
 
   useEffect(() => {
     if (!shouldAutoFinalizeForcedFirstRun) return
@@ -229,9 +225,9 @@ function AppContent() {
 
     const checkRequiredModels = async () => {
       try {
-        const allDownloaded = await areRequiredModelsDownloaded()
+        const allReady = await areModelsReady()
         if (cancelled) return
-        setRequiredModelsGate(allDownloaded ? 'ready' : 'missing')
+        setRequiredModelsGate(allReady ? 'ready' : 'missing')
       } catch (e) {
         logger.error(`Failed to check required model status: ${e}`)
         if (cancelled) return
@@ -246,7 +242,7 @@ function AppContent() {
       cancelled = true
     }
   }, [
-    areRequiredModelsDownloaded,
+    areModelsReady,
     backendLoading,
     forceApiGenerations,
     setupState,

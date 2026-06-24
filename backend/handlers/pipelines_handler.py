@@ -17,6 +17,7 @@ from runtime_config.model_download_specs import (
     get_ltx_model_spec,
 )
 from runtime_config.runtime_policy import streaming_prefetch_count_for_mode
+from services.ltx_components import ResolvedLtxComponents, resolve_components
 from services.interfaces import (
     A2VPipeline,
     DepthProcessorPipeline,
@@ -84,10 +85,21 @@ class PipelinesHandler(StateHandlerBase):
 
     def _pipeline_matches_model_type(self, model_type: VideoPipelineModelType) -> bool:
         match self.state.gpu_slot:
-            case GpuSlot(active_pipeline=VideoPipelineState(pipeline=pipeline)):
-                return pipeline.pipeline_kind == model_type
+            case GpuSlot(active_pipeline=VideoPipelineState(pipeline=pipeline, cache_key=cached_key)):
+                if pipeline.pipeline_kind != model_type:
+                    return False
+                # ponytail: cache_key comparison only; richer invalidation lands with split/GGUF
+                expected_key = self._current_cache_key()
+                return cached_key == expected_key
             case _:
                 return False
+
+    def _current_cache_key(self) -> tuple[str, ...]:
+        components = self._resolve_active_components()
+        if components is not None:
+            return components.cache_key
+        model_id = get_downloaded_ltx_model_id(self.models_dir)
+        return (model_id,) if model_id else ()
 
     def _assert_invariants(self) -> None:
         match self.state.gpu_slot:
@@ -104,6 +116,18 @@ class PipelinesHandler(StateHandlerBase):
         if te is None:
             return
         te.service.install_patches(lambda: self.state)
+
+    def _resolve_active_components(self) -> ResolvedLtxComponents | None:
+        profile_id = self.state.active_model_profile_id
+        if profile_id is None:
+            return None
+        profile = next(
+            (p for p in self.state.model_profiles if p.id == profile_id),
+            None,
+        )
+        if profile is None:
+            return None
+        return resolve_components(profile)
 
     def _require_downloaded_ltx_model_id(self) -> LTXLocalModelId:
         model_id = get_downloaded_ltx_model_id(self.models_dir)
@@ -128,11 +152,19 @@ class PipelinesHandler(StateHandlerBase):
         return state
 
     def _create_video_pipeline(self, model_type: VideoPipelineModelType) -> VideoPipelineState:
+        components = self._resolve_active_components()
         gemma_root = self._text_handler.resolve_gemma_root()
-        model_id = self._require_downloaded_ltx_model_id()
-        spec = get_ltx_model_spec(model_id)
-        checkpoint_path = str(get_existing_cp_path(self.models_dir, spec.model_cp))
-        upsampler_path = str(get_existing_cp_path(self.models_dir, spec.upscale_cp))
+
+        if components is not None:
+            checkpoint_path = components.transformer_path
+            upsampler_path = components.upsampler_path or ""
+            cache_key = components.cache_key
+        else:
+            model_id = self._require_downloaded_ltx_model_id()
+            spec = get_ltx_model_spec(model_id)
+            checkpoint_path = str(get_existing_cp_path(self.models_dir, spec.model_cp))
+            upsampler_path = str(get_existing_cp_path(self.models_dir, spec.upscale_cp))
+            cache_key = (model_id,)
 
         pipeline = self._fast_video_pipeline_class.create(
             checkpoint_path,
@@ -145,6 +177,7 @@ class PipelinesHandler(StateHandlerBase):
         state = VideoPipelineState(
             pipeline=pipeline,
             is_compiled=False,
+            cache_key=cache_key,
         )
         return self._compile_if_enabled(state)
 

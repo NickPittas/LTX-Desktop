@@ -55,6 +55,13 @@ const backendHealthStatus = z.object({
   exitCode: z.number().nullable().optional(),
 })
 
+const backendAdminRequest = z.object({
+  path: z.string(),
+  method: z.enum(['GET', 'POST', 'PATCH', 'DELETE']),
+  headers: z.record(z.string(), z.string()).optional(),
+  body: z.string().optional(),
+})
+
 export type BackendHealthStatus = z.infer<typeof backendHealthStatus>
 
 export const electronAPISchemas = {
@@ -62,6 +69,10 @@ export const electronAPISchemas = {
   getBackend: {
     input: z.object({}),
     output: z.object({ url: z.string(), token: z.string() }),
+  },
+  backendAdminRequest: {
+    input: backendAdminRequest,
+    output: z.object({ status: z.number(), statusText: z.string(), ok: z.boolean(), body: z.string() }),
   },
   getModelsPath: {
     input: z.object({}),

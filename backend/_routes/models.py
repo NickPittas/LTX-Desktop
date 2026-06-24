@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 
+from _routes._admin_guard import guard_admin_permission
 from _routes._errors import HTTPError
 from api_types import (
+    AdapterPipeline,
+    AdapterRecommendationResponse,
+    AdapterStatusResponse,
     CheckModelAccessRequest,
     CheckModelAccessResponse,
     DownloadProgressResponse,
@@ -39,6 +43,26 @@ def route_ltx_ic_lora_recommendation(
     handler: AppHandler = Depends(get_state_service),
 ) -> LtxIcLoraRecommendationResponse:
     return handler.models.get_ltx_ic_lora_recommendation()
+
+
+@router.get("/models/adapters/status", response_model=AdapterStatusResponse)
+def route_adapter_status(
+    request: Request,
+    pipeline: AdapterPipeline | None = Query(None),
+    handler: AppHandler = Depends(get_state_service),
+) -> AdapterStatusResponse:
+    guard_admin_permission(request)
+    return handler.models.get_adapter_status(pipeline)
+
+
+@router.get("/models/adapters/recommendation", response_model=AdapterRecommendationResponse)
+def route_adapter_recommendation(
+    request: Request,
+    pipeline: AdapterPipeline = Query(...),
+    handler: AppHandler = Depends(get_state_service),
+) -> AdapterRecommendationResponse:
+    guard_admin_permission(request)
+    return handler.models.get_adapter_recommendation(pipeline)
 
 
 @router.get("/models/text-encoder-recommendation", response_model=TextEncoderRecommendationResponse)

@@ -1,4 +1,4 @@
-import { AlertCircle, Check, Download, Film, Folder, Info, KeyRound, Settings, Sparkles, X, Zap } from 'lucide-react'
+import { AlertCircle, Boxes, Check, Cpu, Download, Film, Folder, Info, KeyRound, Loader2, Settings, Sparkles, Trash2, X, Zap } from 'lucide-react'
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from './ui/button'
 import { useAppSettings, type AppSettings } from '../contexts/AppSettingsContext'
@@ -7,6 +7,9 @@ import { logger } from '../lib/logger'
 import { ApiKeyHelperRow, LtxApiKeyInput, LtxApiKeyHelperRow } from './LtxApiKeyInput'
 import { useHfAuth } from '../hooks/use-hf-auth'
 import { useHfModelAccess } from '../hooks/use-hf-model-access'
+import { useModelProfiles } from '../hooks/use-model-profiles'
+import { useOfficialAdapters } from '../hooks/use-official-adapters'
+import { ModelProfileWizard } from './ModelProfileWizard'
 
 interface SettingsModalProps {
   isOpen: boolean
@@ -14,7 +17,7 @@ interface SettingsModalProps {
   initialTab?: TabId
 }
 
-type TabId = 'general' | 'apiKeys' | 'promptEnhancer' | 'about'
+type TabId = 'general' | 'apiKeys' | 'promptEnhancer' | 'models' | 'about'
 
 export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProps) {
   const { settings, updateSettings, saveLtxApiKey, saveFalApiKey, saveGeminiApiKey, forceApiGenerations } = useAppSettings()
@@ -49,6 +52,12 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
   const [showModelLicense, setShowModelLicense] = useState(false)
   const [analyticsEnabled, setAnalyticsEnabled] = useState(false)
   const [projectAssetsPath, setProjectAssetsPath] = useState('')
+
+  // Models tab — profiles + adapters
+  const profiles = useModelProfiles(isOpen)
+  const adapters = useOfficialAdapters(undefined, isOpen)
+  const [wizardOpen, setWizardOpen] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
 
   // Sync active tab with initialTab prop when modal opens
   useEffect(() => {
@@ -220,6 +229,37 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
     })
   }
 
+  // Models tab — action handlers
+  const handleActivateProfile = async (profileId: string) => {
+    setActionError(null)
+    try {
+      await profiles.activateProfile(profileId)
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : 'Activation failed')
+    }
+  }
+
+  const handleValidateProfile = async (profileId: string) => {
+    setActionError(null)
+    try {
+      await profiles.validateProfile(profileId)
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : 'Validation failed')
+    }
+  }
+
+  const handleDeleteProfile = async (profileId: string) => {
+    const profile = profiles.data?.profiles?.find(p => p.id === profileId)
+    const name = profile?.name ?? 'this profile'
+    if (!window.confirm(`Delete "${name}"? This cannot be undone.`)) return
+    setActionError(null)
+    try {
+      await profiles.deleteProfile(profileId)
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : 'Deletion failed')
+    }
+  }
+
   const handleLoadModelLicense = async () => {
     setModelLicenseLoading(true)
     try {
@@ -250,6 +290,7 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
     { id: 'general' as TabId, label: 'General', icon: Settings },
     { id: 'apiKeys' as TabId, label: 'API Keys', icon: KeyRound },
     { id: 'promptEnhancer' as TabId, label: 'Prompt Enhancer', icon: Sparkles },
+    { id: 'models' as TabId, label: 'Models', icon: Cpu },
     { id: 'about' as TabId, label: 'About', icon: Info },
   ]
 
@@ -1033,6 +1074,119 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                 )}
               </div>
             </>
+          )}
+
+          {activeTab === 'models' && (
+            <div className="space-y-6">
+              {/* Active Profile */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <Cpu className="h-4 w-4 text-blue-400" />
+                  <h3 className="text-sm font-semibold text-white">Active Profile</h3>
+                </div>
+                {(() => {
+                  const activeId = profiles.data?.active_model_profile_id
+                  const activeProfile = activeId ? profiles.data?.profiles?.find(p => p.id === activeId) : null
+                  return activeProfile ? (
+                    <div className="bg-zinc-800/50 border border-blue-500/30 rounded-lg p-4 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <span className="text-sm font-medium text-white">{activeProfile.name}</span>
+                          <span className="ml-2 text-xs text-zinc-400">{activeProfile.family}</span>
+                        </div>
+                        <span className="text-xs px-2 py-0.5 rounded bg-blue-500/20 text-blue-400 font-medium">Active</span>
+                      </div>
+                      <div className="text-xs text-zinc-500">Source: {activeProfile.source}</div>
+                      {activeProfile.capabilities && activeProfile.capabilities.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5">
+                          {activeProfile.capabilities.map(cap => (
+                            <span key={cap} className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-700 text-zinc-300">{cap}</span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-zinc-500">No active profile. Create and activate one below.</p>
+                  )
+                })()}
+              </div>
+
+              {/* Profile List */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <Settings className="h-4 w-4 text-blue-400" />
+                  <h3 className="text-sm font-semibold text-white">Model Profiles</h3>
+                </div>
+                {profiles.isLoading ? (
+                  <div className="flex items-center gap-2 text-zinc-400 text-sm">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Loading profiles...
+                  </div>
+                ) : profiles.errorMessage ? (
+                  <p className="text-xs text-red-400">{profiles.errorMessage}</p>
+                ) : !profiles.data?.profiles || profiles.data.profiles.length === 0 ? (
+                  <p className="text-xs text-zinc-500">No profiles yet. Create one to use local models.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {profiles.data.profiles.map(profile => (
+                      <div key={profile.id} className="bg-zinc-800/50 border border-zinc-700 rounded-lg p-3 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-medium text-white">{profile.name}</span>
+                            <span className="text-xs text-zinc-400">{profile.family}</span>
+                          </div>
+                          {profile.id === profiles.data?.active_model_profile_id && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400">Active</span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Button size="sm" variant="ghost" onClick={() => handleValidateProfile(profile.id)} className="h-7 px-2 text-xs text-zinc-400 hover:text-white hover:bg-zinc-700">Validate</Button>
+                          <Button size="sm" variant="ghost" onClick={() => handleActivateProfile(profile.id)} disabled={profile.id === profiles.data?.active_model_profile_id} className="h-7 px-2 text-xs text-zinc-400 hover:text-white hover:bg-zinc-700 disabled:text-zinc-600">Activate</Button>
+                          <Button size="sm" variant="ghost" onClick={() => handleDeleteProfile(profile.id)} aria-label="Delete profile" className="h-7 px-2 text-xs text-red-400 hover:text-red-300 hover:bg-red-500/10"><Trash2 className="h-3 w-3" /></Button>
+                        </div>
+                      </div>
+                    ))}
+                    {actionError && <p className="text-xs text-red-400">{actionError}</p>}
+                  </div>
+                )}
+                <Button onClick={() => setWizardOpen(true)} className="w-full bg-blue-600 hover:bg-blue-500 text-white text-xs">Create Profile</Button>
+                <ModelProfileWizard isOpen={wizardOpen} onClose={() => { setWizardOpen(false); void profiles.refresh() }} onCreated={() => setWizardOpen(false)} />
+              </div>
+
+              {/* Adapter Checklist (read-only) */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <Boxes className="h-4 w-4 text-blue-400" />
+                  <h3 className="text-sm font-semibold text-white">Official Adapters</h3>
+                </div>
+                {adapters.isLoading ? (
+                  <div className="flex items-center gap-2 text-zinc-400 text-sm">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Checking adapters...
+                  </div>
+                ) : adapters.errorMessage ? (
+                  <p className="text-xs text-red-400">{adapters.errorMessage}</p>
+                ) : adapters.status?.adapters && adapters.status.adapters.length > 0 ? (
+                  <div className="space-y-1.5">
+                    {adapters.status.adapters.map(adapter => (
+                      <div key={adapter.id} className="flex items-center gap-3 bg-zinc-800/30 rounded-lg px-3 py-2">
+                        {adapter.status === 'available' ? <Check className="h-4 w-4 text-emerald-400 flex-shrink-0" /> : <AlertCircle className="h-4 w-4 text-amber-400 flex-shrink-0" />}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm text-zinc-300">{adapter.display_name}</span>
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${adapter.status === 'available' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}`}>{adapter.status === 'available' ? 'Available' : 'Missing'}</span>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-700 text-zinc-400">{adapter.kind}</span>
+                          </div>
+                          <p className="text-[10px] text-zinc-500 font-mono truncate">{adapter.repo_id}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-zinc-500">No adapter information available.</p>
+                )}
+              </div>
+            </div>
           )}
 
           {activeTab === 'about' && (

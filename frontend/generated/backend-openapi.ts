@@ -223,6 +223,110 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/model-profiles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Route List Profiles */
+        get: operations["route_list_profiles_api_model_profiles_get"];
+        put?: never;
+        /** Route Create Profile */
+        post: operations["route_create_profile_api_model_profiles_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/model-profiles/{profile_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Route Delete Profile */
+        delete: operations["route_delete_profile_api_model_profiles__profile_id__delete"];
+        options?: never;
+        head?: never;
+        /** Route Patch Profile */
+        patch: operations["route_patch_profile_api_model_profiles__profile_id__patch"];
+        trace?: never;
+    };
+    "/api/model-profiles/{profile_id}/activate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Route Activate Profile */
+        post: operations["route_activate_profile_api_model_profiles__profile_id__activate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/model-profiles/{profile_id}/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Route Validate Profile */
+        post: operations["route_validate_profile_api_model_profiles__profile_id__validate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/models/adapters/recommendation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Route Adapter Recommendation */
+        get: operations["route_adapter_recommendation_api_models_adapters_recommendation_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/models/adapters/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Route Adapter Status */
+        get: operations["route_adapter_status_api_models_adapters_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/models/check-access": {
         parameters: {
             query?: never;
@@ -466,8 +570,90 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AdapterRecommendationResponse */
+        AdapterRecommendationResponse: {
+            /** Missing */
+            missing: ("distilled_lora_384" | "distilled_lora_384_1_1" | "union_control" | "motion_track_control" | "ingredients" | "water_simulation" | "decompression" | "deblur" | "colorization" | "day_to_night" | "in_outpainting" | "instant_shave" | "cross_eyed" | "hdr" | "hdr_scene_embeddings" | "lipdub")[];
+            /**
+             * Pipeline
+             * @enum {string}
+             */
+            pipeline: "fast" | "union_control" | "motion_track_control" | "ingredients" | "water_simulation" | "decompression" | "deblur" | "colorization" | "day_to_night" | "in_outpainting" | "instant_shave" | "cross_eyed" | "hdr" | "lipdub";
+            /** Required */
+            required: components["schemas"]["AdapterRequirementItem"][];
+        };
+        /** AdapterRequirementItem */
+        AdapterRequirementItem: {
+            /**
+             * Adapter Id
+             * @enum {string}
+             */
+            adapter_id: "distilled_lora_384" | "distilled_lora_384_1_1" | "union_control" | "motion_track_control" | "ingredients" | "water_simulation" | "decompression" | "deblur" | "colorization" | "day_to_night" | "in_outpainting" | "instant_shave" | "cross_eyed" | "hdr" | "hdr_scene_embeddings" | "lipdub";
+            /** Display Name */
+            display_name: string;
+            /**
+             * Downloadable
+             * @default true
+             */
+            downloadable: boolean;
+            /** Filename */
+            filename: string;
+            /** Path */
+            path?: string | null;
+            /** Repo Id */
+            repo_id: string;
+            /** Satisfied */
+            satisfied: boolean;
+        };
+        /** AdapterStatusItem */
+        AdapterStatusItem: {
+            /** Display Name */
+            display_name: string;
+            /** Expected Size Bytes */
+            expected_size_bytes: number;
+            /** Filename */
+            filename: string;
+            /**
+             * Id
+             * @enum {string}
+             */
+            id: "distilled_lora_384" | "distilled_lora_384_1_1" | "union_control" | "motion_track_control" | "ingredients" | "water_simulation" | "decompression" | "deblur" | "colorization" | "day_to_night" | "in_outpainting" | "instant_shave" | "cross_eyed" | "hdr" | "hdr_scene_embeddings" | "lipdub";
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "lora" | "ic_lora" | "distilled_lora" | "embeddings";
+            /** Optional For */
+            optional_for?: ("fast" | "union_control" | "motion_track_control" | "ingredients" | "water_simulation" | "decompression" | "deblur" | "colorization" | "day_to_night" | "in_outpainting" | "instant_shave" | "cross_eyed" | "hdr" | "lipdub")[];
+            /** Path */
+            path?: string | null;
+            /** Repo Id */
+            repo_id: string;
+            /** Required For */
+            required_for?: ("fast" | "union_control" | "motion_track_control" | "ingredients" | "water_simulation" | "decompression" | "deblur" | "colorization" | "day_to_night" | "in_outpainting" | "instant_shave" | "cross_eyed" | "hdr" | "lipdub")[];
+            /**
+             * Source
+             * @default official
+             * @enum {string}
+             */
+            source: "official" | "kijai" | "custom";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "available" | "missing";
+        };
+        /** AdapterStatusResponse */
+        AdapterStatusResponse: {
+            /** Adapters */
+            adapters: components["schemas"]["AdapterStatusItem"][];
+        };
         /** AppSettingsPatch */
         AppSettingsPatch: {
+            /** Adapterpaths */
+            adapterPaths?: {
+                [key: string]: string;
+            } | null;
             /** Falapikey */
             falApiKey?: string | null;
             /** Geminiapikey */
@@ -973,6 +1159,63 @@ export interface components {
             /** Upgrade Message */
             upgrade_message?: string | null;
         };
+        /** ModelComponentPaths */
+        ModelComponentPaths: {
+            /** Audio Vae */
+            audio_vae?: string | null;
+            /** Depth Processor */
+            depth_processor?: string | null;
+            /** Embeddings Connector */
+            embeddings_connector?: string | null;
+            /** Ic Lora Hdr */
+            ic_lora_hdr?: string | null;
+            /** Ic Lora Hdr Scene Embeddings */
+            ic_lora_hdr_scene_embeddings?: string | null;
+            /** Ic Lora In Outpainting */
+            ic_lora_in_outpainting?: string | null;
+            /** Ic Lora Ingredients */
+            ic_lora_ingredients?: string | null;
+            /** Ic Lora Lipdub */
+            ic_lora_lipdub?: string | null;
+            /** Ic Lora Motion Track */
+            ic_lora_motion_track?: string | null;
+            /** Ic Lora Union */
+            ic_lora_union?: string | null;
+            /** Official Adapters */
+            official_adapters?: {
+                [key: string]: string;
+            };
+            /** Person Detector */
+            person_detector?: string | null;
+            /** Pose Processor */
+            pose_processor?: string | null;
+            /**
+             * Text Encoder Format
+             * @default api
+             * @enum {string}
+             */
+            text_encoder_format: "hf_folder" | "safetensors" | "gguf" | "api";
+            /** Text Encoder Root */
+            text_encoder_root?: string | null;
+            /** Text Projection */
+            text_projection?: string | null;
+            /** Transformer */
+            transformer?: string | null;
+            /**
+             * Transformer Format
+             * @default official_safetensors
+             * @enum {string}
+             */
+            transformer_format: "official_safetensors" | "split_safetensors" | "gguf";
+            /** Transformer Quantization */
+            transformer_quantization?: string | null;
+            /** Upsampler */
+            upsampler?: string | null;
+            /** Video Vae */
+            video_vae?: string | null;
+            /** Vocoder */
+            vocoder?: string | null;
+        };
         /** ModelDeleteRequest */
         ModelDeleteRequest: {
             /** Cp Ids */
@@ -1000,6 +1243,91 @@ export interface components {
              * @constant
              */
             status: "started";
+        };
+        /** ModelProfileActivateResponse */
+        ModelProfileActivateResponse: {
+            /** Active Model Profile Id */
+            active_model_profile_id?: string | null;
+            /**
+             * Status
+             * @default ok
+             */
+            status: string;
+        };
+        /** ModelProfilePatchPayload */
+        ModelProfilePatchPayload: {
+            /** Capabilities */
+            capabilities?: ("t2v" | "i2v" | "a2v" | "retake" | "ic_lora" | "local_text" | "gguf")[] | null;
+            components?: components["schemas"]["ModelComponentPaths"] | null;
+            /** Family */
+            family?: ("ltx-2" | "ltx-2.3" | "ltxv2" | "custom") | null;
+            /** Name */
+            name?: string | null;
+            /** Notes */
+            notes?: string | null;
+            /** Source */
+            source?: ("official" | "kijai" | "quantstack" | "custom") | null;
+        };
+        /** ModelProfilePayload */
+        ModelProfilePayload: {
+            /** Capabilities */
+            capabilities?: ("t2v" | "i2v" | "a2v" | "retake" | "ic_lora" | "local_text" | "gguf")[];
+            components?: components["schemas"]["ModelComponentPaths"];
+            /**
+             * Created At
+             * @default
+             */
+            created_at: string;
+            /**
+             * Family
+             * @default ltx-2.3
+             * @enum {string}
+             */
+            family: "ltx-2" | "ltx-2.3" | "ltxv2" | "custom";
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /**
+             * Notes
+             * @default
+             */
+            notes: string;
+            /**
+             * Source
+             * @default official
+             * @enum {string}
+             */
+            source: "official" | "kijai" | "quantstack" | "custom";
+            /**
+             * Updated At
+             * @default
+             */
+            updated_at: string;
+        };
+        /** ModelProfileValidationIssuePayload */
+        ModelProfileValidationIssuePayload: {
+            /** Field */
+            field: string;
+            /** Issue */
+            issue: string;
+        };
+        /** ModelProfileValidationResponse */
+        ModelProfileValidationResponse: {
+            /** Issues */
+            issues?: components["schemas"]["ModelProfileValidationIssuePayload"][];
+            /**
+             * Valid
+             * @default true
+             */
+            valid: boolean;
+        };
+        /** ModelProfilesResponse */
+        ModelProfilesResponse: {
+            /** Active Model Profile Id */
+            active_model_profile_id?: string | null;
+            /** Profiles */
+            profiles?: components["schemas"]["ModelProfilePayload"][];
         };
         /** ModelStatusItem */
         ModelStatusItem: {
@@ -1657,6 +1985,330 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["IcLoraGenerateCompleteResponse"] | components["schemas"]["IcLoraGenerateCancelledResponse"];
+                };
+            };
+            /** @description Client Error */
+            "4XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPErrorResponse"];
+                };
+            };
+            /** @description Server Error */
+            "5XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPErrorResponse"];
+                };
+            };
+        };
+    };
+    route_list_profiles_api_model_profiles_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelProfilesResponse"];
+                };
+            };
+            /** @description Client Error */
+            "4XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPErrorResponse"];
+                };
+            };
+            /** @description Server Error */
+            "5XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPErrorResponse"];
+                };
+            };
+        };
+    };
+    route_create_profile_api_model_profiles_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModelProfilePayload"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelProfilePayload"];
+                };
+            };
+            /** @description Client Error */
+            "4XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPErrorResponse"];
+                };
+            };
+            /** @description Server Error */
+            "5XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPErrorResponse"];
+                };
+            };
+        };
+    };
+    route_delete_profile_api_model_profiles__profile_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                profile_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StatusResponse"];
+                };
+            };
+            /** @description Client Error */
+            "4XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPErrorResponse"];
+                };
+            };
+            /** @description Server Error */
+            "5XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPErrorResponse"];
+                };
+            };
+        };
+    };
+    route_patch_profile_api_model_profiles__profile_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                profile_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModelProfilePatchPayload"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelProfilePayload"];
+                };
+            };
+            /** @description Client Error */
+            "4XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPErrorResponse"];
+                };
+            };
+            /** @description Server Error */
+            "5XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPErrorResponse"];
+                };
+            };
+        };
+    };
+    route_activate_profile_api_model_profiles__profile_id__activate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                profile_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelProfileActivateResponse"];
+                };
+            };
+            /** @description Client Error */
+            "4XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPErrorResponse"];
+                };
+            };
+            /** @description Server Error */
+            "5XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPErrorResponse"];
+                };
+            };
+        };
+    };
+    route_validate_profile_api_model_profiles__profile_id__validate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                profile_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelProfileValidationResponse"];
+                };
+            };
+            /** @description Client Error */
+            "4XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPErrorResponse"];
+                };
+            };
+            /** @description Server Error */
+            "5XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPErrorResponse"];
+                };
+            };
+        };
+    };
+    route_adapter_recommendation_api_models_adapters_recommendation_get: {
+        parameters: {
+            query: {
+                pipeline: "fast" | "union_control" | "motion_track_control" | "ingredients" | "water_simulation" | "decompression" | "deblur" | "colorization" | "day_to_night" | "in_outpainting" | "instant_shave" | "cross_eyed" | "hdr" | "lipdub";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdapterRecommendationResponse"];
+                };
+            };
+            /** @description Client Error */
+            "4XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPErrorResponse"];
+                };
+            };
+            /** @description Server Error */
+            "5XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPErrorResponse"];
+                };
+            };
+        };
+    };
+    route_adapter_status_api_models_adapters_status_get: {
+        parameters: {
+            query?: {
+                pipeline?: ("fast" | "union_control" | "motion_track_control" | "ingredients" | "water_simulation" | "decompression" | "deblur" | "colorization" | "day_to_night" | "in_outpainting" | "instant_shave" | "cross_eyed" | "hdr" | "lipdub") | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdapterStatusResponse"];
                 };
             };
             /** @description Client Error */

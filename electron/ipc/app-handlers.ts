@@ -72,6 +72,29 @@ export function registerAppHandlers(): void {
     return { url: getBackendUrl() ?? '', token: getAuthToken() ?? '' }
   })
 
+  handle('backendAdminRequest', async ({ path, method, headers, body }) => {
+    const url = getBackendUrl()
+    const auth = getAuthToken()
+    const admin = getAdminToken()
+    if (!url || !auth || !admin) return { status: 503, statusText: 'Unavailable', ok: false, body: 'Backend not ready' }
+
+    const baseUrl = new URL(url)
+    const targetUrl = new URL(path, baseUrl)
+    const allowed = targetUrl.origin === baseUrl.origin && (
+      targetUrl.pathname === '/api/model-profiles'
+      || targetUrl.pathname.startsWith('/api/model-profiles/')
+      || targetUrl.pathname === '/api/models/adapters/status'
+      || targetUrl.pathname === '/api/models/adapters/recommendation'
+    )
+    if (!allowed) return { status: 403, statusText: 'Forbidden', ok: false, body: 'Admin path not allowed' }
+
+    const requestHeaders = new Headers(headers)
+    requestHeaders.set('Authorization', `Bearer ${auth}`)
+    requestHeaders.set('X-Admin-Token', admin)
+    const resp = await fetch(targetUrl, { method, headers: requestHeaders, body })
+    return { status: resp.status, statusText: resp.statusText, ok: resp.ok, body: await resp.text() }
+  })
+
   handle('getModelsPath', () => {
     return getModelsPath()
   })

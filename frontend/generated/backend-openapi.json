@@ -1,9 +1,307 @@
 {
   "components": {
     "schemas": {
+      "AdapterRecommendationResponse": {
+        "properties": {
+          "missing": {
+            "items": {
+              "enum": [
+                "distilled_lora_384",
+                "distilled_lora_384_1_1",
+                "union_control",
+                "motion_track_control",
+                "ingredients",
+                "water_simulation",
+                "decompression",
+                "deblur",
+                "colorization",
+                "day_to_night",
+                "in_outpainting",
+                "instant_shave",
+                "cross_eyed",
+                "hdr",
+                "hdr_scene_embeddings",
+                "lipdub"
+              ],
+              "type": "string"
+            },
+            "title": "Missing",
+            "type": "array"
+          },
+          "pipeline": {
+            "enum": [
+              "fast",
+              "union_control",
+              "motion_track_control",
+              "ingredients",
+              "water_simulation",
+              "decompression",
+              "deblur",
+              "colorization",
+              "day_to_night",
+              "in_outpainting",
+              "instant_shave",
+              "cross_eyed",
+              "hdr",
+              "lipdub"
+            ],
+            "title": "Pipeline",
+            "type": "string"
+          },
+          "required": {
+            "items": {
+              "$ref": "#/components/schemas/AdapterRequirementItem"
+            },
+            "title": "Required",
+            "type": "array"
+          }
+        },
+        "required": [
+          "pipeline",
+          "required",
+          "missing"
+        ],
+        "title": "AdapterRecommendationResponse",
+        "type": "object"
+      },
+      "AdapterRequirementItem": {
+        "properties": {
+          "adapter_id": {
+            "enum": [
+              "distilled_lora_384",
+              "distilled_lora_384_1_1",
+              "union_control",
+              "motion_track_control",
+              "ingredients",
+              "water_simulation",
+              "decompression",
+              "deblur",
+              "colorization",
+              "day_to_night",
+              "in_outpainting",
+              "instant_shave",
+              "cross_eyed",
+              "hdr",
+              "hdr_scene_embeddings",
+              "lipdub"
+            ],
+            "title": "Adapter Id",
+            "type": "string"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "downloadable": {
+            "default": true,
+            "title": "Downloadable",
+            "type": "boolean"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          },
+          "satisfied": {
+            "title": "Satisfied",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "adapter_id",
+          "display_name",
+          "satisfied",
+          "repo_id",
+          "filename"
+        ],
+        "title": "AdapterRequirementItem",
+        "type": "object"
+      },
+      "AdapterStatusItem": {
+        "properties": {
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "expected_size_bytes": {
+            "title": "Expected Size Bytes",
+            "type": "integer"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "id": {
+            "enum": [
+              "distilled_lora_384",
+              "distilled_lora_384_1_1",
+              "union_control",
+              "motion_track_control",
+              "ingredients",
+              "water_simulation",
+              "decompression",
+              "deblur",
+              "colorization",
+              "day_to_night",
+              "in_outpainting",
+              "instant_shave",
+              "cross_eyed",
+              "hdr",
+              "hdr_scene_embeddings",
+              "lipdub"
+            ],
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "lora",
+              "ic_lora",
+              "distilled_lora",
+              "embeddings"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "optional_for": {
+            "items": {
+              "enum": [
+                "fast",
+                "union_control",
+                "motion_track_control",
+                "ingredients",
+                "water_simulation",
+                "decompression",
+                "deblur",
+                "colorization",
+                "day_to_night",
+                "in_outpainting",
+                "instant_shave",
+                "cross_eyed",
+                "hdr",
+                "lipdub"
+              ],
+              "type": "string"
+            },
+            "title": "Optional For",
+            "type": "array"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          },
+          "required_for": {
+            "items": {
+              "enum": [
+                "fast",
+                "union_control",
+                "motion_track_control",
+                "ingredients",
+                "water_simulation",
+                "decompression",
+                "deblur",
+                "colorization",
+                "day_to_night",
+                "in_outpainting",
+                "instant_shave",
+                "cross_eyed",
+                "hdr",
+                "lipdub"
+              ],
+              "type": "string"
+            },
+            "title": "Required For",
+            "type": "array"
+          },
+          "source": {
+            "default": "official",
+            "enum": [
+              "official",
+              "kijai",
+              "custom"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "available",
+              "missing"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "display_name",
+          "kind",
+          "repo_id",
+          "filename",
+          "expected_size_bytes",
+          "status"
+        ],
+        "title": "AdapterStatusItem",
+        "type": "object"
+      },
+      "AdapterStatusResponse": {
+        "properties": {
+          "adapters": {
+            "items": {
+              "$ref": "#/components/schemas/AdapterStatusItem"
+            },
+            "title": "Adapters",
+            "type": "array"
+          }
+        },
+        "required": [
+          "adapters"
+        ],
+        "title": "AdapterStatusResponse",
+        "type": "object"
+      },
       "AppSettingsPatch": {
         "additionalProperties": false,
         "properties": {
+          "adapterPaths": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adapterpaths"
+          },
           "falApiKey": {
             "anyOf": [
               {
@@ -1329,6 +1627,249 @@
         "title": "LtxUpgradeRecommendationResponse",
         "type": "object"
       },
+      "ModelComponentPaths": {
+        "properties": {
+          "audio_vae": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Audio Vae"
+          },
+          "depth_processor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Depth Processor"
+          },
+          "embeddings_connector": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Embeddings Connector"
+          },
+          "ic_lora_hdr": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ic Lora Hdr"
+          },
+          "ic_lora_hdr_scene_embeddings": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ic Lora Hdr Scene Embeddings"
+          },
+          "ic_lora_in_outpainting": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ic Lora In Outpainting"
+          },
+          "ic_lora_ingredients": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ic Lora Ingredients"
+          },
+          "ic_lora_lipdub": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ic Lora Lipdub"
+          },
+          "ic_lora_motion_track": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ic Lora Motion Track"
+          },
+          "ic_lora_union": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ic Lora Union"
+          },
+          "official_adapters": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Official Adapters",
+            "type": "object"
+          },
+          "person_detector": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Person Detector"
+          },
+          "pose_processor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pose Processor"
+          },
+          "text_encoder_format": {
+            "default": "api",
+            "enum": [
+              "hf_folder",
+              "safetensors",
+              "gguf",
+              "api"
+            ],
+            "title": "Text Encoder Format",
+            "type": "string"
+          },
+          "text_encoder_root": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Text Encoder Root"
+          },
+          "text_projection": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Text Projection"
+          },
+          "transformer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transformer"
+          },
+          "transformer_format": {
+            "default": "official_safetensors",
+            "enum": [
+              "official_safetensors",
+              "split_safetensors",
+              "gguf"
+            ],
+            "title": "Transformer Format",
+            "type": "string"
+          },
+          "transformer_quantization": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transformer Quantization"
+          },
+          "upsampler": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upsampler"
+          },
+          "video_vae": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Video Vae"
+          },
+          "vocoder": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vocoder"
+          }
+        },
+        "title": "ModelComponentPaths",
+        "type": "object"
+      },
       "ModelDeleteRequest": {
         "properties": {
           "cp_ids": {
@@ -1408,6 +1949,259 @@
           "sessionId"
         ],
         "title": "ModelDownloadStartResponse",
+        "type": "object"
+      },
+      "ModelProfileActivateResponse": {
+        "properties": {
+          "active_model_profile_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Model Profile Id"
+          },
+          "status": {
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "title": "ModelProfileActivateResponse",
+        "type": "object"
+      },
+      "ModelProfilePatchPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "capabilities": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "t2v",
+                    "i2v",
+                    "a2v",
+                    "retake",
+                    "ic_lora",
+                    "local_text",
+                    "gguf"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capabilities"
+          },
+          "components": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelComponentPaths"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "family": {
+            "anyOf": [
+              {
+                "enum": [
+                  "ltx-2",
+                  "ltx-2.3",
+                  "ltxv2",
+                  "custom"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Family"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "official",
+                  "kijai",
+                  "quantstack",
+                  "custom"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          }
+        },
+        "title": "ModelProfilePatchPayload",
+        "type": "object"
+      },
+      "ModelProfilePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "capabilities": {
+            "items": {
+              "enum": [
+                "t2v",
+                "i2v",
+                "a2v",
+                "retake",
+                "ic_lora",
+                "local_text",
+                "gguf"
+              ],
+              "type": "string"
+            },
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "components": {
+            "$ref": "#/components/schemas/ModelComponentPaths"
+          },
+          "created_at": {
+            "default": "",
+            "title": "Created At",
+            "type": "string"
+          },
+          "family": {
+            "default": "ltx-2.3",
+            "enum": [
+              "ltx-2",
+              "ltx-2.3",
+              "ltxv2",
+              "custom"
+            ],
+            "title": "Family",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "notes": {
+            "default": "",
+            "title": "Notes",
+            "type": "string"
+          },
+          "source": {
+            "default": "official",
+            "enum": [
+              "official",
+              "kijai",
+              "quantstack",
+              "custom"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "updated_at": {
+            "default": "",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "ModelProfilePayload",
+        "type": "object"
+      },
+      "ModelProfileValidationIssuePayload": {
+        "properties": {
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "issue": {
+            "title": "Issue",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field",
+          "issue"
+        ],
+        "title": "ModelProfileValidationIssuePayload",
+        "type": "object"
+      },
+      "ModelProfileValidationResponse": {
+        "properties": {
+          "issues": {
+            "items": {
+              "$ref": "#/components/schemas/ModelProfileValidationIssuePayload"
+            },
+            "title": "Issues",
+            "type": "array"
+          },
+          "valid": {
+            "default": true,
+            "title": "Valid",
+            "type": "boolean"
+          }
+        },
+        "title": "ModelProfileValidationResponse",
+        "type": "object"
+      },
+      "ModelProfilesResponse": {
+        "properties": {
+          "active_model_profile_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Model Profile Id"
+          },
+          "profiles": {
+            "items": {
+              "$ref": "#/components/schemas/ModelProfilePayload"
+            },
+            "title": "Profiles",
+            "type": "array"
+          }
+        },
+        "title": "ModelProfilesResponse",
         "type": "object"
       },
       "ModelStatusItem": {
@@ -2360,6 +3154,455 @@
         "summary": "Route Ic Lora Generate",
         "tags": [
           "ic-lora"
+        ]
+      }
+    },
+    "/api/model-profiles": {
+      "get": {
+        "operationId": "route_list_profiles_api_model_profiles_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelProfilesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPErrorResponse"
+                }
+              }
+            },
+            "description": "Client Error"
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPErrorResponse"
+                }
+              }
+            },
+            "description": "Server Error"
+          }
+        },
+        "summary": "Route List Profiles",
+        "tags": [
+          "model-profiles"
+        ]
+      },
+      "post": {
+        "operationId": "route_create_profile_api_model_profiles_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelProfilePayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelProfilePayload"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPErrorResponse"
+                }
+              }
+            },
+            "description": "Client Error"
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPErrorResponse"
+                }
+              }
+            },
+            "description": "Server Error"
+          }
+        },
+        "summary": "Route Create Profile",
+        "tags": [
+          "model-profiles"
+        ]
+      }
+    },
+    "/api/model-profiles/{profile_id}": {
+      "delete": {
+        "operationId": "route_delete_profile_api_model_profiles__profile_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "profile_id",
+            "required": true,
+            "schema": {
+              "title": "Profile Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPErrorResponse"
+                }
+              }
+            },
+            "description": "Client Error"
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPErrorResponse"
+                }
+              }
+            },
+            "description": "Server Error"
+          }
+        },
+        "summary": "Route Delete Profile",
+        "tags": [
+          "model-profiles"
+        ]
+      },
+      "patch": {
+        "operationId": "route_patch_profile_api_model_profiles__profile_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "profile_id",
+            "required": true,
+            "schema": {
+              "title": "Profile Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelProfilePatchPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelProfilePayload"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPErrorResponse"
+                }
+              }
+            },
+            "description": "Client Error"
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPErrorResponse"
+                }
+              }
+            },
+            "description": "Server Error"
+          }
+        },
+        "summary": "Route Patch Profile",
+        "tags": [
+          "model-profiles"
+        ]
+      }
+    },
+    "/api/model-profiles/{profile_id}/activate": {
+      "post": {
+        "operationId": "route_activate_profile_api_model_profiles__profile_id__activate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "profile_id",
+            "required": true,
+            "schema": {
+              "title": "Profile Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelProfileActivateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPErrorResponse"
+                }
+              }
+            },
+            "description": "Client Error"
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPErrorResponse"
+                }
+              }
+            },
+            "description": "Server Error"
+          }
+        },
+        "summary": "Route Activate Profile",
+        "tags": [
+          "model-profiles"
+        ]
+      }
+    },
+    "/api/model-profiles/{profile_id}/validate": {
+      "post": {
+        "operationId": "route_validate_profile_api_model_profiles__profile_id__validate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "profile_id",
+            "required": true,
+            "schema": {
+              "title": "Profile Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelProfileValidationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPErrorResponse"
+                }
+              }
+            },
+            "description": "Client Error"
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPErrorResponse"
+                }
+              }
+            },
+            "description": "Server Error"
+          }
+        },
+        "summary": "Route Validate Profile",
+        "tags": [
+          "model-profiles"
+        ]
+      }
+    },
+    "/api/models/adapters/recommendation": {
+      "get": {
+        "operationId": "route_adapter_recommendation_api_models_adapters_recommendation_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "pipeline",
+            "required": true,
+            "schema": {
+              "enum": [
+                "fast",
+                "union_control",
+                "motion_track_control",
+                "ingredients",
+                "water_simulation",
+                "decompression",
+                "deblur",
+                "colorization",
+                "day_to_night",
+                "in_outpainting",
+                "instant_shave",
+                "cross_eyed",
+                "hdr",
+                "lipdub"
+              ],
+              "title": "Pipeline",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdapterRecommendationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPErrorResponse"
+                }
+              }
+            },
+            "description": "Client Error"
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPErrorResponse"
+                }
+              }
+            },
+            "description": "Server Error"
+          }
+        },
+        "summary": "Route Adapter Recommendation",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/models/adapters/status": {
+      "get": {
+        "operationId": "route_adapter_status_api_models_adapters_status_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "pipeline",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "fast",
+                    "union_control",
+                    "motion_track_control",
+                    "ingredients",
+                    "water_simulation",
+                    "decompression",
+                    "deblur",
+                    "colorization",
+                    "day_to_night",
+                    "in_outpainting",
+                    "instant_shave",
+                    "cross_eyed",
+                    "hdr",
+                    "lipdub"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Pipeline"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdapterStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPErrorResponse"
+                }
+              }
+            },
+            "description": "Client Error"
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPErrorResponse"
+                }
+              }
+            },
+            "description": "Server Error"
+          }
+        },
+        "summary": "Route Adapter Status",
+        "tags": [
+          "models"
         ]
       }
     },

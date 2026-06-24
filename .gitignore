@@ -89,9 +89,5 @@ python-embed/
 resources/vc_redist.x64.exe
 
 # Pix Agent
-.pi/*
-!.pi/plans/
-!.pi/plans/*.md
-!.pi/subplans/
-!.pi/subplans/*.md
+.pi/
 .pi-lens/

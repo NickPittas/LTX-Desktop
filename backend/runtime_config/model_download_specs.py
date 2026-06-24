@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import assert_never, cast, get_args
 
 from api_types import (
+    AdapterID,
+    AdapterKind,
+    AdapterPipeline,
+    AdapterSource,
     LTXLocalModelId,
     LTXVideoGenDuration,
     LTXVideoGenFps,
@@ -67,6 +71,19 @@ class LTXLocalModelSpec:
     supported_pipelines: tuple[tuple[LTXVideoGenPipeline, LTXVideoGenerationSpec], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class AdapterComponent:
+    id: AdapterID
+    display_name: str
+    kind: AdapterKind
+    source: AdapterSource
+    repo_id: str
+    filename: str
+    expected_size_bytes: int
+    required_for: tuple[AdapterPipeline, ...] = ()
+    optional_for: tuple[AdapterPipeline, ...] = ()
+
+
 def _local_resolution_spec(
     *,
     fps_to_durations: dict[LTXVideoGenFps, tuple[LTXVideoGenDuration, ...]],
@@ -83,6 +100,170 @@ IMG_GEN_MODEL_CP_ID: ModelCheckpointID = "z-image-turbo"
 DEPTH_PROCESSOR_CP_ID: ModelCheckpointID = "dpt-hybrid-midas"
 PERSON_DETECTOR_CP_ID: ModelCheckpointID = "yolox-l-torchscript"
 POSE_PROCESSOR_CP_ID: ModelCheckpointID = "dw-ll-ucoco-384-bs5"
+
+
+OFFICIAL_LTX23_ADAPTERS: dict[AdapterID, AdapterComponent] = {
+    "distilled_lora_384": AdapterComponent(
+        id="distilled_lora_384",
+        display_name="Distilled LoRA 384",
+        kind="distilled_lora",
+        source="official",
+        repo_id="Lightricks/LTX-2.3",
+        filename="ltx-2.3-22b-distilled-lora-384.safetensors",
+        expected_size_bytes=7_080_000_000,
+        optional_for=("fast",),
+    ),
+    "distilled_lora_384_1_1": AdapterComponent(
+        id="distilled_lora_384_1_1",
+        display_name="Distilled LoRA 384 v1.1",
+        kind="distilled_lora",
+        source="official",
+        repo_id="Lightricks/LTX-2.3",
+        filename="ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+        expected_size_bytes=7_080_000_000,
+        optional_for=("fast",),
+    ),
+    "union_control": AdapterComponent(
+        id="union_control",
+        display_name="Union Control",
+        kind="ic_lora",
+        source="official",
+        repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control",
+        filename="ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors",
+        expected_size_bytes=310_000_000,
+        required_for=("union_control",),
+    ),
+    "motion_track_control": AdapterComponent(
+        id="motion_track_control",
+        display_name="Motion Track Control",
+        kind="ic_lora",
+        source="official",
+        repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Motion-Track-Control",
+        filename="ltx-2.3-22b-ic-lora-motion-track-control-ref0.5.safetensors",
+        expected_size_bytes=310_000_000,
+        required_for=("motion_track_control",),
+    ),
+    "ingredients": AdapterComponent(
+        id="ingredients",
+        display_name="Ingredients",
+        kind="ic_lora",
+        source="official",
+        repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Ingredients",
+        filename="ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors",
+        expected_size_bytes=624_100_000,
+        required_for=("ingredients",),
+    ),
+    "water_simulation": AdapterComponent(
+        id="water_simulation",
+        display_name="Water Simulation",
+        kind="ic_lora",
+        source="official",
+        repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Water-Simulation",
+        filename="ltx-2.3-22b-ic-lora-water-simulation-0.9.safetensors",
+        expected_size_bytes=624_100_000,
+        required_for=("water_simulation",),
+    ),
+    "decompression": AdapterComponent(
+        id="decompression",
+        display_name="Decompression",
+        kind="ic_lora",
+        source="official",
+        repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Decompression",
+        filename="ltx-2.3-22b-ic-lora-decompression-0.9.safetensors",
+        expected_size_bytes=312_100_000,
+        required_for=("decompression",),
+    ),
+    "deblur": AdapterComponent(
+        id="deblur",
+        display_name="Deblur",
+        kind="ic_lora",
+        source="official",
+        repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Deblur",
+        filename="ltx-2.3-22b-ic-lora-deblur-0.9.safetensors",
+        expected_size_bytes=312_100_000,
+        required_for=("deblur",),
+    ),
+    "colorization": AdapterComponent(
+        id="colorization",
+        display_name="Colorization",
+        kind="ic_lora",
+        source="official",
+        repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Colorization",
+        filename="ltx-2.3-22b-ic-lora-colorization-0.9.safetensors",
+        expected_size_bytes=312_100_000,
+        required_for=("colorization",),
+    ),
+    "day_to_night": AdapterComponent(
+        id="day_to_night",
+        display_name="Day to Night",
+        kind="ic_lora",
+        source="official",
+        repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Day-To-Night",
+        filename="ltx-2.3-22b-ic-lora-day-to-night-0.9.safetensors",
+        expected_size_bytes=312_100_000,
+        required_for=("day_to_night",),
+    ),
+    "in_outpainting": AdapterComponent(
+        id="in_outpainting",
+        display_name="In/Outpainting",
+        kind="ic_lora",
+        source="official",
+        repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-In-Outpainting",
+        filename="ltx-2.3-22b-ic-lora-in-outpainting-0.9.safetensors",
+        expected_size_bytes=624_100_000,
+        required_for=("in_outpainting",),
+    ),
+    "instant_shave": AdapterComponent(
+        id="instant_shave",
+        display_name="Instant Shave",
+        kind="ic_lora",
+        source="official",
+        repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Instant-Shave",
+        filename="ltx-2.3-22b-ic-lora-instant-shave-0.9.safetensors",
+        expected_size_bytes=624_100_000,
+        required_for=("instant_shave",),
+    ),
+    "cross_eyed": AdapterComponent(
+        id="cross_eyed",
+        display_name="Cross Eyed",
+        kind="ic_lora",
+        source="official",
+        repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Cross-Eyed",
+        filename="ltx-2.3-22b-ic-lora-cross-eyed-0.9.safetensors",
+        expected_size_bytes=312_100_000,
+        required_for=("cross_eyed",),
+    ),
+    "hdr": AdapterComponent(
+        id="hdr",
+        display_name="HDR",
+        kind="ic_lora",
+        source="official",
+        repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-HDR",
+        filename="ltx-2.3-22b-ic-lora-hdr-0.9.safetensors",
+        expected_size_bytes=312_100_000,
+        required_for=("hdr",),
+    ),
+    "hdr_scene_embeddings": AdapterComponent(
+        id="hdr_scene_embeddings",
+        display_name="HDR Scene Embeddings",
+        kind="embeddings",
+        source="official",
+        repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-HDR",
+        filename="ltx-2.3-22b-ic-lora-hdr-scene-emb.safetensors",
+        expected_size_bytes=12_000_000,
+        required_for=("hdr",),
+    ),
+    "lipdub": AdapterComponent(
+        id="lipdub",
+        display_name="LipDub",
+        kind="ic_lora",
+        source="official",
+        repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-LipDub",
+        filename="ltx-2.3-22b-ic-lora-lipdub-0.9.safetensors",
+        expected_size_bytes=2_352_400_000,
+        required_for=("lipdub",),
+    ),
+}
 
 
 def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:

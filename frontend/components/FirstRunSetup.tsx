@@ -13,7 +13,7 @@ interface LaunchGateProps {
   onAcceptLicense?: () => Promise<void>
 }
 
-type Step = 'license' | 'location' | 'installing' | 'complete'
+type Step = 'license' | 'source' | 'location' | 'installing' | 'complete'
 type StartModelDownloadBody = NonNullable<ApiRequestBodyOf<'startModelDownload'>>
 type ModelCheckpointID = NonNullable<StartModelDownloadBody['cp_ids']>[number]
 type LtxRecommendation = ApiSuccessOf<'getLtxRecommendation'>
@@ -78,7 +78,7 @@ export function LaunchGate({
   onComplete,
   onAcceptLicense,
 }: LaunchGateProps) {
-  const [currentStep, setCurrentStep] = useState<Step>(showLicenseStep ? 'license' : 'location')
+  const [currentStep, setCurrentStep] = useState<Step>(showLicenseStep ? 'license' : 'source')
   const [installPath, setInstallPath] = useState('')
   const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null)
   const [downloadError, setDownloadError] = useState<string | null>(null)
@@ -321,7 +321,7 @@ export function LaunchGate({
           await onComplete()
           return
         }
-        setCurrentStep('location')
+        setCurrentStep('source')
       } catch (e) {
         setActionError(e instanceof Error ? e.message : 'Failed to accept license.')
       } finally {
@@ -538,6 +538,41 @@ export function LaunchGate({
                   />
                   <span>I have read and agree to the LTX-2 Community License Agreement</span>
                 </label>
+              </div>
+            </div>
+          )}
+
+          {/* Step 1b: Choose Source */}
+          {currentStep === 'source' && (
+            <div style={{ animation: 'fadeIn 0.25s ease', overflowY: 'auto', flex: 1, minHeight: 0 }}>
+              <h2 style={{ fontFamily: "'Miriam Libre', serif", fontSize: 24, fontWeight: 700, marginBottom: 6 }}>
+                Choose How to Use LTX Desktop
+              </h2>
+              <p style={{ color: '#a0a0a0', fontSize: 14, marginBottom: 16 }}>
+                Select your model source. You can change this later in Settings.
+              </p>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div
+                  onClick={() => setCurrentStep('location')}
+                  style={{ background: '#2e3445', borderRadius: 12, padding: '14px 18px', cursor: 'pointer' }}
+                >
+                  <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 2 }}>Download Official Models</div>
+                  <div style={{ color: '#a0a0a0', fontSize: 12 }}>Download and install recommended LTX models automatically.</div>
+                </div>
+                <div
+                  onClick={() => setCurrentStep('complete')}
+                  style={{ background: '#2e3445', borderRadius: 12, padding: '14px 18px', cursor: 'pointer' }}
+                >
+                  <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 2 }}>Use Local Model Files</div>
+                  <div style={{ color: '#a0a0a0', fontSize: 12 }}>Point to existing model files on your machine. Requires manual setup.</div>
+                </div>
+                <div
+                  onClick={() => setCurrentStep('complete')}
+                  style={{ background: '#2e3445', borderRadius: 12, padding: '14px 18px', cursor: 'pointer' }}
+                >
+                  <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 2 }}>Use API Only</div>
+                  <div style={{ color: '#a0a0a0', fontSize: 12 }}>Generate using cloud API. No local models needed.</div>
+                </div>
               </div>
             </div>
           )}
@@ -1040,7 +1075,7 @@ export function LaunchGate({
 
           <div style={{ display: 'flex', gap: 10 }}>
             {/* Next/Install/Finish Button */}
-            {currentStep !== 'installing' && (
+            {currentStep !== 'installing' && currentStep !== 'source' && (
               <button
                 onClick={() => void handleNext()}
                 disabled={isNextDisabled()}

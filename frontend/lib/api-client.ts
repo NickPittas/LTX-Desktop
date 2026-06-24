@@ -1,4 +1,4 @@
-import { backendFetch } from './backend'
+import { backendAdminFetch, backendFetch } from './backend'
 import type { components, paths } from '../generated/backend-openapi'
 
 type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete'
@@ -220,12 +220,13 @@ async function requestEndpointResult<
   exactErrorStatuses: TExactStatuses,
   init?: RequestInit,
   requestPath?: string,
+  fetcher: typeof backendFetch = backendFetch,
 ): Promise<EndpointResult<TPath, TMethod, TExactStatuses>> {
   const path = requestPath ?? String(endpoint)
 
   let response: Response
   try {
-    response = await backendFetch(path, {
+    response = await fetcher(path, {
       method: method.toUpperCase(),
       ...init,
     })
@@ -303,9 +304,11 @@ export function makeEndpointClient<
   method: TMethod,
   config?: {
     exactErrorStatuses?: TExactStatuses
+    admin?: boolean
   },
 ) {
   const exactErrorStatuses = (config?.exactErrorStatuses ?? []) as TExactStatuses
+  const fetcher = config?.admin ? backendAdminFetch : backendFetch
 
   return (
     body?: JsonBodyFor<TPath, TMethod>,
@@ -315,7 +318,7 @@ export function makeEndpointClient<
     const requestInit = body === undefined
       ? init
       : buildJsonRequestInit(body, init)
-    return requestEndpointResult(endpoint, method, exactErrorStatuses, requestInit, requestPath)
+    return requestEndpointResult(endpoint, method, exactErrorStatuses, requestInit, requestPath, fetcher)
   }
 }
 
@@ -329,7 +332,72 @@ export class ApiClient {
     return requestEndpointResult('/api/models/download/progress', 'get', [] as const, undefined, path)
   }
 
-  
+  static getModelProfiles = makeEndpointClient('/api/model-profiles', 'get', { admin: true })
+
+  static createModelProfile = makeEndpointClient('/api/model-profiles', 'post', { admin: true })
+
+  static patchModelProfile(
+    profileId: string,
+    body: JsonBodyFor<'/api/model-profiles/{profile_id}', 'patch'>,
+  ): Promise<EndpointResult<'/api/model-profiles/{profile_id}', 'patch'>> {
+    const path = `/api/model-profiles/${encodeURIComponent(profileId)}`
+    return requestEndpointResult(
+      '/api/model-profiles/{profile_id}',
+      'patch',
+      [] as const,
+      buildJsonRequestInit(body),
+      path,
+      backendAdminFetch,
+    )
+  }
+
+  static deleteModelProfile(profileId: string): Promise<EndpointResult<'/api/model-profiles/{profile_id}', 'delete'>> {
+    const path = `/api/model-profiles/${encodeURIComponent(profileId)}`
+    return requestEndpointResult('/api/model-profiles/{profile_id}', 'delete', [] as const, undefined, path, backendAdminFetch)
+  }
+
+  static validateModelProfile(
+    profileId: string,
+  ): Promise<EndpointResult<'/api/model-profiles/{profile_id}/validate', 'post'>> {
+    const path = `/api/model-profiles/${encodeURIComponent(profileId)}/validate`
+    return requestEndpointResult(
+      '/api/model-profiles/{profile_id}/validate',
+      'post',
+      [] as const,
+      undefined,
+      path,
+      backendAdminFetch,
+    )
+  }
+
+  static activateModelProfile(
+    profileId: string,
+  ): Promise<EndpointResult<'/api/model-profiles/{profile_id}/activate', 'post'>> {
+    const path = `/api/model-profiles/${encodeURIComponent(profileId)}/activate`
+    return requestEndpointResult(
+      '/api/model-profiles/{profile_id}/activate',
+      'post',
+      [] as const,
+      undefined,
+      path,
+      backendAdminFetch,
+    )
+  }
+
+  static getAdapterStatus(
+    query?: QueryFor<'/api/models/adapters/status', 'get'>,
+  ): Promise<EndpointResult<'/api/models/adapters/status', 'get'>> {
+    const path = `/api/models/adapters/status${buildQueryString((query ?? {}) as Record<string, unknown>)}`
+    return requestEndpointResult('/api/models/adapters/status', 'get', [] as const, undefined, path, backendAdminFetch)
+  }
+
+  static getAdapterRecommendation(
+    query: QueryFor<'/api/models/adapters/recommendation', 'get'>,
+  ): Promise<EndpointResult<'/api/models/adapters/recommendation', 'get'>> {
+    const path = `/api/models/adapters/recommendation${buildQueryString(query as Record<string, unknown>)}`
+    return requestEndpointResult('/api/models/adapters/recommendation', 'get', [] as const, undefined, path, backendAdminFetch)
+  }
+
   static getLtxRecommendation = makeEndpointClient('/api/models/ltx-recommendation', 'get')
 
   static getImgGenRecommendation = makeEndpointClient('/api/models/img-gen-recommendation', 'get')

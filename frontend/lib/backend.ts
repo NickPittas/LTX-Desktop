@@ -16,6 +16,18 @@ export async function backendFetch(path: string, init?: RequestInit): Promise<Re
   return fetch(`${url}${path}`, { ...init, headers })
 }
 
+export async function backendAdminFetch(path: string, init?: RequestInit): Promise<Response> {
+  const headers: Record<string, string> = {}
+  new Headers(init?.headers).forEach((value, key) => { headers[key] = value })
+  const result = await window.electronAPI.backendAdminRequest({
+    path,
+    method: (init?.method ?? 'GET').toUpperCase() as 'GET' | 'POST' | 'PATCH' | 'DELETE',
+    headers,
+    body: typeof init?.body === 'string' ? init.body : undefined,
+  })
+  return new Response(result.body, { status: result.status, statusText: result.statusText })
+}
+
 export async function backendWsUrl(path: string): Promise<string> {
   const { url, token } = await getBackendCredentials()
   const ws = url.replace('http://', 'ws://')
