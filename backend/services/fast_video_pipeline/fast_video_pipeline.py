@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, ClassVar, Literal, Protocol
 from api_types import ImageConditioningInput
 
 if TYPE_CHECKING:
+    from services.ltx_components import CheckpointPath
     import torch
 
 
@@ -15,7 +16,7 @@ class FastVideoPipeline(Protocol):
 
     @staticmethod
     def create(
-        checkpoint_path: str,
+        checkpoint_path: CheckpointPath,
         gemma_root: str | None,
         upsampler_path: str,
         device: torch.device,

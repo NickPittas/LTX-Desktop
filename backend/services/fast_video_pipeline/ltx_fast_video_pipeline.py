@@ -9,6 +9,7 @@ from typing import Final, cast
 import torch
 
 from api_types import ImageConditioningInput
+from services.ltx_components import CheckpointPath
 from services.ltx_pipeline_common import default_tiling_config, encode_video_output, video_chunks_number
 from services.services_utils import AudioOrNone, TilingConfigType, device_supports_fp8
 
@@ -18,7 +19,7 @@ class LTXFastVideoPipeline:
 
     @staticmethod
     def create(
-        checkpoint_path: str,
+        checkpoint_path: CheckpointPath,
         gemma_root: str | None,
         upsampler_path: str,
         device: torch.device,
@@ -34,7 +35,7 @@ class LTXFastVideoPipeline:
 
     def __init__(
         self,
-        checkpoint_path: str,
+        checkpoint_path: CheckpointPath,
         gemma_root: str | None,
         upsampler_path: str,
         device: torch.device,
@@ -51,7 +52,7 @@ class LTXFastVideoPipeline:
         self._quantization = QuantizationPolicy.fp8_cast() if device_supports_fp8(device) else None
 
         self.pipeline = DistilledPipeline(
-            distilled_checkpoint_path=checkpoint_path,
+            distilled_checkpoint_path=checkpoint_path,  # type: ignore[arg-type]  # ponytail: ltx_pipelines accepts tuple per M5 spec
             gemma_root=cast(str, gemma_root),
             spatial_upsampler_path=upsampler_path,
             loras=[],
@@ -136,7 +137,7 @@ class LTXFastVideoPipeline:
         from ltx_pipelines.distilled import DistilledPipeline
 
         self.pipeline = DistilledPipeline(
-            distilled_checkpoint_path=self._checkpoint_path,
+            distilled_checkpoint_path=self._checkpoint_path,  # type: ignore[arg-type]  # ponytail: ltx_pipelines accepts tuple per M5 spec
             gemma_root=cast(str, self._gemma_root),
             spatial_upsampler_path=self._upsampler_path,
             loras=[],

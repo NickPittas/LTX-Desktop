@@ -7,13 +7,14 @@ from typing import TYPE_CHECKING, Protocol
 from api_types import ImageConditioningInput
 
 if TYPE_CHECKING:
+    from services.ltx_components import CheckpointPath
     import torch
 
 
 class IcLoraPipeline(Protocol):
     @staticmethod
     def create(
-        checkpoint_path: str,
+        checkpoint_path: CheckpointPath,
         gemma_root: str | None,
         upsampler_path: str,
         lora_path: str,

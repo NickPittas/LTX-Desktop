@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
+    from services.ltx_components import CheckpointPath
     import torch
     from ltx_core.components.guiders import MultiModalGuiderParams
     from ltx_core.loader import LoraPathStrengthAndSDOps
@@ -14,7 +15,7 @@ if TYPE_CHECKING:
 class RetakePipeline(Protocol):
     @staticmethod
     def create(
-        checkpoint_path: str,
+        checkpoint_path: CheckpointPath,
         gemma_root: str | None,
         device: "torch.device",
         streaming_prefetch_count: int | None,

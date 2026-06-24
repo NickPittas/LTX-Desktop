@@ -8,6 +8,7 @@ from typing import cast
 import torch
 
 from api_types import ImageConditioningInput
+from services.ltx_components import CheckpointPath
 from services.ltx_pipeline_common import default_tiling_config, encode_video_output, video_chunks_number
 from services.services_utils import AudioOrNone, TilingConfigType, device_supports_fp8
 
@@ -15,7 +16,7 @@ from services.services_utils import AudioOrNone, TilingConfigType, device_suppor
 class LTXa2vPipeline:
     @staticmethod
     def create(
-        checkpoint_path: str,
+        checkpoint_path: CheckpointPath,
         gemma_root: str | None,
         upsampler_path: str,
         device: torch.device,
@@ -31,7 +32,7 @@ class LTXa2vPipeline:
 
     def __init__(
         self,
-        checkpoint_path: str,
+        checkpoint_path: CheckpointPath,
         gemma_root: str | None,
         upsampler_path: str,
         device: torch.device,
@@ -43,7 +44,7 @@ class LTXa2vPipeline:
 
         self._streaming_prefetch_count = streaming_prefetch_count
         self.pipeline = DistilledA2VPipeline(
-            distilled_checkpoint_path=checkpoint_path,
+            distilled_checkpoint_path=checkpoint_path,  # type: ignore[arg-type]  # ponytail: ltx_pipelines accepts tuple per M5 spec
             gemma_root=cast(str, gemma_root),
             spatial_upsampler_path=upsampler_path,
             device=device,

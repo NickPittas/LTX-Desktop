@@ -93,7 +93,7 @@ def _patched_load(
     size = 0
     dtype: set[torch.dtype] = set()
     device = device or torch.device("cpu")
-    model_paths = path if isinstance(path, list) else [path]
+    model_paths = path if isinstance(path, (list, tuple)) else [path]
     for shard_path in model_paths:
         tensors = _load_safetensors_direct(shard_path)
         for name, value in tensors.items():

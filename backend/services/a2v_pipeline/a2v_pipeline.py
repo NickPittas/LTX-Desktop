@@ -7,13 +7,14 @@ from typing import TYPE_CHECKING, Protocol
 from api_types import ImageConditioningInput
 
 if TYPE_CHECKING:
+    from services.ltx_components import CheckpointPath
     import torch
 
 
 class A2VPipeline(Protocol):
     @staticmethod
     def create(
-        checkpoint_path: str,
+        checkpoint_path: CheckpointPath,
         gemma_root: str | None,
         upsampler_path: str,
         device: torch.device,

@@ -10,6 +10,7 @@ from typing import Literal
 
 from api_types import ModelProfilePayload
 
+CheckpointPath = str | tuple[str, ...]
 TransformerFormat = Literal["safetensors", "gguf"]
 
 

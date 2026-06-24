@@ -8,6 +8,7 @@ from typing import cast
 import torch
 
 from api_types import ImageConditioningInput
+from services.ltx_components import CheckpointPath
 from services.ltx_pipeline_common import default_tiling_config, encode_video_output, video_chunks_number
 from services.services_utils import AudioOrNone, TilingConfigType, device_supports_fp8
 
@@ -15,7 +16,7 @@ from services.services_utils import AudioOrNone, TilingConfigType, device_suppor
 class LTXIcLoraPipeline:
     @staticmethod
     def create(
-        checkpoint_path: str,
+        checkpoint_path: CheckpointPath,
         gemma_root: str | None,
         upsampler_path: str,
         lora_path: str,
@@ -33,7 +34,7 @@ class LTXIcLoraPipeline:
 
     def __init__(
         self,
-        checkpoint_path: str,
+        checkpoint_path: CheckpointPath,
         gemma_root: str | None,
         upsampler_path: str,
         lora_path: str,
@@ -48,7 +49,7 @@ class LTXIcLoraPipeline:
         self._streaming_prefetch_count = streaming_prefetch_count
         lora_entry = LoraPathStrengthAndSDOps(path=lora_path, strength=1.0, sd_ops=LTXV_LORA_COMFY_RENAMING_MAP)
         self.pipeline = ICLoraPipeline(
-            distilled_checkpoint_path=checkpoint_path,
+            distilled_checkpoint_path=checkpoint_path,  # type: ignore[arg-type]  # ponytail: ltx_pipelines accepts tuple per M5 spec
             spatial_upsampler_path=upsampler_path,
             gemma_root=cast(str, gemma_root),
             loras=[lora_entry],

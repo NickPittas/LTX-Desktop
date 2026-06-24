@@ -24,6 +24,7 @@ from ltx_core.quantization import QuantizationPolicy
 from ltx_core.types import Audio
 from ltx_pipelines.utils.media_io import encode_video, get_videostream_metadata
 
+from services.ltx_components import CheckpointPath
 from services.retake_pipeline.retake_pipeline import RetakePipeline
 
 
@@ -31,7 +32,7 @@ from services.retake_pipeline.retake_pipeline import RetakePipeline
 class LTXRetakePipeline:
     @staticmethod
     def create(
-        checkpoint_path: str,
+        checkpoint_path: CheckpointPath,
         gemma_root: str | None,
         device: torch.device,
         streaming_prefetch_count: int | None,
@@ -50,7 +51,7 @@ class LTXRetakePipeline:
 
     def __init__(
         self,
-        checkpoint_path: str,
+        checkpoint_path: CheckpointPath,
         gemma_root: str | None,
         device: torch.device,
         streaming_prefetch_count: int | None,
@@ -72,35 +73,35 @@ class LTXRetakePipeline:
         self._streaming_prefetch_count = streaming_prefetch_count
 
         self.prompt_encoder = PromptEncoder(
-            checkpoint_path=checkpoint_path,
+            checkpoint_path=checkpoint_path,  # type: ignore[arg-type]  # ponytail: ltx_pipelines accepts tuple per M5 spec
             gemma_root=gemma_root or "",
             dtype=self.dtype,
             device=device,
         )
         self.image_conditioner = ImageConditioner(
-            checkpoint_path=checkpoint_path,
+            checkpoint_path=checkpoint_path,  # type: ignore[arg-type]
             dtype=self.dtype,
             device=device,
         )
         self.audio_conditioner = AudioConditioner(
-            checkpoint_path=checkpoint_path,
+            checkpoint_path=checkpoint_path,  # type: ignore[arg-type]
             dtype=self.dtype,
             device=device,
         )
         self.stage = DiffusionStage(
-            checkpoint_path=checkpoint_path,
+            checkpoint_path=checkpoint_path,  # type: ignore[arg-type]
             dtype=self.dtype,
             device=device,
             loras=tuple(loras),
             quantization=quantization,
         )
         self.video_decoder = VideoDecoder(
-            checkpoint_path=checkpoint_path,
+            checkpoint_path=checkpoint_path,  # type: ignore[arg-type]
             dtype=self.dtype,
             device=device,
         )
         self.audio_decoder = AudioDecoder(
-            checkpoint_path=checkpoint_path,
+            checkpoint_path=checkpoint_path,  # type: ignore[arg-type]
             dtype=self.dtype,
             device=device,
         )

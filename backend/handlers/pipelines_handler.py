@@ -17,7 +17,7 @@ from runtime_config.model_download_specs import (
     get_ltx_model_spec,
 )
 from runtime_config.runtime_policy import streaming_prefetch_count_for_mode
-from services.ltx_components import ResolvedLtxComponents, resolve_components
+from services.ltx_components import ResolvedLtxComponents, checkpoint_path_arg, resolve_components
 from services.interfaces import (
     A2VPipeline,
     DepthProcessorPipeline,
@@ -151,20 +151,28 @@ class PipelinesHandler(StateHandlerBase):
             logger.warning("Failed to compile transformer: %s", exc, exc_info=True)
         return state
 
-    def _create_video_pipeline(self, model_type: VideoPipelineModelType) -> VideoPipelineState:
+    def _resolve_checkpoint_paths(self):
+        """Return (checkpoint_path, gemma_root, upsampler_path, cache_key)."""
         components = self._resolve_active_components()
         gemma_root = self._text_handler.resolve_gemma_root()
-
         if components is not None:
-            checkpoint_path = components.transformer_path
-            upsampler_path = components.upsampler_path or ""
-            cache_key = components.cache_key
-        else:
-            model_id = self._require_downloaded_ltx_model_id()
-            spec = get_ltx_model_spec(model_id)
-            checkpoint_path = str(get_existing_cp_path(self.models_dir, spec.model_cp))
-            upsampler_path = str(get_existing_cp_path(self.models_dir, spec.upscale_cp))
-            cache_key = (model_id,)
+            return (
+                checkpoint_path_arg(components),
+                components.gemma_root or gemma_root,
+                components.upsampler_path or "",
+                components.cache_key,
+            )
+        model_id = self._require_downloaded_ltx_model_id()
+        spec = get_ltx_model_spec(model_id)
+        return (
+            str(get_existing_cp_path(self.models_dir, spec.model_cp)),
+            gemma_root,
+            str(get_existing_cp_path(self.models_dir, spec.upscale_cp)),
+            (model_id,),
+        )
+
+    def _create_video_pipeline(self, model_type: VideoPipelineModelType) -> VideoPipelineState:
+        checkpoint_path, gemma_root, upsampler_path, cache_key = self._resolve_checkpoint_paths()
 
         pipeline = self._fast_video_pipeline_class.create(
             checkpoint_path,
@@ -313,13 +321,12 @@ class PipelinesHandler(StateHandlerBase):
                     pass
 
         self._evict_gpu_pipeline_for_swap()
-        model_id = self._require_downloaded_ltx_model_id()
-        model_spec = get_ltx_model_spec(model_id)
+        checkpoint_path, gemma_root, upsampler_path, _cache_key = self._resolve_checkpoint_paths()
 
         pipeline = self._ic_lora_pipeline_class.create(
-            str(get_existing_cp_path(self.models_dir, model_spec.model_cp)),
-            self._text_handler.resolve_gemma_root(),
-            str(get_existing_cp_path(self.models_dir, model_spec.upscale_cp)),
+            checkpoint_path,
+            gemma_root,
+            upsampler_path,
             lora_path,
             self.config.device,
             streaming_prefetch_count_for_mode(self.config.local_generations_mode),
@@ -348,13 +355,12 @@ class PipelinesHandler(StateHandlerBase):
                     pass
 
         self._evict_gpu_pipeline_for_swap()
-        model_id = self._require_downloaded_ltx_model_id()
-        model_spec = get_ltx_model_spec(model_id)
+        checkpoint_path, gemma_root, upsampler_path, _cache_key = self._resolve_checkpoint_paths()
 
         pipeline = self._a2v_pipeline_class.create(
-            str(get_existing_cp_path(self.models_dir, model_spec.model_cp)),
-            self._text_handler.resolve_gemma_root(),
-            str(get_existing_cp_path(self.models_dir, model_spec.upscale_cp)),
+            checkpoint_path,
+            gemma_root,
+            upsampler_path,
             self.config.device,
             streaming_prefetch_count_for_mode(self.config.local_generations_mode),
         )
@@ -384,11 +390,10 @@ class PipelinesHandler(StateHandlerBase):
         from ltx_core.quantization import QuantizationPolicy
 
         quantization = QuantizationPolicy.fp8_cast() if quantized else None
-        model_id = self._require_downloaded_ltx_model_id()
-        model_spec = get_ltx_model_spec(model_id)
+        checkpoint_path, gemma_root, _upsampler_path, _cache_key = self._resolve_checkpoint_paths()
         pipeline = self._retake_pipeline_class.create(
-            checkpoint_path=str(get_existing_cp_path(self.models_dir, model_spec.model_cp)),
-            gemma_root=self._text_handler.resolve_gemma_root(),
+            checkpoint_path=checkpoint_path,
+            gemma_root=gemma_root,
             device=self.config.device,
             streaming_prefetch_count=streaming_prefetch_count_for_mode(self.config.local_generations_mode),
             loras=[],

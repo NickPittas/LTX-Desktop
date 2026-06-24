@@ -9,6 +9,7 @@ from typing import Any, ClassVar
 
 from PIL import Image
 from api_types import ImageConditioningInput, VideoCameraMotion
+from services.ltx_components import CheckpointPath
 from services.interfaces import VideoInfoPayload
 from services.ltx_api_client.ltx_api_client import LTXRetakeResult
 from tests.fakes.fake_gpu_info import FakeGpuInfo
@@ -457,6 +458,7 @@ class _FakeVideoPipelineBase:
         self.warmup_calls: list[dict[str, Any]] = []
         self.compile_calls = 0
         self.raise_on_generate: Exception | None = None
+        self.last_checkpoint_path: CheckpointPath | None = None
 
     def _record_generate(self, payload: dict[str, Any]) -> None:
         self.generate_calls.append(payload)
@@ -488,16 +490,16 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
 
     @staticmethod
     def create(
-        checkpoint_path: str,
+        checkpoint_path: CheckpointPath,
         gemma_root: str | None,
         upsampler_path: str,
         device: str | object,
         streaming_prefetch_count: int | None,
     ) -> "FakeFastVideoPipeline":
-        del checkpoint_path, gemma_root, upsampler_path, device, streaming_prefetch_count
         pipeline = FakeFastVideoPipeline._singleton
         if pipeline is None:
             raise RuntimeError("FakeFastVideoPipeline singleton is not bound")
+        pipeline.last_checkpoint_path = checkpoint_path
         return pipeline
 
     def generate(
@@ -574,22 +576,23 @@ class FakeIcLoraPipeline:
 
     @staticmethod
     def create(
-        checkpoint_path: str,
+        checkpoint_path: CheckpointPath,
         gemma_root: str | None,
         upsampler_path: str,
         lora_path: str,
         device: str | object,
         streaming_prefetch_count: int | None,
     ) -> "FakeIcLoraPipeline":
-        del checkpoint_path, gemma_root, upsampler_path, lora_path, device, streaming_prefetch_count
         pipeline = FakeIcLoraPipeline._singleton
         if pipeline is None:
             raise RuntimeError("FakeIcLoraPipeline singleton is not bound")
+        pipeline.last_checkpoint_path = checkpoint_path
         return pipeline
 
     def __init__(self) -> None:
         self.generate_calls: list[dict[str, Any]] = []
         self.raise_on_generate: Exception | None = None
+        self.last_checkpoint_path: CheckpointPath | None = None
 
     def generate(self, **kwargs: Any) -> None:
         self.generate_calls.append(kwargs)
@@ -663,21 +666,22 @@ class FakeA2VPipeline:
 
     @staticmethod
     def create(
-        checkpoint_path: str,
+        checkpoint_path: CheckpointPath,
         gemma_root: str | None,
         upsampler_path: str,
         device: str | object,
         streaming_prefetch_count: int | None,
     ) -> "FakeA2VPipeline":
-        del checkpoint_path, gemma_root, upsampler_path, device, streaming_prefetch_count
         pipeline = FakeA2VPipeline._singleton
         if pipeline is None:
             raise RuntimeError("FakeA2VPipeline singleton is not bound")
+        pipeline.last_checkpoint_path = checkpoint_path
         return pipeline
 
     def __init__(self) -> None:
         self.generate_calls: list[dict[str, Any]] = []
         self.raise_on_generate: Exception | None = None
+        self.last_checkpoint_path: CheckpointPath | None = None
 
     def generate(self, **kwargs: Any) -> None:
         self.generate_calls.append(kwargs)
@@ -698,7 +702,7 @@ class FakeRetakePipeline:
 
     @staticmethod
     def create(
-        checkpoint_path: str,
+        checkpoint_path: CheckpointPath,
         gemma_root: str | None,
         device: str | object,
         streaming_prefetch_count: int | None,
@@ -706,15 +710,16 @@ class FakeRetakePipeline:
         loras: list[object] | None = None,
         quantization: object | None = None,
     ) -> "FakeRetakePipeline":
-        del checkpoint_path, gemma_root, device, streaming_prefetch_count, loras, quantization
         pipeline = FakeRetakePipeline._singleton
         if pipeline is None:
             raise RuntimeError("FakeRetakePipeline singleton is not bound")
+        pipeline.last_checkpoint_path = checkpoint_path
         return pipeline
 
     def __init__(self) -> None:
         self.generate_calls: list[dict[str, Any]] = []
         self.raise_on_generate: Exception | None = None
+        self.last_checkpoint_path: CheckpointPath | None = None
 
     def generate(self, **kwargs: Any) -> None:
         self.generate_calls.append(kwargs)

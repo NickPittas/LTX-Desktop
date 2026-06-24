@@ -20,9 +20,21 @@ import json
 import struct
 
 
-def _read_safetensors_metadata(path: str) -> dict[str, str] | None:
+def _first_checkpoint_path(path: str | tuple[str, ...] | list[str]) -> str:
+    """Extract first checkpoint path from str, tuple, or list of shards."""
+    if isinstance(path, str):
+        return path
+    if isinstance(path, (tuple, list)):
+        if not path:
+            raise ValueError("Checkpoint path sequence is empty")
+        return path[0]
+    raise TypeError(f"Expected str, tuple, or list, got {type(path).__name__}")
+
+
+def _read_safetensors_metadata(path: str | tuple[str, ...] | list[str]) -> dict[str, str] | None:
     """Read metadata from a safetensors file header without mmap."""
-    with open(path, "rb") as f:
+    resolved = _first_checkpoint_path(path)
+    with open(resolved, "rb") as f:
         header_size = struct.unpack("<Q", f.read(8))[0]
         header = json.loads(f.read(header_size).decode("utf-8"))
     return header.get("__metadata__")
@@ -33,7 +45,7 @@ def _read_safetensors_metadata(path: str) -> dict[str, str] | None:
 from ltx_core.loader.sft_loader import SafetensorsModelStateDictLoader
 
 
-def _patched_model_metadata(self: SafetensorsModelStateDictLoader, path: str) -> dict:
+def _patched_model_metadata(self: SafetensorsModelStateDictLoader, path: str | tuple[str, ...] | list[str]) -> dict:
     meta = _read_safetensors_metadata(path)
     if meta is None or "config" not in meta:
         return {}
@@ -75,7 +87,7 @@ import ltx_pipelines.utils.constants as _constants_module
 _original_detect_params = _constants_module.detect_params
 
 
-def _patched_detect_params(checkpoint_path: str) -> object:
+def _patched_detect_params(checkpoint_path: str | tuple[str, ...] | list[str]) -> object:
     import logging
     logger = logging.getLogger(__name__)
 
@@ -104,7 +116,7 @@ _constants_module.detect_params = _patched_detect_params
 from services.text_encoder.ltx_text_encoder import LTXTextEncoder
 
 
-def _patched_get_model_id_from_checkpoint(self: LTXTextEncoder, checkpoint_path: str) -> str | None:
+def _patched_get_model_id_from_checkpoint(self: LTXTextEncoder, checkpoint_path: str | tuple[str, ...] | list[str]) -> str | None:
     try:
         meta = _read_safetensors_metadata(checkpoint_path) or {}
         if "encrypted_wandb_properties" in meta:
