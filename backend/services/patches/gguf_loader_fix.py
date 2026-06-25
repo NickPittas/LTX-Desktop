@@ -14,6 +14,7 @@ paths that share the same builder tuple (each builder filters keys via
 
 from __future__ import annotations
 
+import functools
 import inspect
 import json
 import re
@@ -160,7 +161,17 @@ class GgufLinear(torch.nn.Linear):
             # Backstop: a non-QParam bias (e.g. loaded F32/BF16) must match the
             # dequanted/input dtype+device or F.linear raises a dtype mismatch.
             bias = bias.to(device=input.device, dtype=weight.dtype)
-        return torch.nn.functional.linear(input, weight, bias)
+        result = torch.nn.functional.linear(input, weight, bias)
+
+        # Runtime LoRA delta (IC-LoRA / multi-LoRA).
+        # ponytail: moves LoRA tensors from CPU every forward. Cache on compute
+        # device if this becomes the bottleneck.
+        compute_dtype = input.dtype if input.is_floating_point() else torch.float32
+        for lora_A, lora_B, strength in getattr(self, "lora_pairs", ()):  # type: ignore[attr-defined]
+            a = lora_A.to(device=input.device, dtype=compute_dtype)
+            b = lora_B.to(device=input.device, dtype=compute_dtype)
+            result = result + torch.nn.functional.linear(torch.nn.functional.linear(input, a), b) * strength
+        return result
 
 
 def _amend_forward_with_gguf(model: torch.nn.Module) -> torch.nn.Module:
@@ -169,6 +180,10 @@ def _amend_forward_with_gguf(model: torch.nn.Module) -> torch.nn.Module:
         if isinstance(module, torch.nn.Linear):
             module.__class__ = GgufLinear
     return model
+
+
+# ── Runtime LoRA globals (GGUF) ──────────────────────────────────────────
+_GGUF_BUILD_PATCHED: bool = False
 
 
 GGUF_DEQUANT_LINEAR_OP = ModuleOps(
@@ -585,6 +600,83 @@ def install_gguf_component_paths(
         _replace_builder_model_path(audio_decoder, "_vocoder_builder", audio_vae)
 
 
+# ── GGUF runtime LoRA helpers ─────────────────────────────────────────────
+
+
+def _preload_gguf_loras(
+    builder: object,
+) -> tuple[tuple[dict[str, torch.Tensor], float], ...]:
+    """Pre-load LoRA safetensors through the builder's GGUF loader.
+
+    Returns ``((lora_sd_dict, strength), ...)`` with tensors on the builder's
+    ``lora_load_device`` (typically CPU).
+    """
+    data: list[tuple[dict[str, torch.Tensor], float]] = []
+    for lora in builder.loras:  # type: ignore[attr-defined]
+        sd = builder.load_sd(  # type: ignore[attr-defined]
+            [lora.path],
+            sd_ops=lora.sd_ops,
+            registry=builder.registry,  # type: ignore[attr-defined]
+            device=builder.lora_load_device,  # type: ignore[attr-defined]
+        )
+        data.append((sd.sd, lora.strength))
+    return tuple(data)
+
+
+def _attach_gguf_loras_to_model(
+    model: torch.nn.Module,
+    lora_data: tuple[tuple[dict[str, torch.Tensor], float], ...],
+) -> None:
+    """Attach LoRA A/B weights to GgufLinear modules by matching module names.
+
+    Sets ``module.lora_pairs`` to CPU-stored ``(A, B, strength)`` tuples.
+    """
+    name_to_module: dict[str, torch.nn.Module] = {
+        name: mod for name, mod in model.named_modules() if isinstance(mod, GgufLinear)
+    }
+    module_pairs: dict[str, list[tuple[torch.Tensor, torch.Tensor, float]]] = {}
+    for lora_sd, strength in lora_data:
+        for key in lora_sd:
+            if key.endswith(".lora_A.weight"):
+                base = key[: -len(".lora_A.weight")]
+                b_key = f"{base}.lora_B.weight"
+                if base in name_to_module and b_key in lora_sd:
+                    module_pairs.setdefault(base, []).append(
+                        (lora_sd[key].contiguous().cpu(), lora_sd[b_key].contiguous().cpu(), strength)
+                    )
+    for base, pairs in module_pairs.items():
+        name_to_module[base].lora_pairs = tuple(pairs)
+
+
+def _patch_gguf_lora_build() -> None:
+    """Patch SingleGPUModelBuilder.build to attach runtime LoRAs post-load.
+
+    One-shot (idempotent via module-level flag). GGUF builders with LoRAs load
+    adapters separately, clear them for the upstream build, then attach runtime
+    LoRA pairs after ``load_state_dict``.
+    """
+    global _GGUF_BUILD_PATCHED  # noqa: PLW0602
+    if _GGUF_BUILD_PATCHED:
+        return
+    from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder
+
+    original = SingleGPUModelBuilder.build
+
+    @functools.wraps(original)
+    def _patched(self: object, *args: object, **kwargs: object) -> object:
+        loras = getattr(self, "loras", ())
+        is_gguf = isinstance(getattr(self, "model_loader", None), GgufStateDictLoader)
+        if is_gguf and loras and any(l.strength for l in loras):
+            lora_data = _preload_gguf_loras(self)
+            model = original(replace(self, loras=()), *args, **kwargs)
+            _attach_gguf_loras_to_model(model, lora_data)
+            return model
+        return original(self, *args, **kwargs)
+
+    SingleGPUModelBuilder.build = _patched
+    _GGUF_BUILD_PATCHED = True
+
+
 def install_gguf_loader(pipeline: object) -> None:
     """Install GGUF-native loader, sd_ops, and the lazy dequant module op on all present stages.
 
@@ -613,12 +705,17 @@ def install_gguf_loader(pipeline: object) -> None:
         # Preserve any existing module ops, dropping a stale GGUF op (no duplicates).
         module_ops = tuple(op for op in builder.module_ops if op.name != GGUF_DEQUANT_LINEAR_OP.name)
         module_ops = (*module_ops, GGUF_DEQUANT_LINEAR_OP)
-        stage._transformer_builder = replace(  # type: ignore[arg-type]
+        replaced = replace(
             builder,
             model_loader=GgufStateDictLoader(allow_safetensors_only=True),
             model_sd_ops=GgufNativeSDOps(),
             module_ops=module_ops,
         )
+
+        if replaced.loras and any(l.strength for l in replaced.loras):  # type: ignore[union-attr]
+            _patch_gguf_lora_build()
+
+        stage._transformer_builder = replaced  # type: ignore[arg-type]
     if not found:
         raise RuntimeError(
             "install_gguf_loader: pipeline has no stage/stage_1/stage_2 "

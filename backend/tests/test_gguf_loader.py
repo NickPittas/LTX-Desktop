@@ -741,3 +741,41 @@ def test_install_gguf_component_paths_raises_only_when_expected_component_missin
         audio_vae_path=None,
     )
     assert pipe.image_conditioner._encoder_builder.model_path == "/videos/vae.safetensors"
+
+
+# ---------------------------------------------------------------------------
+# Runtime LoRA on GgufLinear
+# ---------------------------------------------------------------------------
+
+
+def test_gguf_linear_runtime_lora_matches_manual_math() -> None:
+    """Runtime LoRA delta in GgufLinear.forward matches manual fused math."""
+    import gguf
+
+    in_f, out_f, rank = 8, 4, 2
+    rng = np.random.RandomState(42)
+    raw = rng.randn(out_f, in_f).astype(np.float32)
+    lora_A = torch.randn(rank, in_f)
+    lora_B = torch.randn(out_f, rank)
+    strength = 0.5
+
+    qparam = QParam(raw, gguf.GGMLQuantizationType.F32, name="test.weight")
+    linear = torch.nn.Linear(in_f, out_f, bias=False, device="meta")
+    linear.__class__ = GgufLinear
+    linear.load_state_dict({"weight": qparam}, assign=True)
+
+    linear.lora_pairs = ((lora_A.cpu(), lora_B.cpu(), strength),)
+
+    inp = torch.randn(2, in_f)
+
+    # Path A: runtime GgufLinear.forward
+    out_runtime = linear(inp)
+
+    # Path B: manual dequant weight + fused delta
+    base_weight = torch.from_numpy(raw)
+    delta = torch.nn.functional.linear(
+        torch.nn.functional.linear(inp, lora_A), lora_B
+    ) * strength
+    out_manual = torch.nn.functional.linear(inp, base_weight) + delta
+
+    assert torch.allclose(out_runtime, out_manual, atol=1e-5)
