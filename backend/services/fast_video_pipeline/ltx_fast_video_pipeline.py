@@ -9,7 +9,7 @@ from typing import Final, cast
 import torch
 
 from api_types import ImageConditioningInput
-from services.ltx_components import CheckpointPath
+from services.ltx_components import CheckpointPath, ResolvedLtxComponents
 from services.ltx_pipeline_common import default_tiling_config, encode_video_output, video_chunks_number
 from services.services_utils import AudioOrNone, TilingConfigType, device_supports_fp8
 
@@ -24,6 +24,7 @@ class LTXFastVideoPipeline:
         upsampler_path: str,
         device: torch.device,
         streaming_prefetch_count: int | None,
+        components: ResolvedLtxComponents | None = None,
         *,
         transformer_format: str = "safetensors",
     ) -> "LTXFastVideoPipeline":
@@ -33,6 +34,7 @@ class LTXFastVideoPipeline:
             upsampler_path=upsampler_path,
             device=device,
             streaming_prefetch_count=streaming_prefetch_count,
+            components=components,
             transformer_format=transformer_format,
         )
 
@@ -43,9 +45,11 @@ class LTXFastVideoPipeline:
         upsampler_path: str,
         device: torch.device,
         streaming_prefetch_count: int | None,
+        components: ResolvedLtxComponents | None = None,
         *,
         transformer_format: str = "safetensors",
     ) -> None:
+        self._components = components
         from services.patches.gguf_loader_fix import install_gguf_t2v_conditioning_patch
 
         install_gguf_t2v_conditioning_patch()
@@ -84,7 +88,13 @@ class LTXFastVideoPipeline:
             from services.patches.gguf_loader_fix import install_gguf_component_paths, install_gguf_loader
 
             install_gguf_loader(self.pipeline)
-            install_gguf_component_paths(self.pipeline, checkpoint_path)
+            c = self._components
+            install_gguf_component_paths(
+                self.pipeline,
+                checkpoint_path,
+                video_vae_path=c.video_vae_path if c is not None else None,
+                audio_vae_path=c.audio_vae_path if c is not None else None,
+            )
 
     def _run_inference(
         self,
@@ -182,4 +192,10 @@ class LTXFastVideoPipeline:
             from services.patches.gguf_loader_fix import install_gguf_component_paths, install_gguf_loader
 
             install_gguf_loader(self.pipeline)
-            install_gguf_component_paths(self.pipeline, self._checkpoint_path)
+            c = self._components
+            install_gguf_component_paths(
+                self.pipeline,
+                self._checkpoint_path,
+                video_vae_path=c.video_vae_path if c is not None else None,
+                audio_vae_path=c.audio_vae_path if c is not None else None,
+            )

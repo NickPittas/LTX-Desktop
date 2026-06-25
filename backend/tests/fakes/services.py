@@ -9,7 +9,7 @@ from typing import Any, ClassVar
 
 from PIL import Image
 from api_types import ImageConditioningInput, VideoCameraMotion
-from services.ltx_components import CheckpointPath
+from services.ltx_components import CheckpointPath, ResolvedLtxComponents
 from services.interfaces import VideoInfoPayload
 from services.ltx_api_client.ltx_api_client import LTXRetakeResult
 from tests.fakes.fake_gpu_info import FakeGpuInfo
@@ -496,6 +496,7 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
         upsampler_path: str,
         device: str | object,
         streaming_prefetch_count: int | None,
+        components: ResolvedLtxComponents | None = None,
         *,
         transformer_format: str = "safetensors",
     ) -> "FakeFastVideoPipeline":
@@ -503,6 +504,7 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
         if pipeline is None:
             raise RuntimeError("FakeFastVideoPipeline singleton is not bound")
         pipeline.last_checkpoint_path = checkpoint_path
+        pipeline.last_components = components
         pipeline.last_transformer_format = transformer_format
         return pipeline
 
@@ -586,17 +588,20 @@ class FakeIcLoraPipeline:
         lora_path: str,
         device: str | object,
         streaming_prefetch_count: int | None,
+        components: ResolvedLtxComponents | None = None,
     ) -> "FakeIcLoraPipeline":
         pipeline = FakeIcLoraPipeline._singleton
         if pipeline is None:
             raise RuntimeError("FakeIcLoraPipeline singleton is not bound")
         pipeline.last_checkpoint_path = checkpoint_path
+        pipeline.last_components = components
         return pipeline
 
     def __init__(self) -> None:
         self.generate_calls: list[dict[str, Any]] = []
         self.raise_on_generate: Exception | None = None
         self.last_checkpoint_path: CheckpointPath | None = None
+        self.last_components: ResolvedLtxComponents | None = None
 
     def generate(self, **kwargs: Any) -> None:
         self.generate_calls.append(kwargs)
@@ -675,17 +680,20 @@ class FakeA2VPipeline:
         upsampler_path: str,
         device: str | object,
         streaming_prefetch_count: int | None,
+        components: ResolvedLtxComponents | None = None,
     ) -> "FakeA2VPipeline":
         pipeline = FakeA2VPipeline._singleton
         if pipeline is None:
             raise RuntimeError("FakeA2VPipeline singleton is not bound")
         pipeline.last_checkpoint_path = checkpoint_path
+        pipeline.last_components = components
         return pipeline
 
     def __init__(self) -> None:
         self.generate_calls: list[dict[str, Any]] = []
         self.raise_on_generate: Exception | None = None
         self.last_checkpoint_path: CheckpointPath | None = None
+        self.last_components: ResolvedLtxComponents | None = None
 
     def generate(self, **kwargs: Any) -> None:
         self.generate_calls.append(kwargs)
@@ -710,6 +718,7 @@ class FakeRetakePipeline:
         gemma_root: str | None,
         device: str | object,
         streaming_prefetch_count: int | None,
+        components: ResolvedLtxComponents | None = None,
         *,
         loras: list[object] | None = None,
         quantization: object | None = None,
@@ -718,12 +727,14 @@ class FakeRetakePipeline:
         if pipeline is None:
             raise RuntimeError("FakeRetakePipeline singleton is not bound")
         pipeline.last_checkpoint_path = checkpoint_path
+        pipeline.last_components = components
         return pipeline
 
     def __init__(self) -> None:
         self.generate_calls: list[dict[str, Any]] = []
         self.raise_on_generate: Exception | None = None
         self.last_checkpoint_path: CheckpointPath | None = None
+        self.last_components: ResolvedLtxComponents | None = None
 
     def generate(self, **kwargs: Any) -> None:
         self.generate_calls.append(kwargs)

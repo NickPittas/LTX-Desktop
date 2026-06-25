@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Protocol
 from api_types import ImageConditioningInput
 
 if TYPE_CHECKING:
-    from services.ltx_components import CheckpointPath
+    from services.ltx_components import CheckpointPath, ResolvedLtxComponents
     import torch
 
 
@@ -19,6 +19,7 @@ class A2VPipeline(Protocol):
         upsampler_path: str,
         device: torch.device,
         streaming_prefetch_count: int | None,
+        components: ResolvedLtxComponents | None = None,
     ) -> "A2VPipeline": ...
 
     def generate(

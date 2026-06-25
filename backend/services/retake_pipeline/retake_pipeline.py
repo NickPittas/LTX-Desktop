@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from services.ltx_components import CheckpointPath
+    from services.ltx_components import CheckpointPath, ResolvedLtxComponents
     import torch
     from ltx_core.components.guiders import MultiModalGuiderParams
     from ltx_core.loader import LoraPathStrengthAndSDOps
@@ -19,6 +19,7 @@ class RetakePipeline(Protocol):
         gemma_root: str | None,
         device: "torch.device",
         streaming_prefetch_count: int | None,
+        components: ResolvedLtxComponents | None = None,
         *,
         loras: list["LoraPathStrengthAndSDOps"] | None = None,
         quantization: "QuantizationPolicy | None" = None,

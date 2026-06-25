@@ -531,12 +531,31 @@ def install_gguf_t2v_conditioning_patch() -> None:
     blocks.ImageConditioner.__call__ = patched_call
 
 
-def install_gguf_component_paths(pipeline: object, checkpoint_path: object) -> None:
-    """Route non-transformer GGUF profile builders to their component files."""
+def install_gguf_component_paths(
+    pipeline: object,
+    checkpoint_path: object,
+    *,
+    video_vae_path: str | None = None,
+    audio_vae_path: str | None = None,
+) -> None:
+    """Route non-transformer GGUF profile builders to their component files.
+
+    Parameters
+    ----------
+    pipeline
+        The distilled pipeline instance.
+    checkpoint_path
+        GGUF profile paths (tuple of paths).
+    video_vae_path
+        Explicit video VAE safetensors path. When given, skips heuristic
+        filename matching. Default None = use heuristic.
+    audio_vae_path
+        Explicit audio VAE safetensors path. Same override behavior.
+    """
 
     paths = [str(p) for p in checkpoint_path] if isinstance(checkpoint_path, (list, tuple)) else [str(checkpoint_path)]
-    video_vae = _pick_component_path(paths, ("video_vae", "video-vae", "video"), ".safetensors")
-    audio_vae = _pick_component_path(paths, ("audio_vae", "audio-vae", "audio"), ".safetensors")
+    video_vae = video_vae_path or _pick_component_path(paths, ("video_vae", "video-vae", "video"), ".safetensors")
+    audio_vae = audio_vae_path or _pick_component_path(paths, ("audio_vae", "audio-vae", "audio"), ".safetensors")
     if video_vae is None:
         raise RuntimeError("GGUF profile missing video VAE safetensors path")
     if audio_vae is None:

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Protocol
 from api_types import ImageConditioningInput
 
 if TYPE_CHECKING:
-    from services.ltx_components import CheckpointPath
+    from services.ltx_components import CheckpointPath, ResolvedLtxComponents
     import torch
 
 
@@ -20,6 +20,7 @@ class IcLoraPipeline(Protocol):
         lora_path: str,
         device: torch.device,
         streaming_prefetch_count: int | None,
+        components: ResolvedLtxComponents | None = None,
     ) -> "IcLoraPipeline":
         ...
 

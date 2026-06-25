@@ -8,7 +8,7 @@ from typing import cast
 import torch
 
 from api_types import ImageConditioningInput
-from services.ltx_components import CheckpointPath
+from services.ltx_components import CheckpointPath, ResolvedLtxComponents
 from services.ltx_pipeline_common import default_tiling_config, encode_video_output, video_chunks_number
 from services.services_utils import AudioOrNone, TilingConfigType, device_supports_fp8
 
@@ -22,6 +22,7 @@ class LTXIcLoraPipeline:
         lora_path: str,
         device: torch.device,
         streaming_prefetch_count: int | None,
+        components: ResolvedLtxComponents | None = None,
     ) -> "LTXIcLoraPipeline":
         return LTXIcLoraPipeline(
             checkpoint_path=checkpoint_path,
@@ -30,6 +31,7 @@ class LTXIcLoraPipeline:
             lora_path=lora_path,
             device=device,
             streaming_prefetch_count=streaming_prefetch_count,
+            components=components,
         )
 
     def __init__(
@@ -40,7 +42,9 @@ class LTXIcLoraPipeline:
         lora_path: str,
         device: torch.device,
         streaming_prefetch_count: int | None,
+        components: ResolvedLtxComponents | None = None,
     ) -> None:
+        self._components = components
         from ltx_core.loader.primitives import LoraPathStrengthAndSDOps
         from ltx_core.loader.sd_ops import LTXV_LORA_COMFY_RENAMING_MAP
         from ltx_core.quantization import QuantizationPolicy

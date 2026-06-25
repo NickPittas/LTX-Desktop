@@ -22,6 +22,7 @@ from services.patches.gguf_loader_fix import (
     QParam,
     _amend_forward_with_gguf,
     _is_quantized_type,
+    install_gguf_component_paths,
     install_gguf_loader,
 )
 
@@ -153,6 +154,50 @@ def test_install_gguf_loader_raises_on_wrong_pipeline_shape() -> None:
 
     with pytest.raises(RuntimeError):
         install_gguf_loader(SimpleNamespace(stage=SimpleNamespace()))
+
+
+def test_install_gguf_component_paths_uses_explicit_paths() -> None:
+    """Explicit video_vae_path/audio_vae_path override heuristic filename matching."""
+    from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder
+    from ltx_core.model.transformer import LTXModelConfigurator
+
+    fake_vae_path = "/explicit/path/vae.safetensors"
+    dummy_checkpoint = ("/profiles/no_match_1.safetensors", "/profiles/no_match_2.safetensors")
+
+    # Builders with initial (wrong) paths — explicit paths should replace these
+    enc_builder = SingleGPUModelBuilder(
+        model_path="/initial/wrong.safetensors",
+        model_class_configurator=LTXModelConfigurator,
+    )
+    dec_builder = SingleGPUModelBuilder(
+        model_path="/initial/wrong.safetensors",
+        model_class_configurator=LTXModelConfigurator,
+    )
+    voc_builder = SingleGPUModelBuilder(
+        model_path="/initial/wrong.safetensors",
+        model_class_configurator=LTXModelConfigurator,
+    )
+
+    pipe = SimpleNamespace(
+        image_conditioner=SimpleNamespace(_encoder_builder=enc_builder),
+        upsampler=SimpleNamespace(_encoder_builder=enc_builder),
+        video_decoder=SimpleNamespace(_decoder_builder=dec_builder),
+        audio_decoder=SimpleNamespace(
+            _decoder_builder=dec_builder,
+            _vocoder_builder=voc_builder,
+        ),
+    )
+
+    # Use same explicit path for both video and audio in this test
+    install_gguf_component_paths(
+        pipe, dummy_checkpoint, video_vae_path=fake_vae_path, audio_vae_path=fake_vae_path
+    )
+
+    assert pipe.image_conditioner._encoder_builder.model_path == fake_vae_path
+    assert pipe.upsampler._encoder_builder.model_path == fake_vae_path
+    assert pipe.video_decoder._decoder_builder.model_path == fake_vae_path
+    assert pipe.audio_decoder._decoder_builder.model_path == fake_vae_path
+    assert pipe.audio_decoder._vocoder_builder.model_path == fake_vae_path
 
 
 # ---------------------------------------------------------------------------

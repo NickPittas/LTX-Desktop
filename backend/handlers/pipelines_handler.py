@@ -182,6 +182,7 @@ class PipelinesHandler(StateHandlerBase):
             upsampler_path,
             self.config.device,
             streaming_prefetch_count_for_mode(self.config.local_generations_mode),
+            components=components,
             transformer_format=transformer_format,
         )
 
@@ -325,6 +326,7 @@ class PipelinesHandler(StateHandlerBase):
 
         self._evict_gpu_pipeline_for_swap()
         checkpoint_path, gemma_root, upsampler_path, _cache_key = self._resolve_checkpoint_paths()
+        components = self._resolve_active_components()
 
         pipeline = self._ic_lora_pipeline_class.create(
             checkpoint_path,
@@ -333,6 +335,7 @@ class PipelinesHandler(StateHandlerBase):
             lora_path,
             self.config.device,
             streaming_prefetch_count_for_mode(self.config.local_generations_mode),
+            components=components,
         )
         depth_pipeline = self._depth_processor_pipeline_class.create(depth_model_path, self.config.device)
         state = ICLoraState(
@@ -359,6 +362,7 @@ class PipelinesHandler(StateHandlerBase):
 
         self._evict_gpu_pipeline_for_swap()
         checkpoint_path, gemma_root, upsampler_path, _cache_key = self._resolve_checkpoint_paths()
+        components = self._resolve_active_components()
 
         pipeline = self._a2v_pipeline_class.create(
             checkpoint_path,
@@ -366,6 +370,7 @@ class PipelinesHandler(StateHandlerBase):
             upsampler_path,
             self.config.device,
             streaming_prefetch_count_for_mode(self.config.local_generations_mode),
+            components=components,
         )
         state = A2VPipelineState(pipeline=pipeline)
 
@@ -394,11 +399,13 @@ class PipelinesHandler(StateHandlerBase):
 
         quantization = QuantizationPolicy.fp8_cast() if quantized else None
         checkpoint_path, gemma_root, _upsampler_path, _cache_key = self._resolve_checkpoint_paths()
+        components = self._resolve_active_components()
         pipeline = self._retake_pipeline_class.create(
             checkpoint_path=checkpoint_path,
             gemma_root=gemma_root,
             device=self.config.device,
             streaming_prefetch_count=streaming_prefetch_count_for_mode(self.config.local_generations_mode),
+            components=components,
             loras=[],
             quantization=quantization,
         )

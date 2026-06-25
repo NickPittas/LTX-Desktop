@@ -24,7 +24,7 @@ from ltx_core.quantization import QuantizationPolicy
 from ltx_core.types import Audio
 from ltx_pipelines.utils.media_io import encode_video, get_videostream_metadata
 
-from services.ltx_components import CheckpointPath
+from services.ltx_components import CheckpointPath, ResolvedLtxComponents
 from services.retake_pipeline.retake_pipeline import RetakePipeline
 
 
@@ -36,6 +36,7 @@ class LTXRetakePipeline:
         gemma_root: str | None,
         device: torch.device,
         streaming_prefetch_count: int | None,
+        components: ResolvedLtxComponents | None = None,
         *,
         loras: list[LoraPathStrengthAndSDOps] | None = None,
         quantization: QuantizationPolicy | None = None,
@@ -45,6 +46,7 @@ class LTXRetakePipeline:
             gemma_root=gemma_root,
             device=device,
             streaming_prefetch_count=streaming_prefetch_count,
+            components=components,
             loras=loras or [],
             quantization=quantization,
         )
@@ -55,10 +57,12 @@ class LTXRetakePipeline:
         gemma_root: str | None,
         device: torch.device,
         streaming_prefetch_count: int | None,
+        components: ResolvedLtxComponents | None = None,
         *,
         loras: list[LoraPathStrengthAndSDOps],
         quantization: QuantizationPolicy | None,
     ) -> None:
+        self._components = components
         from ltx_pipelines.utils.blocks import (
             AudioConditioner,
             AudioDecoder,

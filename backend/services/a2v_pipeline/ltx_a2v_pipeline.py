@@ -8,7 +8,7 @@ from typing import cast
 import torch
 
 from api_types import ImageConditioningInput
-from services.ltx_components import CheckpointPath
+from services.ltx_components import CheckpointPath, ResolvedLtxComponents
 from services.ltx_pipeline_common import default_tiling_config, encode_video_output, video_chunks_number
 from services.services_utils import AudioOrNone, TilingConfigType, device_supports_fp8
 
@@ -21,6 +21,7 @@ class LTXa2vPipeline:
         upsampler_path: str,
         device: torch.device,
         streaming_prefetch_count: int | None,
+        components: ResolvedLtxComponents | None = None,
     ) -> "LTXa2vPipeline":
         return LTXa2vPipeline(
             checkpoint_path=checkpoint_path,
@@ -28,6 +29,7 @@ class LTXa2vPipeline:
             upsampler_path=upsampler_path,
             device=device,
             streaming_prefetch_count=streaming_prefetch_count,
+            components=components,
         )
 
     def __init__(
@@ -37,7 +39,9 @@ class LTXa2vPipeline:
         upsampler_path: str,
         device: torch.device,
         streaming_prefetch_count: int | None,
+        components: ResolvedLtxComponents | None = None,
     ) -> None:
+        self._components = components
         from ltx_core.quantization import QuantizationPolicy
 
         from services.a2v_pipeline.distilled_a2v_pipeline import DistilledA2VPipeline
