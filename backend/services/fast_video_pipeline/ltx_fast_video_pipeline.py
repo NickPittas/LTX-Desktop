@@ -55,7 +55,12 @@ class LTXFastVideoPipeline:
         self._device = device
         self._streaming_prefetch_count = streaming_prefetch_count
         self._transformer_format = transformer_format
-        self._quantization = QuantizationPolicy.fp8_cast() if device_supports_fp8(device) else None
+        # GGUF is already quantized; the FP8 policy's sd_ops/module_ops would
+        # downcast and overwrite the lazy QParam/GgufLinear path, so disable it.
+        if transformer_format == "gguf":
+            self._quantization = None
+        else:
+            self._quantization = QuantizationPolicy.fp8_cast() if device_supports_fp8(device) else None
 
         self.pipeline = DistilledPipeline(
             distilled_checkpoint_path=checkpoint_path,  # type: ignore[arg-type]  # ponytail: ltx_pipelines accepts tuple per M5 spec
@@ -144,6 +149,13 @@ class LTXFastVideoPipeline:
                 os.unlink(output_path)
 
     def compile_transformer(self) -> None:
+        if self._transformer_format == "gguf":
+            # GGUF transformer compile is not supported yet; lazy dequant uses
+            # runtime GGUF dequantization (numpy-based, untracable by torch.compile).
+            raise RuntimeError(
+                "GGUF transformer compile is not supported yet; lazy dequant uses"
+                " runtime GGUF dequantization"
+            )
         from ltx_pipelines.distilled import DistilledPipeline
 
         self.pipeline = DistilledPipeline(
