@@ -10,11 +10,15 @@ import numpy as np
 import pytest
 import torch
 
+import gguf
+
 from services.patches.gguf_loader_fix import (
     GGUF_DEQUANT_LINEAR_OP,
     GgufLinear,
     GgufNativeSDOps,
     GgufStateDictLoader,
+    KIJAI_VIDEO_VAE_DECODER_KEYS_FILTER,
+    KIJAI_VIDEO_VAE_ENCODER_KEYS_FILTER,
     QParam,
     _amend_forward_with_gguf,
     _is_quantized_type,
@@ -370,6 +374,23 @@ def test_install_gguf_loader_repairs_missing_module_op() -> None:
     assert any(op.name == GGUF_DEQUANT_LINEAR_OP.name for op in replaced.module_ops)
 
 
+# ---------------------------------------------------------------------------
+# Kijai video VAE SDOps filters
+# ---------------------------------------------------------------------------
+
+
+def test_kijai_video_vae_encoder_filter() -> None:
+    assert KIJAI_VIDEO_VAE_ENCODER_KEYS_FILTER.apply_to_key("encoder.conv_in.conv.weight") == "conv_in.conv.weight"
+    assert KIJAI_VIDEO_VAE_ENCODER_KEYS_FILTER.apply_to_key("per_channel_statistics.mean") == "per_channel_statistics.mean"
+    assert KIJAI_VIDEO_VAE_ENCODER_KEYS_FILTER.apply_to_key("decoder.conv_in.conv.weight") is None
+
+
+def test_kijai_video_vae_decoder_filter() -> None:
+    assert KIJAI_VIDEO_VAE_DECODER_KEYS_FILTER.apply_to_key("decoder.conv_in.conv.weight") == "conv_in.conv.weight"
+    assert KIJAI_VIDEO_VAE_DECODER_KEYS_FILTER.apply_to_key("per_channel_statistics.std") == "per_channel_statistics.std"
+    assert KIJAI_VIDEO_VAE_DECODER_KEYS_FILTER.apply_to_key("encoder.conv_in.conv.weight") is None
+
+
 def test_gguf_loader_load_wraps_quantized_tensor_as_qparam(tmp_path: Path) -> None:
     import gguf
     import gguf.quants as gquants
@@ -459,3 +480,58 @@ def test_gguf_linear_forward_casts_nonqparam_floating_bias_to_input_dtype() -> N
     expected_weight = torch.from_numpy(raw).to(torch.bfloat16)
     expected_bias = f32_bias.to(torch.bfloat16)
     assert torch.allclose(out, torch.nn.functional.linear(inp, expected_weight, expected_bias))
+
+
+# ---------------------------------------------------------------------------
+# torch dequant: CPU parity for Q4_K/Q5_K/Q6_K, CUDA route
+# ---------------------------------------------------------------------------
+
+
+def test_dequantize_gguf_tensor_torch_unsupported_returns_none() -> None:
+    from services.patches.gguf_torch_dequant import dequantize_gguf_tensor_torch
+
+    raw = torch.arange(16, dtype=torch.uint8).reshape(2, 8)
+    result = dequantize_gguf_tensor_torch(
+        raw, gguf.GGMLQuantizationType.F32, device=torch.device("cpu"), dtype=torch.float32
+    )
+    assert result is None
+
+
+@pytest.mark.parametrize(
+    "qtype",
+    [
+        gguf.GGMLQuantizationType.Q4_K,
+        gguf.GGMLQuantizationType.Q5_K,
+        gguf.GGMLQuantizationType.Q6_K,
+    ],
+)
+def test_dequantize_gguf_tensor_torch_cpu_parity(qtype: object) -> None:
+    from services.patches.gguf_torch_dequant import dequantize_gguf_tensor_torch
+
+    _, type_size = gguf.GGML_QUANT_SIZES[qtype]
+    raw = torch.arange(type_size * 2, dtype=torch.uint8).reshape(2, type_size)
+
+    expected_np = gguf.quants.dequantize(raw.numpy(), qtype)
+    actual = dequantize_gguf_tensor_torch(
+        raw, qtype, device=torch.device("cpu"), dtype=torch.float32
+    )
+
+    assert actual is not None
+    assert actual.shape == expected_np.shape
+    assert actual.dtype == torch.float32
+    assert torch.allclose(actual, torch.from_numpy(expected_np.copy()), atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_qparam_dequant_cuda() -> None:
+    qtype = gguf.GGMLQuantizationType.Q4_K
+    _, type_size = gguf.GGML_QUANT_SIZES[qtype]
+    raw = torch.arange(type_size * 2, dtype=torch.uint8).reshape(2, type_size)
+
+    expected_np = gguf.quants.dequantize(raw.numpy(), qtype)
+    qp = QParam(raw.numpy(), qtype, name="test.weight")
+    out = qp.dequant(device=torch.device("cuda"), dtype=torch.bfloat16)
+
+    assert out.device.type == "cuda"
+    assert out.dtype == torch.bfloat16
+    assert out.shape == expected_np.shape

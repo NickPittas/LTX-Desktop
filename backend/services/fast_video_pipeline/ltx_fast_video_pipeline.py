@@ -46,7 +46,15 @@ class LTXFastVideoPipeline:
         *,
         transformer_format: str = "safetensors",
     ) -> None:
-        from ltx_core.quantization import QuantizationPolicy
+        from services.patches.gguf_loader_fix import install_gguf_t2v_conditioning_patch
+
+        install_gguf_t2v_conditioning_patch()
+
+        if transformer_format == "gguf":
+            from services.patches.gguf_loader_fix import install_gguf_prompt_encoder_patch
+
+            install_gguf_prompt_encoder_patch()
+
         from ltx_pipelines.distilled import DistilledPipeline
 
         self._checkpoint_path = checkpoint_path
@@ -60,6 +68,8 @@ class LTXFastVideoPipeline:
         if transformer_format == "gguf":
             self._quantization = None
         else:
+            from ltx_core.quantization import QuantizationPolicy
+
             self._quantization = QuantizationPolicy.fp8_cast() if device_supports_fp8(device) else None
 
         self.pipeline = DistilledPipeline(
@@ -71,9 +81,10 @@ class LTXFastVideoPipeline:
             quantization=self._quantization,
         )
         if transformer_format == "gguf":
-            from services.patches.gguf_loader_fix import install_gguf_loader
+            from services.patches.gguf_loader_fix import install_gguf_component_paths, install_gguf_loader
 
             install_gguf_loader(self.pipeline)
+            install_gguf_component_paths(self.pipeline, checkpoint_path)
 
     def _run_inference(
         self,
@@ -168,6 +179,7 @@ class LTXFastVideoPipeline:
             torch_compile=True,
         )
         if self._transformer_format == "gguf":
-            from services.patches.gguf_loader_fix import install_gguf_loader
+            from services.patches.gguf_loader_fix import install_gguf_component_paths, install_gguf_loader
 
             install_gguf_loader(self.pipeline)
+            install_gguf_component_paths(self.pipeline, self._checkpoint_path)

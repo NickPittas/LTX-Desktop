@@ -14,8 +14,11 @@ paths that share the same builder tuple (each builder filters keys via
 
 from __future__ import annotations
 
+import inspect
 import json
+import re
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -23,8 +26,10 @@ import torch
 
 from ltx_core.loader.module_ops import ModuleOps
 from ltx_core.loader.primitives import StateDict
-from ltx_core.loader.sd_ops import KeyValueOperationResult
+from ltx_core.loader.sd_ops import KeyValueOperationResult, SDOps
 from ltx_core.model.transformer.model import LTXModel
+from ltx_core.text_encoders.gemma.embeddings_processor import EmbeddingsProcessor
+from ltx_core.text_encoders.gemma.encoders.base_encoder import GemmaTextEncoder
 
 # Metadata keys searched, in priority order, for the embedded JSON config.
 _CONFIG_KEYS = ("config", "ltx.config", "general.config", "ltx_config")
@@ -77,8 +82,22 @@ class QParam(torch.nn.Parameter):
     def quantized_nbytes(self) -> int:
         return int(self._raw.nbytes)
 
+    def detach(self) -> "QParam":
+        # load_state_dict() detaches state_dict tensors before child modules see
+        # them. Preserve attrs so GgufLinear._load_from_state_dict can intercept.
+        return self
+
     def dequant(self, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         import gguf
+
+        if device.type == "cuda":
+            from services.patches.gguf_torch_dequant import dequantize_gguf_tensor_torch
+
+            tensor = dequantize_gguf_tensor_torch(
+                self._raw, self._tensor_type, device=device, dtype=dtype
+            )
+            if tensor is not None:
+                return tensor
 
         try:
             array = gguf.quants.dequantize(self._raw.numpy(), self._tensor_type)
@@ -158,6 +177,18 @@ GGUF_DEQUANT_LINEAR_OP = ModuleOps(
     mutator=_amend_forward_with_gguf,
 )
 
+GGUF_GEMMA_DEQUANT_LINEAR_OP = ModuleOps(
+    name="gguf_gemma_dequant_linear",
+    matcher=lambda model: isinstance(model, GemmaTextEncoder),
+    mutator=_amend_forward_with_gguf,
+)
+
+GGUF_EMBEDDINGS_DEQUANT_LINEAR_OP = ModuleOps(
+    name="gguf_embeddings_dequant_linear",
+    matcher=lambda model: isinstance(model, EmbeddingsProcessor),
+    mutator=_amend_forward_with_gguf,
+)
+
 
 class GgufStateDictLoader:
     """Loads an LTX transformer from a GGUF checkpoint.
@@ -166,6 +197,17 @@ class GgufStateDictLoader:
     ``load`` dequantizes tensors via ``gguf.quants`` and applies ``SDOps`` the
     same way the safetensors loader does.
     """
+
+    def __init__(
+        self,
+        *,
+        require_transformer_config: bool = True,
+        include_safetensors: bool = False,
+        lazy_quantized: bool = True,
+    ) -> None:
+        self._require_transformer_config = require_transformer_config
+        self._include_safetensors = include_safetensors
+        self._lazy_quantized = lazy_quantized
 
     def metadata(self, path: str) -> dict[str, object]:
         import gguf
@@ -185,6 +227,9 @@ class GgufStateDictLoader:
             if isinstance(parsed, dict) and "transformer" in parsed:
                 return parsed
 
+        if not self._require_transformer_config:
+            return {}
+
         raise RuntimeError(
             f"GGUF transformer config not found in metadata of {path}; "
             "expected config/ltx.config/general.config/ltx_config JSON with a transformer object"
@@ -200,18 +245,32 @@ class GgufStateDictLoader:
 
         model_paths = list(path) if isinstance(path, (list, tuple)) else [path]
         gguf_paths = [p for p in model_paths if _is_gguf_path(p)]
-        if not gguf_paths:
+        safetensors_paths = [p for p in model_paths if str(p).lower().endswith(".safetensors")]
+        if not gguf_paths and not (self._include_safetensors and safetensors_paths):
             raise RuntimeError("GGUF loader received no .gguf path; this is a pipeline wiring bug")
 
-        target_device = device or torch.device("cpu")
+        target_device = torch.device("cpu")
+        # ponytail: state-dict registry is long-lived RAM cache; GPU residency
+        # belongs to model contexts only (builder moves model to GPU later).
         sd: dict[str, torch.Tensor] = {}
         size = 0
         dtype: set[torch.dtype] = set()
 
+        def add_value(name: str, tensor_t: torch.Tensor) -> None:
+            nonlocal size
+            for key, value in _apply_sd_ops(name, tensor_t, sd_ops):
+                if isinstance(value, QParam):
+                    size += value.quantized_nbytes
+                    dtype.add(torch.float32)
+                else:
+                    size += value.nbytes
+                    dtype.add(value.dtype)
+                sd[key] = value
+
         for gguf_path in gguf_paths:
             reader = gguf.GGUFReader(gguf_path)
             for tensor in reader.tensors:
-                if _is_quantized_type(tensor.tensor_type):
+                if _is_quantized_type(tensor.tensor_type) and self._lazy_quantized:
                     # Lazy: keep raw quantized bytes as a QParam; dequant happens
                     # per-forward inside GgufLinear. No full fp32 materialized here.
                     tensor_t: torch.Tensor = QParam(tensor.data, tensor.tensor_type, name=tensor.name)
@@ -235,14 +294,18 @@ class GgufStateDictLoader:
                     # requires a different activation dtype.
                     if tensor_t.is_floating_point():
                         tensor_t = tensor_t.to(dtype=torch.bfloat16)
-                for key, value in _apply_sd_ops(tensor.name, tensor_t, sd_ops):
-                    if isinstance(value, QParam):
-                        size += value.quantized_nbytes
-                        dtype.add(torch.float32)
-                    else:
-                        size += value.nbytes
-                        dtype.add(value.dtype)
-                    sd[key] = value
+                add_value(tensor.name, tensor_t)
+
+        if self._include_safetensors:
+            from safetensors import safe_open
+
+            for safetensors_path in safetensors_paths:
+                with safe_open(safetensors_path, framework="pt", device=str(target_device)) as handle:
+                    for key in handle.keys():
+                        tensor_t = handle.get_tensor(key)
+                        if tensor_t.is_floating_point():
+                            tensor_t = tensor_t.to(dtype=torch.bfloat16)
+                        add_value(key, tensor_t)
 
         # ponytail: no-silent-garbage guard. A native-named LTX GGUF carries no
         # Comfy `model.diffusion_model.` prefix, so an sd_ops renaming map built
@@ -255,6 +318,83 @@ class GgufStateDictLoader:
             )
 
         return StateDict(sd=sd, device=target_device, size=size, dtype=dtype)
+
+
+class GgufGemmaSDOps:
+    """Map llama.cpp Gemma3 GGUF names to HF Gemma3 state-dict names."""
+
+    name = "gguf_gemma"
+    _layer_re = re.compile(r"^blk\.(\d+)\.(.+)$")
+    _layer_suffixes = {
+        "attn_q.weight": "self_attn.q_proj.weight",
+        "attn_k.weight": "self_attn.k_proj.weight",
+        "attn_v.weight": "self_attn.v_proj.weight",
+        "attn_output.weight": "self_attn.o_proj.weight",
+        "attn_q_norm.weight": "self_attn.q_norm.weight",
+        "attn_k_norm.weight": "self_attn.k_norm.weight",
+        "ffn_gate.weight": "mlp.gate_proj.weight",
+        "ffn_up.weight": "mlp.up_proj.weight",
+        "ffn_down.weight": "mlp.down_proj.weight",
+        "attn_norm.weight": "input_layernorm.weight",
+        "post_attention_norm.weight": "post_attention_layernorm.weight",
+        "ffn_norm.weight": "pre_feedforward_layernorm.weight",
+        "post_ffw_norm.weight": "post_feedforward_layernorm.weight",
+    }
+
+    def apply_to_key(self, key: str) -> str | None:
+        if key == "token_embd.weight":
+            return "model.model.language_model.embed_tokens.weight"
+        if key == "output_norm.weight":
+            return "model.model.language_model.norm.weight"
+        match = self._layer_re.match(key)
+        if match is None:
+            return None
+        layer_index, suffix = match.groups()
+        mapped_suffix = self._layer_suffixes.get(suffix)
+        if mapped_suffix is None:
+            return None
+        return f"model.model.language_model.layers.{layer_index}.{mapped_suffix}"
+
+    def apply_to_key_value(self, key: str, value: torch.Tensor) -> list[KeyValueOperationResult]:
+        results = [KeyValueOperationResult(key, value)]
+        if key == "model.model.language_model.embed_tokens.weight":
+            results.append(KeyValueOperationResult("model.lm_head.weight", value))
+        return results
+
+
+class GgufEmbeddingsProcessorSDOps:
+    """Map LTX 2.3 GGUF connector + safetensors projection names."""
+
+    name = "gguf_embeddings_processor"
+
+    def apply_to_key(self, key: str) -> str | None:
+        replacements = (
+            ("text_embedding_projection.video_aggregate_embed.", "feature_extractor.video_aggregate_embed."),
+            ("text_embedding_projection.audio_aggregate_embed.", "feature_extractor.audio_aggregate_embed."),
+            ("video_embeddings_connector.", "video_connector."),
+            ("audio_embeddings_connector.", "audio_connector."),
+        )
+        for prefix, replacement in replacements:
+            if key.startswith(prefix):
+                return replacement + key.removeprefix(prefix)
+        return None
+
+    def apply_to_key_value(self, key: str, value: torch.Tensor) -> list[KeyValueOperationResult]:
+        return [KeyValueOperationResult(key, value)]
+
+
+KIJAI_VIDEO_VAE_ENCODER_KEYS_FILTER = (
+    SDOps("KIJAI_VIDEO_VAE_ENCODER_KEYS_FILTER")
+    .with_matching(prefix="encoder.")
+    .with_matching(prefix="per_channel_statistics.")
+    .with_replacement("encoder.", "")
+)
+KIJAI_VIDEO_VAE_DECODER_KEYS_FILTER = (
+    SDOps("KIJAI_VIDEO_VAE_DECODER_KEYS_FILTER")
+    .with_matching(prefix="decoder.")
+    .with_matching(prefix="per_channel_statistics.")
+    .with_replacement("decoder.", "")
+)
 
 
 class GgufNativeSDOps:
@@ -274,6 +414,139 @@ class GgufNativeSDOps:
 
     def apply_to_key_value(self, key: str, value: torch.Tensor) -> list[KeyValueOperationResult]:
         return [KeyValueOperationResult(key, value)]
+
+
+def install_gguf_prompt_encoder_patch() -> None:
+    """Patch PromptEncoder so Gemma GGUF folders work.
+
+    Upstream PromptEncoder requires ``model*.safetensors``. ComfyUI LTX 2.3 GGUF
+    workflows use ``gemma-*.gguf`` plus tokenizer/processor files in the text
+    encoder folder. This patch preserves upstream behavior for safetensors roots.
+    """
+
+    from ltx_core.loader.registry import DummyRegistry
+    from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder as Builder
+    from ltx_core.text_encoders.gemma import (
+        EMBEDDINGS_PROCESSOR_KEY_OPS,
+        GEMMA_MODEL_OPS,
+        EmbeddingsProcessorConfigurator,
+        GemmaTextEncoderConfigurator,
+        module_ops_from_gemma_root,
+    )
+    from ltx_pipelines.utils import blocks
+
+    if getattr(blocks.PromptEncoder.__init__, "_ltx_desktop_gguf_patch", False):
+        return
+
+    _install_gemma_encode_patch()
+    original_init = blocks.PromptEncoder.__init__
+
+    def patched_init(
+        self: object,
+        checkpoint_path: str,
+        gemma_root: str,
+        dtype: torch.dtype,
+        device: torch.device,
+        registry: object | None = None,
+    ) -> None:
+        gguf_path = _find_gemma_gguf(gemma_root)
+        if gguf_path is None:
+            original_init(self, checkpoint_path, gemma_root, dtype, device, registry)
+            return
+
+        self._dtype = dtype
+        self._device = device
+        module_ops = module_ops_from_gemma_root(gemma_root)
+        registry_obj = registry or DummyRegistry()
+        self._text_encoder_builder = Builder(
+            model_path=str(gguf_path),
+            model_class_configurator=GemmaTextEncoderConfigurator,
+            model_sd_ops=GgufGemmaSDOps(),
+            # ponytail: Gemma GGUF is eagerly bf16-dequanted on CPU so existing
+            # layer streaming can page dense layers; revisit lazy Gemma after
+            # QParam+LayerStreaming support exists.
+            model_loader=GgufStateDictLoader(require_transformer_config=False, lazy_quantized=False),
+            module_ops=(GEMMA_MODEL_OPS, *module_ops),
+            registry=registry_obj,
+        )
+        self._embeddings_processor_builder = Builder(
+            model_path=checkpoint_path,
+            model_class_configurator=EmbeddingsProcessorConfigurator,
+            model_sd_ops=GgufEmbeddingsProcessorSDOps(),
+            model_loader=GgufStateDictLoader(include_safetensors=True),
+            module_ops=(GGUF_EMBEDDINGS_DEQUANT_LINEAR_OP,),
+            registry=registry_obj,
+        )
+
+    patched_init._ltx_desktop_gguf_patch = True  # type: ignore[attr-defined]
+    blocks.PromptEncoder.__init__ = patched_init
+
+
+def _install_gemma_encode_patch() -> None:
+    if getattr(GemmaTextEncoder.encode, "_ltx_desktop_gguf_patch", False):
+        return
+
+    def patched_encode(
+        self: GemmaTextEncoder,
+        text: str,
+        padding_side: str = "left",  # noqa: ARG001
+    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+        token_pairs = self.tokenizer.tokenize_with_weights(text)["gemma"]
+        language_model = self.model.model.language_model
+        device = language_model.embed_tokens.weight.device
+        if device.type == "meta":
+            for param in language_model.parameters():
+                if param.device.type != "meta":
+                    device = param.device
+                    break
+        if device.type == "cpu" and torch.cuda.is_available():
+            device = torch.device("cuda")
+            language_model.to(device)  # ponytail: builder short-circuits on unused meta vision params, only language_model moves
+        input_ids = torch.tensor([[t[0] for t in token_pairs]], device=device)
+        attention_mask = torch.tensor([[w[1] for w in token_pairs]], device=device)
+        outputs = self.model.model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
+        hidden_states = outputs.hidden_states
+        del outputs
+        return hidden_states, attention_mask
+
+    patched_encode._ltx_desktop_gguf_patch = True  # type: ignore[attr-defined]
+    GemmaTextEncoder.encode = patched_encode  # type: ignore[method-assign]
+
+
+def install_gguf_t2v_conditioning_patch() -> None:
+    from ltx_pipelines.utils import blocks
+
+    if getattr(blocks.ImageConditioner.__call__, "_ltx_desktop_gguf_t2v_patch", False):
+        return
+
+    original_call = blocks.ImageConditioner.__call__
+
+    def patched_call(self: object, fn: object) -> object:
+        closure_images = inspect.getclosurevars(fn).nonlocals.get("images") if callable(fn) else None
+        if closure_images == []:
+            return fn(None)
+        return original_call(self, fn)
+
+    patched_call._ltx_desktop_gguf_t2v_patch = True  # type: ignore[attr-defined]
+    blocks.ImageConditioner.__call__ = patched_call
+
+
+def install_gguf_component_paths(pipeline: object, checkpoint_path: object) -> None:
+    """Route non-transformer GGUF profile builders to their component files."""
+
+    paths = [str(p) for p in checkpoint_path] if isinstance(checkpoint_path, (list, tuple)) else [str(checkpoint_path)]
+    video_vae = _pick_component_path(paths, ("video_vae", "video-vae", "video"), ".safetensors")
+    audio_vae = _pick_component_path(paths, ("audio_vae", "audio-vae", "audio"), ".safetensors")
+    if video_vae is None:
+        raise RuntimeError("GGUF profile missing video VAE safetensors path")
+    if audio_vae is None:
+        raise RuntimeError("GGUF profile missing audio VAE safetensors path")
+
+    _replace_builder_model_path(pipeline.image_conditioner, "_encoder_builder", video_vae, model_sd_ops=KIJAI_VIDEO_VAE_ENCODER_KEYS_FILTER)
+    _replace_builder_model_path(pipeline.upsampler, "_encoder_builder", video_vae, model_sd_ops=KIJAI_VIDEO_VAE_ENCODER_KEYS_FILTER)
+    _replace_builder_model_path(pipeline.video_decoder, "_decoder_builder", video_vae, model_sd_ops=KIJAI_VIDEO_VAE_DECODER_KEYS_FILTER)
+    _replace_builder_model_path(pipeline.audio_decoder, "_decoder_builder", audio_vae)
+    _replace_builder_model_path(pipeline.audio_decoder, "_vocoder_builder", audio_vae)
 
 
 def install_gguf_loader(pipeline: object) -> None:
@@ -317,6 +590,40 @@ def install_gguf_loader(pipeline: object) -> None:
 
 def _is_gguf_path(path: object) -> bool:
     return str(path).lower().endswith(".gguf")
+
+
+def _replace_builder_model_path(owner: object, attr: str, path: str, *, model_sd_ops: object | None = None) -> None:
+    builder = getattr(owner, attr, None)
+    if builder is None:
+        raise RuntimeError(f"GGUF component path patch failed: missing {owner}.{attr}")
+    if model_sd_ops is not None:
+        setattr(owner, attr, replace(builder, model_path=path, model_sd_ops=model_sd_ops))
+    else:
+        setattr(owner, attr, replace(builder, model_path=path))
+
+
+def _pick_component_path(paths: list[str], needles: tuple[str, ...], suffix: str) -> str | None:
+    for path in paths:
+        lower = Path(path).name.lower()
+        if lower.endswith(suffix) and all(needle in lower for needle in needles[:1]) and any(
+            needle in lower for needle in needles
+        ):
+            return path
+    for path in paths:
+        lower = Path(path).name.lower()
+        if lower.endswith(suffix) and any(needle in lower for needle in needles):
+            return path
+    return None
+
+
+def _find_gemma_gguf(gemma_root: str) -> Path | None:
+    root = Path(gemma_root)
+    if root.is_file() and root.suffix.lower() == ".gguf":
+        return root
+    if not root.is_dir():
+        return None
+    candidates = sorted(p for p in root.glob("*.gguf") if "mmproj" not in p.name.lower())
+    return candidates[0] if candidates else None
 
 
 def _coerce_config_text(value: Any) -> str | None:
