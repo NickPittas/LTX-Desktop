@@ -72,6 +72,13 @@ class LTXRetakePipeline:
             VideoDecoder,
         )
 
+        is_gguf = components is not None and components.transformer_format == "gguf"
+
+        if is_gguf:
+            from services.patches.gguf_loader_fix import install_gguf_prompt_encoder_patch
+
+            install_gguf_prompt_encoder_patch()
+
         self.device = device
         self.dtype = torch.bfloat16
         self._streaming_prefetch_count = streaming_prefetch_count
@@ -97,7 +104,7 @@ class LTXRetakePipeline:
             dtype=self.dtype,
             device=device,
             loras=tuple(loras),
-            quantization=quantization,
+            quantization=None if is_gguf else quantization,
         )
         self.video_decoder = VideoDecoder(
             checkpoint_path=checkpoint_path,  # type: ignore[arg-type]
@@ -109,6 +116,18 @@ class LTXRetakePipeline:
             dtype=self.dtype,
             device=device,
         )
+
+        if is_gguf:
+            from services.patches.gguf_loader_fix import install_gguf_component_paths, install_gguf_loader
+
+            install_gguf_loader(self)
+            c = self._components
+            install_gguf_component_paths(
+                self,
+                checkpoint_path,
+                video_vae_path=c.video_vae_path if c else None,
+                audio_vae_path=c.audio_vae_path if c else None,
+            )
 
     @torch.no_grad()
     def _run(  # noqa: PLR0913, PLR0915

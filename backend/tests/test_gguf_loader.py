@@ -580,3 +580,164 @@ def test_qparam_dequant_cuda() -> None:
     assert out.device.type == "cuda"
     assert out.dtype == torch.bfloat16
     assert out.shape == expected_np.shape
+
+
+# ---------------------------------------------------------------------------
+# install_gguf_loader: multi-stage support (IC-LoRA: stage_1, stage_2)
+# ---------------------------------------------------------------------------
+
+
+def test_install_gguf_loader_patches_stage_1_and_stage_2() -> None:
+    """Patches stage_1 and stage_2 when no stage exists (IC-LoRA upstream)."""
+    from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder
+    from ltx_core.model.transformer import LTXV_MODEL_COMFY_RENAMING_MAP, LTXModelConfigurator
+
+    builder_1 = SingleGPUModelBuilder(
+        model_path="/fake/s1.gguf",
+        model_class_configurator=LTXModelConfigurator,
+        model_sd_ops=LTXV_MODEL_COMFY_RENAMING_MAP,
+    )
+    builder_2 = SingleGPUModelBuilder(
+        model_path="/fake/s2.gguf",
+        model_class_configurator=LTXModelConfigurator,
+        model_sd_ops=LTXV_MODEL_COMFY_RENAMING_MAP,
+    )
+    pipe = SimpleNamespace(
+        stage_1=SimpleNamespace(_transformer_builder=builder_1),
+        stage_2=SimpleNamespace(_transformer_builder=builder_2),
+    )
+
+    install_gguf_loader(pipe)
+
+    s1 = pipe.stage_1._transformer_builder
+    s2 = pipe.stage_2._transformer_builder
+    assert isinstance(s1.model_loader, GgufStateDictLoader)
+    assert isinstance(s2.model_loader, GgufStateDictLoader)
+    assert s1 is not builder_1
+    assert s2 is not builder_2
+
+
+def test_install_gguf_loader_skips_missing_stage_and_stage_1() -> None:
+    """Only patches the stage that exists with a _transformer_builder."""
+    from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder
+    from ltx_core.model.transformer import LTXV_MODEL_COMFY_RENAMING_MAP, LTXModelConfigurator
+
+    builder = SingleGPUModelBuilder(
+        model_path="/fake/t.gguf",
+        model_class_configurator=LTXModelConfigurator,
+        model_sd_ops=LTXV_MODEL_COMFY_RENAMING_MAP,
+    )
+    pipe = SimpleNamespace(
+        stage=SimpleNamespace(_transformer_builder=builder),
+        stage_1=SimpleNamespace(),  # exists but no _transformer_builder
+        stage_2=None,  # missing entirely
+    )
+
+    install_gguf_loader(pipe)
+
+    assert isinstance(pipe.stage._transformer_builder.model_loader, GgufStateDictLoader)
+    assert not hasattr(pipe.stage_1, "_transformer_builder")
+
+
+# ---------------------------------------------------------------------------
+# install_gguf_component_paths: optional components
+# ---------------------------------------------------------------------------
+
+
+def test_install_gguf_component_paths_handles_optional_components() -> None:
+    """Does not require upsampler/audio_decoder to exist (A2V, retake)."""
+    from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder
+    from ltx_core.model.transformer import LTXModelConfigurator
+
+    vae_path = "/explicit/vae.safetensors"
+    enc_builder = SingleGPUModelBuilder(
+        model_path="/initial/wrong.safetensors",
+        model_class_configurator=LTXModelConfigurator,
+    )
+    dec_builder = SingleGPUModelBuilder(
+        model_path="/initial/wrong.safetensors",
+        model_class_configurator=LTXModelConfigurator,
+    )
+    # Pipeline with image_conditioner + video_decoder only (no upsampler, no audio components)
+    pipe = SimpleNamespace(
+        image_conditioner=SimpleNamespace(_encoder_builder=enc_builder),
+        video_decoder=SimpleNamespace(_decoder_builder=dec_builder),
+    )
+
+    install_gguf_component_paths(pipe, ("/checkpoint.safetensors",), video_vae_path=vae_path)
+
+    assert pipe.image_conditioner._encoder_builder.model_path == vae_path
+    assert pipe.video_decoder._decoder_builder.model_path == vae_path
+
+
+def test_install_gguf_component_paths_patches_audio_conditioner() -> None:
+    """Patches audio_conditioner._encoder_builder with audio VAE path only (no filter)."""
+    from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder
+    from ltx_core.model.transformer import LTXModelConfigurator
+
+    video_vae = "/videos/vae.safetensors"
+    audio_vae = "/audio/vae.safetensors"
+    enc_builder = SingleGPUModelBuilder(
+        model_path="/initial/wrong.safetensors",
+        model_class_configurator=LTXModelConfigurator,
+    )
+    dec_builder = SingleGPUModelBuilder(
+        model_path="/initial/wrong.safetensors",
+        model_class_configurator=LTXModelConfigurator,
+    )
+    voc_builder = SingleGPUModelBuilder(
+        model_path="/initial/wrong.safetensors",
+        model_class_configurator=LTXModelConfigurator,
+    )
+    pipe = SimpleNamespace(
+        image_conditioner=SimpleNamespace(_encoder_builder=enc_builder),
+        audio_conditioner=SimpleNamespace(_encoder_builder=enc_builder),
+        audio_decoder=SimpleNamespace(
+            _decoder_builder=dec_builder,
+            _vocoder_builder=voc_builder,
+        ),
+    )
+
+    install_gguf_component_paths(
+        pipe, ("/checkpoint.safetensors",),
+        video_vae_path=video_vae,
+        audio_vae_path=audio_vae,
+    )
+
+    assert pipe.image_conditioner._encoder_builder.model_path == video_vae
+    # audio_conditioner gets audio VAE path without encoder filter
+    assert pipe.audio_conditioner._encoder_builder.model_path == audio_vae
+    assert pipe.audio_decoder._decoder_builder.model_path == audio_vae
+    assert pipe.audio_decoder._vocoder_builder.model_path == audio_vae
+
+
+def test_install_gguf_component_paths_raises_only_when_expected_component_missing() -> None:
+    """Raises when video components exist but no video VAE."""
+    from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder
+    from ltx_core.model.transformer import LTXModelConfigurator
+
+    builder = SingleGPUModelBuilder(
+        model_path="/dummy.safetensors",
+        model_class_configurator=LTXModelConfigurator,
+    )
+
+    with pytest.raises(RuntimeError, match="missing video VAE"):
+        install_gguf_component_paths(
+            SimpleNamespace(
+                image_conditioner=SimpleNamespace(_encoder_builder=builder),
+            ),
+            ("/checkpoint.safetensors",),
+            video_vae_path=None,
+        )
+
+    # No audio components → no audio VAE required
+    pipe = SimpleNamespace(
+        image_conditioner=SimpleNamespace(_encoder_builder=builder),
+    )
+    install_gguf_component_paths(
+        pipe,
+        ("/checkpoint.safetensors",),
+        video_vae_path="/videos/vae.safetensors",
+        audio_vae_path=None,
+    )
+    assert pipe.image_conditioner._encoder_builder.model_path == "/videos/vae.safetensors"

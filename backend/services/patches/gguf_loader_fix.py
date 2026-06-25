@@ -177,12 +177,6 @@ GGUF_DEQUANT_LINEAR_OP = ModuleOps(
     mutator=_amend_forward_with_gguf,
 )
 
-GGUF_GEMMA_DEQUANT_LINEAR_OP = ModuleOps(
-    name="gguf_gemma_dequant_linear",
-    matcher=lambda model: isinstance(model, GemmaTextEncoder),
-    mutator=_amend_forward_with_gguf,
-)
-
 GGUF_EMBEDDINGS_DEQUANT_LINEAR_OP = ModuleOps(
     name="gguf_embeddings_dequant_linear",
     matcher=lambda model: isinstance(model, EmbeddingsProcessor),
@@ -540,6 +534,9 @@ def install_gguf_component_paths(
 ) -> None:
     """Route non-transformer GGUF profile builders to their component files.
 
+    Only patches components that exist on the pipeline — allows the same helper
+    to work for T2V, A2V, IC-LoRA, and retake without wrapper changes.
+
     Parameters
     ----------
     pipeline
@@ -556,52 +553,73 @@ def install_gguf_component_paths(
     paths = [str(p) for p in checkpoint_path] if isinstance(checkpoint_path, (list, tuple)) else [str(checkpoint_path)]
     video_vae = video_vae_path or _pick_component_path(paths, ("video_vae", "video-vae", "video"), ".safetensors")
     audio_vae = audio_vae_path or _pick_component_path(paths, ("audio_vae", "audio-vae", "audio"), ".safetensors")
-    if video_vae is None:
+
+    image_conditioner = getattr(pipeline, "image_conditioner", None)
+    upsampler = getattr(pipeline, "upsampler", None)
+    video_decoder = getattr(pipeline, "video_decoder", None)
+    audio_conditioner = getattr(pipeline, "audio_conditioner", None)
+    audio_decoder = getattr(pipeline, "audio_decoder", None)
+
+    has_video_components = image_conditioner is not None or upsampler is not None or video_decoder is not None
+    has_audio_components = audio_conditioner is not None or audio_decoder is not None
+
+    if has_video_components and video_vae is None:
         raise RuntimeError("GGUF profile missing video VAE safetensors path")
-    if audio_vae is None:
+    if has_audio_components and audio_vae is None:
         raise RuntimeError("GGUF profile missing audio VAE safetensors path")
 
-    _replace_builder_model_path(pipeline.image_conditioner, "_encoder_builder", video_vae, model_sd_ops=KIJAI_VIDEO_VAE_ENCODER_KEYS_FILTER)
-    _replace_builder_model_path(pipeline.upsampler, "_encoder_builder", video_vae, model_sd_ops=KIJAI_VIDEO_VAE_ENCODER_KEYS_FILTER)
-    _replace_builder_model_path(pipeline.video_decoder, "_decoder_builder", video_vae, model_sd_ops=KIJAI_VIDEO_VAE_DECODER_KEYS_FILTER)
-    _replace_builder_model_path(pipeline.audio_decoder, "_decoder_builder", audio_vae)
-    _replace_builder_model_path(pipeline.audio_decoder, "_vocoder_builder", audio_vae)
+    if image_conditioner is not None and video_vae is not None:
+        _replace_builder_model_path(image_conditioner, "_encoder_builder", video_vae, model_sd_ops=KIJAI_VIDEO_VAE_ENCODER_KEYS_FILTER)
+    if upsampler is not None and video_vae is not None:
+        _replace_builder_model_path(upsampler, "_encoder_builder", video_vae, model_sd_ops=KIJAI_VIDEO_VAE_ENCODER_KEYS_FILTER)
+    if video_decoder is not None and video_vae is not None:
+        _replace_builder_model_path(video_decoder, "_decoder_builder", video_vae, model_sd_ops=KIJAI_VIDEO_VAE_DECODER_KEYS_FILTER)
+    if audio_conditioner is not None and audio_vae is not None:
+        _replace_builder_model_path(audio_conditioner, "_encoder_builder", audio_vae)
+    if audio_decoder is not None and audio_vae is not None:
+        _replace_builder_model_path(audio_decoder, "_decoder_builder", audio_vae)
+        _replace_builder_model_path(audio_decoder, "_vocoder_builder", audio_vae)
 
 
 def install_gguf_loader(pipeline: object) -> None:
-    """Install GGUF-native loader, sd_ops, and the lazy dequant module op on a DistilledPipeline.
+    """Install GGUF-native loader, sd_ops, and the lazy dequant module op on all present stages.
 
-    Replaces the builder's ``model_loader`` with :class:`GgufStateDictLoader`,
-    ``model_sd_ops`` with :class:`GgufNativeSDOps`, and adds
-    :data:`GGUF_DEQUANT_LINEAR_OP` to ``module_ops`` so every transformer
-    ``nn.Linear`` dequantizes its QParam weights lazily in forward. Idempotent
-    once all three are in place; repairs a partially-installed builder (e.g. a
-    GGUF loader/native sd_ops missing the module op). Raises ``RuntimeError``
-    if the pipeline shape does not match expectations.
+    Patches every stage that exists (``stage``, ``stage_1``, ``stage_2``) — supports
+    T2V, A2V, IC-LoRA, and retake without wrapper changes. Idempotent per stage;
+    raises ``RuntimeError`` only if none of the expected stages carry a ``_transformer_builder``.
     """
-    stage = getattr(pipeline, "stage", None)
-    if stage is None:
-        raise RuntimeError("install_gguf_loader: pipeline has no .stage (expected DistilledPipeline)")
-    builder = getattr(stage, "_transformer_builder", None)
-    if builder is None:
-        raise RuntimeError("install_gguf_loader: stage has no _transformer_builder; Lightricks API changed")
-    has_gguf_op = any(op.name == GGUF_DEQUANT_LINEAR_OP.name for op in builder.module_ops)
-    already_installed = (
-        isinstance(builder.model_loader, GgufStateDictLoader)
-        and isinstance(builder.model_sd_ops, GgufNativeSDOps)
-        and has_gguf_op
-    )
-    if already_installed:
-        return
-    # Preserve any existing module ops, dropping a stale GGUF op (no duplicates).
-    module_ops = tuple(op for op in builder.module_ops if op.name != GGUF_DEQUANT_LINEAR_OP.name)
-    module_ops = (*module_ops, GGUF_DEQUANT_LINEAR_OP)
-    stage._transformer_builder = replace(  # type: ignore[arg-type]
-        builder,
-        model_loader=GgufStateDictLoader(),
-        model_sd_ops=GgufNativeSDOps(),
-        module_ops=module_ops,
-    )
+    stage_names = ("stage", "stage_1", "stage_2")
+    found = False
+    for name in stage_names:
+        stage = getattr(pipeline, name, None)
+        if stage is None:
+            continue
+        builder = getattr(stage, "_transformer_builder", None)
+        if builder is None:
+            continue
+        found = True
+        has_gguf_op = any(op.name == GGUF_DEQUANT_LINEAR_OP.name for op in builder.module_ops)
+        already_installed = (
+            isinstance(builder.model_loader, GgufStateDictLoader)
+            and isinstance(builder.model_sd_ops, GgufNativeSDOps)
+            and has_gguf_op
+        )
+        if already_installed:
+            continue
+        # Preserve any existing module ops, dropping a stale GGUF op (no duplicates).
+        module_ops = tuple(op for op in builder.module_ops if op.name != GGUF_DEQUANT_LINEAR_OP.name)
+        module_ops = (*module_ops, GGUF_DEQUANT_LINEAR_OP)
+        stage._transformer_builder = replace(  # type: ignore[arg-type]
+            builder,
+            model_loader=GgufStateDictLoader(),
+            model_sd_ops=GgufNativeSDOps(),
+            module_ops=module_ops,
+        )
+    if not found:
+        raise RuntimeError(
+            "install_gguf_loader: pipeline has no stage/stage_1/stage_2 "
+            "with a _transformer_builder (expected DistilledPipeline)"
+        )
 
 
 # --- helpers ---

@@ -46,14 +46,33 @@ class LTXa2vPipeline:
 
         from services.a2v_pipeline.distilled_a2v_pipeline import DistilledA2VPipeline
 
+        is_gguf = components is not None and components.transformer_format == "gguf"
+
+        if is_gguf:
+            from services.patches.gguf_loader_fix import install_gguf_prompt_encoder_patch
+
+            install_gguf_prompt_encoder_patch()
+
         self._streaming_prefetch_count = streaming_prefetch_count
         self.pipeline = DistilledA2VPipeline(
             distilled_checkpoint_path=checkpoint_path,  # type: ignore[arg-type]  # ponytail: ltx_pipelines accepts tuple per M5 spec
             gemma_root=cast(str, gemma_root),
             spatial_upsampler_path=upsampler_path,
             device=device,
-            quantization=QuantizationPolicy.fp8_cast() if device_supports_fp8(device) else None,
+            quantization=None if is_gguf else (QuantizationPolicy.fp8_cast() if device_supports_fp8(device) else None),
         )
+
+        if is_gguf:
+            from services.patches.gguf_loader_fix import install_gguf_component_paths, install_gguf_loader
+
+            install_gguf_loader(self.pipeline)
+            c = self._components
+            install_gguf_component_paths(
+                self.pipeline,
+                checkpoint_path,
+                video_vae_path=c.video_vae_path if c else None,
+                audio_vae_path=c.audio_vae_path if c else None,
+            )
 
     def _run_inference(
         self,

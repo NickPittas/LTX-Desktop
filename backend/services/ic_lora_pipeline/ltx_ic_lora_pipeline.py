@@ -50,6 +50,13 @@ class LTXIcLoraPipeline:
         from ltx_core.quantization import QuantizationPolicy
         from ltx_pipelines.ic_lora import ICLoraPipeline
 
+        is_gguf = components is not None and components.transformer_format == "gguf"
+
+        if is_gguf:
+            from services.patches.gguf_loader_fix import install_gguf_prompt_encoder_patch
+
+            install_gguf_prompt_encoder_patch()
+
         self._streaming_prefetch_count = streaming_prefetch_count
         lora_entry = LoraPathStrengthAndSDOps(path=lora_path, strength=1.0, sd_ops=LTXV_LORA_COMFY_RENAMING_MAP)
         self.pipeline = ICLoraPipeline(
@@ -58,8 +65,20 @@ class LTXIcLoraPipeline:
             gemma_root=cast(str, gemma_root),
             loras=[lora_entry],
             device=device,
-            quantization=QuantizationPolicy.fp8_cast() if device_supports_fp8(device) else None,
+            quantization=None if is_gguf else (QuantizationPolicy.fp8_cast() if device_supports_fp8(device) else None),
         )
+
+        if is_gguf:
+            from services.patches.gguf_loader_fix import install_gguf_component_paths, install_gguf_loader
+
+            install_gguf_loader(self.pipeline)
+            c = self._components
+            install_gguf_component_paths(
+                self.pipeline,
+                checkpoint_path,
+                video_vae_path=c.video_vae_path if c else None,
+                audio_vae_path=c.audio_vae_path if c else None,
+            )
 
     def _run_inference(
         self,
