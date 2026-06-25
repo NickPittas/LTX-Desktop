@@ -198,10 +198,12 @@ class GgufStateDictLoader:
         require_transformer_config: bool = True,
         include_safetensors: bool = False,
         lazy_quantized: bool = True,
+        allow_safetensors_only: bool = False,
     ) -> None:
         self._require_transformer_config = require_transformer_config
         self._include_safetensors = include_safetensors
         self._lazy_quantized = lazy_quantized
+        self._allow_safetensors_only = allow_safetensors_only
 
     def metadata(self, path: str) -> dict[str, object]:
         import gguf
@@ -240,7 +242,9 @@ class GgufStateDictLoader:
         model_paths = list(path) if isinstance(path, (list, tuple)) else [path]
         gguf_paths = [p for p in model_paths if _is_gguf_path(p)]
         safetensors_paths = [p for p in model_paths if str(p).lower().endswith(".safetensors")]
-        if not gguf_paths and not (self._include_safetensors and safetensors_paths):
+        if not gguf_paths and not (
+            (self._include_safetensors or self._allow_safetensors_only) and safetensors_paths
+        ):
             raise RuntimeError("GGUF loader received no .gguf path; this is a pipeline wiring bug")
 
         target_device = torch.device("cpu")
@@ -290,7 +294,7 @@ class GgufStateDictLoader:
                         tensor_t = tensor_t.to(dtype=torch.bfloat16)
                 add_value(tensor.name, tensor_t)
 
-        if self._include_safetensors:
+        if self._include_safetensors or (self._allow_safetensors_only and not gguf_paths):
             from safetensors import safe_open
 
             for safetensors_path in safetensors_paths:
@@ -611,7 +615,7 @@ def install_gguf_loader(pipeline: object) -> None:
         module_ops = (*module_ops, GGUF_DEQUANT_LINEAR_OP)
         stage._transformer_builder = replace(  # type: ignore[arg-type]
             builder,
-            model_loader=GgufStateDictLoader(),
+            model_loader=GgufStateDictLoader(allow_safetensors_only=True),
             model_sd_ops=GgufNativeSDOps(),
             module_ops=module_ops,
         )

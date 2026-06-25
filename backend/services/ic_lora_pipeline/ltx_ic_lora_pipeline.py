@@ -47,7 +47,6 @@ class LTXIcLoraPipeline:
         self._components = components
         from ltx_core.loader.primitives import LoraPathStrengthAndSDOps
         from ltx_core.loader.sd_ops import LTXV_LORA_COMFY_RENAMING_MAP
-        from ltx_core.quantization import QuantizationPolicy
         from ltx_pipelines.ic_lora import ICLoraPipeline
 
         is_gguf = components is not None and components.transformer_format == "gguf"
@@ -56,6 +55,11 @@ class LTXIcLoraPipeline:
             from services.patches.gguf_loader_fix import install_gguf_prompt_encoder_patch
 
             install_gguf_prompt_encoder_patch()
+            quantization = None
+        else:
+            from ltx_core.quantization import QuantizationPolicy
+
+            quantization = QuantizationPolicy.fp8_cast() if device_supports_fp8(device) else None
 
         self._streaming_prefetch_count = streaming_prefetch_count
         lora_entry = LoraPathStrengthAndSDOps(path=lora_path, strength=1.0, sd_ops=LTXV_LORA_COMFY_RENAMING_MAP)
@@ -65,7 +69,7 @@ class LTXIcLoraPipeline:
             gemma_root=cast(str, gemma_root),
             loras=[lora_entry],
             device=device,
-            quantization=None if is_gguf else (QuantizationPolicy.fp8_cast() if device_supports_fp8(device) else None),
+            quantization=quantization,
         )
 
         if is_gguf:

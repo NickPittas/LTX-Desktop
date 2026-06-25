@@ -42,8 +42,6 @@ class LTXa2vPipeline:
         components: ResolvedLtxComponents | None = None,
     ) -> None:
         self._components = components
-        from ltx_core.quantization import QuantizationPolicy
-
         from services.a2v_pipeline.distilled_a2v_pipeline import DistilledA2VPipeline
 
         is_gguf = components is not None and components.transformer_format == "gguf"
@@ -52,6 +50,11 @@ class LTXa2vPipeline:
             from services.patches.gguf_loader_fix import install_gguf_prompt_encoder_patch
 
             install_gguf_prompt_encoder_patch()
+            quantization = None
+        else:
+            from ltx_core.quantization import QuantizationPolicy
+
+            quantization = QuantizationPolicy.fp8_cast() if device_supports_fp8(device) else None
 
         self._streaming_prefetch_count = streaming_prefetch_count
         self.pipeline = DistilledA2VPipeline(
@@ -59,7 +62,7 @@ class LTXa2vPipeline:
             gemma_root=cast(str, gemma_root),
             spatial_upsampler_path=upsampler_path,
             device=device,
-            quantization=None if is_gguf else (QuantizationPolicy.fp8_cast() if device_supports_fp8(device) else None),
+            quantization=quantization,
         )
 
         if is_gguf:
