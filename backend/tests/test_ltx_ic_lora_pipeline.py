@@ -9,7 +9,11 @@ import numpy as np
 import pytest
 import torch
 
-from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline, _vae_compatible_frame_count
+from services.ic_lora_pipeline.ltx_ic_lora_pipeline import (
+    LTXIcLoraPipeline,
+    _vae_compatible_frame_count,
+    _vae_padded_frame_count,
+)
 
 
 # ── Visual/manual acceptance gate for inpaint parity ──
@@ -70,6 +74,43 @@ class TestVaeFrameCount:
     def test_small_rounds_down(self):
         assert _vae_compatible_frame_count(10) == 9
         assert _vae_compatible_frame_count(16) == 9
+
+
+class TestVaePaddedFrameCount:
+    """_vae_padded_frame_count returns next 8n+1 stably (no re-pad when already compatible)."""
+
+    def test_exact_divisible(self):
+        assert _vae_padded_frame_count(193) == 193
+        assert _vae_padded_frame_count(97) == 97
+        assert _vae_padded_frame_count(65) == 65
+
+    def test_pads_up(self):
+        assert _vae_padded_frame_count(196) == 201
+        assert _vae_padded_frame_count(200) == 201
+        assert _vae_padded_frame_count(100) == 105
+        assert _vae_padded_frame_count(66) == 73
+
+    def test_minimum(self):
+        assert _vae_padded_frame_count(1) == 1
+        assert _vae_padded_frame_count(0) == 1
+        assert _vae_padded_frame_count(-1) == 1
+
+    def test_small_exact(self):
+        assert _vae_padded_frame_count(9) == 9
+        assert _vae_padded_frame_count(17) == 17
+
+    def test_small_pads_up(self):
+        assert _vae_padded_frame_count(10) == 17
+        assert _vae_padded_frame_count(16) == 17
+
+    def test_sequence_padding(self):
+        """Verify padding behavior for 1..25: already-compatible stays, others pad to next."""
+        for n in range(1, 26):
+            result = _vae_padded_frame_count(n)
+            assert (result - 1) % 8 == 0, f"{n} → {result}, not 8n+1"
+            assert result >= n, f"{n} → {result} < {n}"
+            if (n - 1) % 8 == 0:
+                assert result == n, f"{n} already 8n+1, should stay, got {result}"
 
 
 class TestCompositeInOutpainting:

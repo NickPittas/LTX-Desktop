@@ -90,6 +90,14 @@ def _vae_compatible_frame_count(num_frames: int) -> int:
     return 1 + 8 * max(0, (num_frames - 1) // 8)
 
 
+def _vae_padded_frame_count(num_frames: int) -> int:
+    """Next 1+8*k frame count >= num_frames for VAE latent compatibility.
+
+    Official LTX pads to next valid 8n+1 frame count then crops output back.
+    """
+    return ((num_frames - 2) // 8 + 1) * 8 + 1
+
+
 class LTXIcLoraPipeline:
     @staticmethod
     def create(
@@ -399,7 +407,7 @@ class LTXIcLoraPipeline:
         stage1_radius, stage2_radius = derive_stage_radii(mask_grow_px)
 
         half_h, half_w = height // 2, width // 2
-        num_frames_vae = _vae_compatible_frame_count(num_frames)
+        num_frames_vae_padded = _vae_padded_frame_count(num_frames)
         device = self.pipeline.device
         dtype = torch.bfloat16  # ponytail: matches ICLoraPipeline.dtype
 
@@ -412,11 +420,16 @@ class LTXIcLoraPipeline:
         video_gen = decode_video_by_frame(path=video_path, frame_cap=num_frames, device=device)
         video_full = video_preprocess(video_gen, height, width, dtype, device)  # (1, 3, F, H, W) in [-1,1]
         num_actual_frames = video_full.shape[2]
-        num_frames_vae = min(num_frames_vae, _vae_compatible_frame_count(num_actual_frames))
+
+        # ponytail: pad to 8n+1 by repeating last frame; crop output back after generation
+        if video_full.shape[2] < num_frames_vae_padded:
+            last_frame = video_full[:, :, -1:, :, :]
+            pad_count = num_frames_vae_padded - video_full.shape[2]
+            video_full = torch.cat([video_full, last_frame.expand(-1, -1, pad_count, -1, -1)], dim=2)
 
         # Downscale to half res for stage 1
         video_half = self._resize_video_spatial(
-            video_full[:, :, :num_frames_vae, :, :],
+            video_full[:, :, :num_frames_vae_padded, :, :],
             height=half_h,
             width=half_w,
             mode="bilinear",
@@ -424,11 +437,16 @@ class LTXIcLoraPipeline:
         )
 
         # Full res for stage 2
-        video_full = video_full[:, :, :num_frames_vae, :, :]
+        video_full = video_full[:, :, :num_frames_vae_padded, :, :]
 
-        # Load mask frames
-        mask_gen = decode_video_by_frame(path=mask_path, frame_cap=num_frames_vae, device=device)
+        # Load mask frames, pad if fewer than needed
+        mask_gen = decode_video_by_frame(path=mask_path, frame_cap=num_frames_vae_padded, device=device)
         mask_video = video_preprocess(mask_gen, height, width, dtype, device)  # (1, 3, F, H, W) in [-1,1]
+        if mask_video.shape[2] < num_frames_vae_padded:
+            last_mask = mask_video[:, :, -1:, :, :]
+            mask_pad = num_frames_vae_padded - mask_video.shape[2]
+            mask_video = torch.cat([mask_video, last_mask.expand(-1, -1, mask_pad, -1, -1)], dim=2)
+        mask_video = mask_video[:, :, :num_frames_vae_padded, :, :]
         mask_gray = mask_video.mean(dim=1, keepdim=True)  # (1, 1, F, H, W) grayscale in [-1,1]
         mask_gray = (mask_gray + 1.0) / 2.0  # → [0, 1]
         # ------------------------------------------------------------------ #
@@ -451,9 +469,9 @@ class LTXIcLoraPipeline:
         # ------------------------------------------------------------------ #
         logger.info("[inpaint] Creating green composite frames")
         # Official: stage 1 green prep uses stage1 (r=15) mask at half res
-        # Official: stage 2 green prep uses stage2 (r=30) mask at full res
-        green_half = green_composite_preprocess(video_half[:, :, :num_frames_vae], mask_stage1_half)
-        green_full = green_composite_preprocess(video_full[:, :, :num_frames_vae], mask_stage2_full)
+        # ponytail: only half-res green used for guide conditioning; full-res
+        # green was for official blend but we blend against original video at both stages.
+        green_half = green_composite_preprocess(video_half[:, :, :num_frames_vae_padded], mask_stage1_half)
 
         # ────────────────────────────────────────────────────────────────────── #
         # 4. Green composite guide conditioning — direct tensor encode, no file I/O
@@ -515,7 +533,7 @@ class LTXIcLoraPipeline:
             noiser=noiser,
             width=half_w,
             height=half_h,
-            frames=num_frames_vae,
+            frames=num_frames_vae_padded,
             fps=frame_rate,
             video=ModalitySpec(
                 context=video_context,
@@ -536,17 +554,18 @@ class LTXIcLoraPipeline:
         decoded_s1_frames = self._collect_frames(decoded_s1_iter)
         # decoded_s1_frames: (F, H_half, W_half, 3) in [0, 1]
 
-        # Green composite as [0, 1] pixel frames
-        # green_half is (1, 3, F, H, W) → remove batch → permute to (F, H, W, 3)
-        green_half_frames = green_half[0].permute(1, 2, 3, 0)  # (F, H, W, 3) in [-1, 1]
-        green_half_frames_01 = (green_half_frames + 1.0) / 2.0  # → [0, 1]
+        # Original video as [0, 1] pixel frames for stage 1 blend
+        # video_half is (1, 3, F, H, W) in [-1,1] → (F, H, W, 3) in [0, 1]
+        video_half_frames = video_half[0].permute(1, 2, 3, 0)  # (F, H, W, 3) in [-1, 1]
+        video_half_frames_01 = (video_half_frames + 1.0) / 2.0  # → [0, 1]
 
-        # Official bridge blend [5266]: image_a=stage1_decoded, image_b=green_half,
-        # mask=stage1 (r=15), mask_low_res_dilation=5
+        # Bridge blend [5266]: image_a=stage1_decoded, image_b=original video.
+        # ponytail: green remains guide conditioning; Laplacian blend preserves original
+        # unmasked content and avoids green bleed. Not official parity.
         mask_s1_blend = mask_stage1_half[:decoded_s1_frames.shape[0]]
         blend_stage1 = laplacian_pyramid_blend(
             decoded_s1_frames,
-            green_half_frames_01[:decoded_s1_frames.shape[0]],
+            video_half_frames_01[:decoded_s1_frames.shape[0]],
             mask_s1_blend,
             max_level=7,
             mask_low_res_dilation=INPAINT_BLEND1_LOW_RES_DILATION,
@@ -589,6 +608,12 @@ class LTXIcLoraPipeline:
         # ponytail: [1:] drops 0.909375 → official 3-step [0.725, 0.421875, 0.0]
         stage2_sigmas = STAGE_2_DISTILLED_SIGMAS[1:].to(dtype=torch.float32, device=device)
 
+        # ponytail: scale sigma schedule proportionally so stage2_sigmas_video[0] ≈ 0.55,
+        # visually tuned to reduce stage2 structural drift. Promote to UI only if users
+        # need per-scene tuning.
+        stage2_sigmas_video = stage2_sigmas * (0.55 / stage2_sigmas[0].item())
+        stage2_noise_scale = 0.55
+
         # Recreate conditionings at full res for stage 2
         # ponytail: sampler uses default Euler (SimpleDenoiser/DiffusionStage).
         # Official Comfy workflow uses euler_cfg_pp (stage1) and
@@ -621,20 +646,22 @@ class LTXIcLoraPipeline:
 
         video_state_s2, audio_state_s2 = self.pipeline.stage_2(
             denoiser=SimpleDenoiser(video_context, audio_context),
-            sigmas=stage2_sigmas,
+            sigmas=stage2_sigmas_video,
             noiser=noiser_s2,
             width=width,
             height=height,
-            frames=num_frames_vae,
+            frames=num_frames_vae_padded,
             fps=frame_rate,
             video=ModalitySpec(
                 context=video_context,
                 conditionings=stage2_conditionings,
-                noise_scale=stage2_sigmas[0].item(),
+                noise_scale=stage2_noise_scale,
                 initial_latent=encoded_blend,
             ),
             audio=ModalitySpec(
                 context=audio_context,
+                # ponytail: audio noise_scale intentionally left on stage2_sigmas[0].item()
+                # to isolate video-side variable for testing.
                 noise_scale=stage2_sigmas[0].item(),
                 initial_latent=audio_state_s1.latent,  # type: ignore[union-attr]
             ),
@@ -649,16 +676,18 @@ class LTXIcLoraPipeline:
         decoded_s2_iter = self.pipeline.video_decoder(video_state_s2.latent, tiling_config, generator_s2)
         decoded_s2_frames = self._collect_frames(decoded_s2_iter)
 
-        # Green composite at full res for blend
-        green_full_frames = green_full[0].permute(1, 2, 3, 0)  # (F, H, W, 3) in [-1, 1]
-        green_full_frames_01 = (green_full_frames + 1.0) / 2.0  # → [0, 1]
+        # Original video as [0, 1] pixel frames for stage 2 blend
+        # video_full is (1, 3, F, H, W) in [-1,1] → (F, H, W, 3) in [0, 1]
+        video_full_frames = video_full[0].permute(1, 2, 3, 0)  # (F, H, W, 3) in [-1, 1]
+        video_full_frames_01 = (video_full_frames + 1.0) / 2.0  # → [0, 1]
 
-        # Official final blend [5226]: image_a=stage2_decoded, image_b=green_full,
-        # mask=stage2 (r=30), mask_low_res_dilation=6
+        # Final blend [5226]: image_a=stage2_decoded, image_b=original video.
+        # ponytail: green remains guide conditioning; Laplacian blend preserves original
+        # unmasked content and avoids green bleed. Not official parity.
         mask_s2_blend = mask_stage2_full[:decoded_s2_frames.shape[0]]
         blend_stage2 = laplacian_pyramid_blend(
             decoded_s2_frames,
-            green_full_frames_01[:decoded_s2_frames.shape[0]],
+            video_full_frames_01[:decoded_s2_frames.shape[0]],
             mask_s2_blend,
             max_level=7,
             mask_low_res_dilation=laplacian_blend_grow,
@@ -672,7 +701,10 @@ class LTXIcLoraPipeline:
         # Audio context is always set up in inpaint (see prompt encoding above)
         assert audio_state_s2 is not None, "stage 2 audio state is None — audio context may not be set"
         decoded_audio = self.pipeline.audio_decoder(audio_state_s2.latent)
-        chunks = video_chunks_number(num_frames_vae, tiling_config)
+        # ponytail: crop generated frames back to original input count;
+        # extra padded frames (repeat-last-frame) discarded to preserve duration
+        blend_stage2 = blend_stage2[:num_actual_frames]
+        chunks = video_chunks_number(num_actual_frames, tiling_config)
         encode_video_output(
             video=(blend_stage2.clamp(0, 1) * 255).to(torch.uint8),
             audio=decoded_audio,
