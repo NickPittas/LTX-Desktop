@@ -9,6 +9,9 @@ import { pathToFileUrl } from '../lib/file-url'
 import { useHfAuth } from '../hooks/use-hf-auth'
 import { useHfModelAccess } from '../hooks/use-hf-model-access'
 
+const VIDEO_EXTS = new Set(['mp4', 'mov', 'avi', 'webm', 'mkv'])
+const isVideoPath = (p: string) => VIDEO_EXTS.has(p.split('.').pop()?.toLowerCase() ?? '')
+
 export type ICLoraConditioningType = 'canny' | 'depth' | null
 
 interface ICLoraPanelProps {
@@ -662,7 +665,23 @@ export function ICLoraPanel({
               <div className="flex-1 flex items-center justify-center min-h-0 p-4">
                 {maskPath ? (
                   <div className="text-center">
-                    <img src={pathToFileUrl(maskPath)} alt="Mask" className="max-w-full max-h-40 object-contain mx-auto mb-2" />
+                    {isVideoPath(maskPath) ? (
+                      <video
+                        src={pathToFileUrl(maskPath)}
+                        className="max-w-full max-h-40 object-contain mx-auto mb-2"
+                        controls
+                        muted
+                        playsInline
+                        onError={(e) => console.error('[ICLoraPanel] Mask video failed to load:', maskPath, (e.target as HTMLVideoElement)?.error)}
+                      />
+                    ) : (
+                      <img
+                        src={pathToFileUrl(maskPath)}
+                        alt="Mask"
+                        className="max-w-full max-h-40 object-contain mx-auto mb-2"
+                        onError={() => console.error('[ICLoraPanel] Mask image failed to load:', maskPath)}
+                      />
+                    )}
                     <p className="text-zinc-400 text-[10px] truncate max-w-[150px] mx-auto">{maskPath.split(/[\\/]/).pop()}</p>
                     <button onClick={() => setMaskPath(null)} className="text-[10px] text-red-400 hover:text-red-300 mt-1">Remove</button>
                   </div>
