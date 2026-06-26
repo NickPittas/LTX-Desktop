@@ -6,7 +6,7 @@ import { logger } from '../logger'
 import { getMainWindow } from '../window'
 import { validatePath, approvePath } from '../path-validation'
 import { getProjectAssetsPath, setProjectAssetsPath } from '../app-state'
-import { extractVideoFrameToFile, getVideoDimensions } from '../export/ffmpeg-utils'
+import { extractVideoFrameToFile, findFfmpegPath, getVideoDimensions, runFfmpeg } from '../export/ffmpeg-utils'
 import { createDownsampledThumbnail, getImageDimensions, getThumbnailPaths } from './image-utils'
 import { handle } from './typed-handle'
 
@@ -116,6 +116,42 @@ function createVideoBigThumbnail(videoPath: string, bigThumbnailPath: string): v
     timeoutMs: 30000,
   })
 }
+
+async function transcodeVideoInPlace(videoPath: string): Promise<void> {
+  const ffmpegPath = findFfmpegPath()
+  if (!ffmpegPath) {
+    throw new Error('ffmpeg not found for video transcoding')
+  }
+
+  const tmpPath = videoPath + '.tmp_transcode.mp4'
+  const args = [
+    '-y',
+    '-i', videoPath,
+    '-map', '0:v:0',
+    '-map', '0:a?',
+    '-c:v', 'libx264',
+    '-pix_fmt', 'yuv420p',
+    '-preset', 'veryfast',
+    '-crf', '18',
+    '-c:a', 'aac',
+    '-b:a', '192k',
+    '-movflags', '+faststart',
+    tmpPath,
+  ]
+
+  const result = await runFfmpeg(ffmpegPath, args)
+  if (!result.success) {
+    try { fs.unlinkSync(tmpPath) } catch { /* best-effort cleanup */ }
+    throw new Error(`Video transcoding failed for ${videoPath}: ${result.error}`)
+  }
+
+  // Replace original with transcoded copy
+  fs.unlinkSync(videoPath)
+  fs.renameSync(tmpPath, videoPath)
+}
+
+// ponytail: copied project asset doubles as playback proxy; add proxyPath
+// field later if original-in-project preservation matters.
 
 function createVisualThumbnails(assetPath: string, type: 'video' | 'image'): { bigThumbnailPath: string; smallThumbnailPath: string } {
   const { bigThumbnailPath: generatedBigThumbnailPath, smallThumbnailPath } = getThumbnailPaths(assetPath)
@@ -278,10 +314,17 @@ export function registerFileHandlers(): void {
     return searchDirectoryForFilesImpl(directory, filenames)
   })
 
-  handle('addVisualAssetToProject', ({ srcPath, projectId, type }) => {
+  handle('addVisualAssetToProject', async ({ srcPath, projectId, type }) => {
     try {
       const resolvedSrc = resolveLocalSourcePath(srcPath)
       const destPath = copyToProjectAssetDirectory(resolvedSrc, projectId)
+
+      // Transcode video project copy to H.264/AAC for reliable browser playback
+      if (type === 'video') {
+        await transcodeVideoInPlace(destPath)
+      }
+
+      // Thumbnails/dimensions generated from final transcoded copy
       const { bigThumbnailPath, smallThumbnailPath } = createVisualThumbnails(destPath, type)
       const { width, height } = getVisualAssetDimensions(destPath, type)
 

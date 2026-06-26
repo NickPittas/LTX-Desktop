@@ -55,6 +55,7 @@ function AssetCard({
   const [currentTime, setCurrentTime] = useState(0)
   const [isMuted, setIsMuted] = useState(true)
   const [volume, setVolume] = useState(0.5)
+  const [hoverVideoReady, setHoverVideoReady] = useState(false)
   const isFavorite = asset.favorite || false
 
   useEffect(() => {
@@ -93,10 +94,11 @@ function AssetCard({
   return (
     <div
       className="relative group cursor-pointer rounded-xl overflow-hidden bg-zinc-900"
-      onMouseEnter={() => setIsHovered(true)}
+      onMouseEnter={() => { setIsHovered(true); setHoverVideoReady(false) }}
       onMouseLeave={() => {
         setIsHovered(false)
         setCurrentTime(0)
+        setHoverVideoReady(false)
       }}
       onClick={onPlay}
       draggable={asset.type === 'image'}
@@ -109,7 +111,7 @@ function AssetCard({
               src={pathToFileUrl(asset.bigThumbnailPath)}
               alt=""
               className={`absolute inset-0 w-full h-full object-contain transition-opacity duration-150 ${
-                isHovered ? 'opacity-0' : 'opacity-100'
+                isHovered && hoverVideoReady ? 'opacity-0' : 'opacity-100'
               }`}
             />
           )}
@@ -124,7 +126,9 @@ function AssetCard({
               playsInline
               preload="metadata"
               onTimeUpdate={handleTimeUpdate}
-              onError={(e) => console.error('[GenSpace] Asset card hover video failed:', asset.path, (e.target as HTMLVideoElement)?.error)}
+              onCanPlay={() => setHoverVideoReady(true)}
+              onLoadedData={() => setHoverVideoReady(true)}
+              onError={(e) => { setHoverVideoReady(false); console.error('[GenSpace] Asset card hover video failed:', asset.path, (e.target as HTMLVideoElement)?.error) }}
             />
           )}
         </div>
