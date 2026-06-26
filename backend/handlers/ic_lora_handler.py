@@ -101,6 +101,12 @@ _TYPED_ADAPTER_FIELD: dict[str, str] = {
 }
 
 
+# ponytail: simple align helper; replace with math.ceil division if Python adds one
+def _align_up(value: int, multiple: int) -> int:
+    """Round up to the next multiple of `multiple`. Minimum `multiple`."""
+    return max((value + multiple - 1) // multiple * multiple, multiple)
+
+
 class IcLoraHandler(StateHandlerBase):
     def __init__(
         self,
@@ -441,9 +447,8 @@ class IcLoraHandler(StateHandlerBase):
 
             self._generation.update_progress("inference", 15, 0, 1)
 
-            width = 768
-            height = round(width * input_height / input_width / 128) * 128
-            height = max(height, 128)
+            width = _align_up(input_width, 64)
+            height = _align_up(input_height, 64)
 
             output_path = (
                 self.config.outputs_dir / f"ic_lora_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.mp4"

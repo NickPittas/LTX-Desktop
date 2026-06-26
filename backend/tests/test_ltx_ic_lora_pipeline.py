@@ -114,141 +114,77 @@ class TestVaePaddedFrameCount:
 
 
 class TestCompositeInOutpainting:
-    """Verify _composite_in_outpainting blends generated and original via mask.
+    """Verify compositing math: gen * mask + orig * (1 - mask).
 
-    White mask (255) → keep generated region.
-    Black mask (0) → preserve original region.
+    White mask (1.0) → keep generated region.
+    Black mask (0.0) → preserve original region.
     """
 
-    def _write_video(self, path: Path, frames: list[np.ndarray]) -> None:
-        h, w = frames[0].shape[:2]
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(str(path), fourcc, 1, (w, h))
-        for f in frames:
-            writer.write(f)
-        writer.release()
+    @staticmethod
+    def _composite(
+        gen: torch.Tensor, orig: torch.Tensor, mask: torch.Tensor
+    ) -> torch.Tensor:
+        mask_3ch = mask.unsqueeze(-1).expand(-1, -1, -1, 3)
+        return gen * mask_3ch + orig * (1.0 - mask_3ch)
 
-    def test_black_mask_preserves_original_white_mask_uses_generated(self, tmp_path: Path) -> None:
+    def test_black_mask_preserves_original_white_mask_uses_generated(self):
         """Split mask: black left preserves original, white right uses generated."""
-        h, w = 64, 64
-        orig_val, gen_val = 100, 200
+        F, h, w = 1, 64, 64
+        orig_val, gen_val = 0.4, 0.8
 
-        orig = np.full((h, w, 3), orig_val, dtype=np.uint8)
-        gen = np.full((h, w, 3), gen_val, dtype=np.uint8)
-        mask = np.zeros((h, w, 3), dtype=np.uint8)
-        mask[:, w // 2 :, :] = 255
+        orig = torch.full((F, h, w, 3), orig_val)
+        gen = torch.full((F, h, w, 3), gen_val)
+        mask = torch.zeros(F, h, w)
+        mask[:, :, w // 2:] = 1.0
 
-        orig_path = tmp_path / "original.mp4"
-        gen_path = tmp_path / "generated.mp4"
-        mask_path = tmp_path / "mask.mp4"
+        result = self._composite(gen, orig, mask)
 
-        self._write_video(orig_path, [orig])
-        self._write_video(gen_path, [gen])
-        self._write_video(mask_path, [mask])
-
-        LTXIcLoraPipeline._composite_in_outpainting(
-            str(gen_path), str(orig_path), str(mask_path)
-        )
-
-        cap = cv2.VideoCapture(str(gen_path))
-        ret, composite = cap.read()
-        cap.release()
-        assert ret, "Should read composite frame"
-
-        left = composite[:, : w // 2, :]
-        right = composite[:, w // 2 :, :]
-
-        # ponytail: mp4v codec drifts values at small sizes, check mean proximity
-        mean_left = float(np.mean(left))
-        mean_right = float(np.mean(right))
+        mean_left = result[:, :, : w // 2, :].mean().item()
+        mean_right = result[:, :, w // 2 :, :].mean().item()
 
         assert abs(mean_left - orig_val) < abs(mean_left - gen_val), (
-            f"Black mask side should be closer to original={orig_val} "
-            f"than generated={gen_val}, got mean {mean_left:.1f}"
+            f"Black mask side mean {mean_left:.4f} should be closer to "
+            f"orig={orig_val} than gen={gen_val}"
         )
         assert abs(mean_right - gen_val) < abs(mean_right - orig_val), (
-            f"White mask side should be closer to generated={gen_val} "
-            f"than original={orig_val}, got mean {mean_right:.1f}"
+            f"White mask side mean {mean_right:.4f} should be closer to "
+            f"gen={gen_val} than orig={orig_val}"
         )
-        # Ensure both are at least directionally correct (codec drift of ~20 is OK)
-        assert mean_left <= orig_val + 15, (
-            f"Black mask side mean {mean_left:.1f} too far from {orig_val}"
-        )
-        assert mean_right >= gen_val - 15, (
-            f"White mask side mean {mean_right:.1f} too far from {gen_val}"
-        )
+        assert abs(mean_left - orig_val) < 1e-5, f"Black mask should preserve original exactly"
+        assert abs(mean_right - gen_val) < 1e-5, f"White mask should use generated exactly"
 
-    def test_dual_frame_mask(self, tmp_path: Path) -> None:
+    def test_dual_frame_mask(self):
         """Frame 0 all-black mask preserves original. Frame 1 all-white mask uses generated."""
-        h, w = 64, 64
-        orig_val, gen_val = 50, 220
+        F, h, w = 2, 64, 64
+        orig_val, gen_val = 0.2, 0.9
 
-        orig = np.full((h, w, 3), orig_val, dtype=np.uint8)
-        gen = np.full((h, w, 3), gen_val, dtype=np.uint8)
-        mask_black = np.zeros((h, w, 3), dtype=np.uint8)
-        mask_white = np.full((h, w, 3), 255, dtype=np.uint8)
+        orig = torch.full((F, h, w, 3), orig_val)
+        gen = torch.full((F, h, w, 3), gen_val)
+        mask = torch.zeros(F, h, w)
+        mask[0] = 0.0  # black → original
+        mask[1] = 1.0  # white → generated
 
-        orig_path = tmp_path / "original.mp4"
-        gen_path = tmp_path / "generated.mp4"
-        mask_path = tmp_path / "mask.mp4"
+        result = self._composite(gen, orig, mask)
 
-        self._write_video(orig_path, [orig, orig])
-        self._write_video(gen_path, [gen, gen])
-        self._write_video(mask_path, [mask_black, mask_white])
-
-        LTXIcLoraPipeline._composite_in_outpainting(
-            str(gen_path), str(orig_path), str(mask_path)
+        assert abs(result[0].mean().item() - orig_val) < 1e-5, (
+            f"Frame 0 (black mask) should be near orig={orig_val}"
+        )
+        assert abs(result[1].mean().item() - gen_val) < 1e-5, (
+            f"Frame 1 (white mask) should be near gen={gen_val}"
         )
 
-        cap = cv2.VideoCapture(str(gen_path))
-        ret0, f0 = cap.read()
-        ret1, f1 = cap.read()
-        cap.release()
-        assert ret0 and ret1, "Should read both frames"
+    def test_gray_mask_blends(self):
+        """Mid-gray mask (0.5) blends 50/50 under linear alpha."""
+        F, h, w = 1, 64, 64
+        orig = torch.zeros((F, h, w, 3))
+        gen = torch.ones((F, h, w, 3))
+        mask = torch.full((F, h, w), 0.5)
 
-        mean_f0 = float(np.mean(f0))
-        mean_f1 = float(np.mean(f1))
+        result = self._composite(gen, orig, mask)
 
-        assert abs(mean_f0 - orig_val) < abs(mean_f0 - gen_val), (
-            f"Black mask frame should be closer to original={orig_val} "
-            f"than generated={gen_val}, got mean {mean_f0:.1f}"
-        )
-        assert abs(mean_f1 - gen_val) < abs(mean_f1 - orig_val), (
-            f"White mask frame should be closer to generated={gen_val} "
-            f"than original={orig_val}, got mean {mean_f1:.1f}"
-        )
-        assert mean_f0 <= orig_val + 15
-        assert mean_f1 >= gen_val - 15
-
-    def test_gray_mask_blends(self, tmp_path: Path) -> None:
-        """Mid-gray mask (128) blends ~50/50 under linear alpha."""
-        h, w = 64, 64
-        orig = np.full((h, w, 3), 0, dtype=np.uint8)
-        gen = np.full((h, w, 3), 255, dtype=np.uint8)
-        mask = np.full((h, w, 3), 128, dtype=np.uint8)
-
-        orig_path = tmp_path / "original.mp4"
-        gen_path = tmp_path / "generated.mp4"
-        mask_path = tmp_path / "mask.mp4"
-
-        self._write_video(orig_path, [orig])
-        self._write_video(gen_path, [gen])
-        self._write_video(mask_path, [mask])
-
-        LTXIcLoraPipeline._composite_in_outpainting(
-            str(gen_path), str(orig_path), str(mask_path)
-        )
-
-        cap = cv2.VideoCapture(str(gen_path))
-        ret, composite = cap.read()
-        cap.release()
-        assert ret
-
-        mean_val = float(np.mean(composite))
-        expected = 255 * (128.0 / 255.0)  # ≈ 128
-        # ponytail: mp4v drift, check blend is between 80-175 (not all-0 or all-255)
-        assert 80 < mean_val < 175, (
-            f"Gray mask (128) should blend (~128), got mean {mean_val:.1f}"
+        expected = 1.0 * 0.5 + 0.0 * 0.5
+        assert abs(result.mean().item() - expected) < 1e-5, (
+            f"Gray mask should produce {expected}, got {result.mean().item():.4f}"
         )
 
 
@@ -559,6 +495,117 @@ class TestDeriveStageRadii:
         )
 
 
+class TestApplyRawMaskGuard:
+    """_apply_raw_mask_guard clamps generated pixels outside raw (undilated) user mask back to original.
+
+    Grayscale mask preserves anti-aliased feathering; no threshold.
+    """
+
+    def test_outside_raw_mask_equals_original(self):
+        """Pixels outside the raw user mask must equal original, even if generated differs."""
+        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
+
+        F, H, W = (5, 64, 96)
+        # Generated: bright everywhere
+        blend = torch.full((F, H, W, 3), 0.95)
+        # Original: dark everywhere
+        orig = torch.full((F, H, W, 3), 0.05)
+        # Raw mask: small white square in center, rest black
+        raw_mask = torch.zeros(F, H, W)
+        raw_mask[:, H // 2 - 4 : H // 2 + 4, W // 2 - 4 : W // 2 + 4] = 1.0
+
+        result = LTXIcLoraPipeline._apply_raw_mask_guard(blend, raw_mask, orig)
+
+        # Outside raw mask: result must equal original exactly
+        outside = (1.0 - raw_mask).unsqueeze(-1).expand(-1, -1, -1, 3)
+        outside_diff = (result - orig).abs() * outside
+        assert outside_diff.max() < 1e-6, (
+            "Pixels outside raw mask must equal original exactly"
+        )
+
+        # Inside raw mask: result must be blend (bright generated)
+        inside = raw_mask.unsqueeze(-1).expand(-1, -1, -1, 3)
+        inside_diff = (result - blend).abs() * inside
+        assert inside_diff.max() < 1e-6, (
+            "Pixels inside raw mask must carry blend forward"
+        )
+
+    def test_grayscale_mask_feathers_edge(self):
+        """Anti-aliased mask values (e.g. 0.5) produce intermediate blend, not hard threshold."""
+        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
+
+        F, H, W = (2, 64, 96)
+        blend = torch.full((F, H, W, 3), 0.9)
+        orig = torch.full((F, H, W, 3), 0.1)
+        # Half-gray mask = 50/50 everywhere
+        raw_mask = torch.full((F, H, W), 0.5)
+
+        result = LTXIcLoraPipeline._apply_raw_mask_guard(blend, raw_mask, orig)
+
+        # 0.9 * 0.5 + 0.1 * 0.5 = 0.5
+        expected = torch.full((F, H, W, 3), 0.5)
+        assert torch.allclose(result, expected, atol=1e-6), (
+            f"Grayscale mask should produce 50/50 blend, got mean {result.mean().item():.4f}"
+        )
+
+    def test_all_black_mask_returns_original(self):
+        """All-black (no generation) mask = pure original."""
+        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
+
+        F, H, W = (3, 64, 64)
+        blend = torch.full((F, H, W, 3), 0.99)
+        orig = torch.full((F, H, W, 3), 0.01)
+        raw_mask = torch.zeros(F, H, W)
+
+        result = LTXIcLoraPipeline._apply_raw_mask_guard(blend, raw_mask, orig)
+        assert torch.allclose(result, orig, atol=1e-6), (
+            "All-black mask must return original exactly"
+        )
+
+    def test_all_white_mask_returns_blend(self):
+        """All-white (full generation) mask = passes blend through."""
+        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
+
+        F, H, W = (3, 64, 64)
+        blend = torch.full((F, H, W, 3), 0.99)
+        orig = torch.full((F, H, W, 3), 0.01)
+        raw_mask = torch.ones(F, H, W)
+
+        result = LTXIcLoraPipeline._apply_raw_mask_guard(blend, raw_mask, orig)
+        assert torch.allclose(result, blend, atol=1e-6), (
+            "All-white mask must pass blend through"
+        )
+
+    def test_blur_radius_creates_feathered_edge(self):
+        """blur_radius > 0 softens mask edge: far outside=orig, far inside=blend,
+        edge zone has intermediate values.
+        """
+        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
+
+        F, H, W = 1, 32, 64
+        orig = torch.full((F, H, W, 3), 0.05)
+        blend = torch.full((F, H, W, 3), 0.95)
+        raw_mask = torch.zeros(F, H, W)
+        raw_mask[:, :, W // 2:] = 1.0  # left half orig, right half blend
+
+        no_blur = LTXIcLoraPipeline._apply_raw_mask_guard(blend, raw_mask, orig, blur_radius=0)
+        blurred = LTXIcLoraPipeline._apply_raw_mask_guard(blend, raw_mask, orig, blur_radius=4)
+
+        # Far outside (col 0): both match original
+        assert torch.allclose(no_blur[:, :, 0, :], orig[:, :, 0, :], atol=1e-6)
+        assert torch.allclose(blurred[:, :, 0, :], orig[:, :, 0, :], atol=1e-6)
+
+        # Far inside (col W-1): both match blend
+        assert torch.allclose(no_blur[:, :, W - 1, :], blend[:, :, W - 1, :], atol=1e-6)
+        assert torch.allclose(blurred[:, :, W - 1, :], blend[:, :, W - 1, :], atol=1e-6)
+
+        # Transition zone left of edge: no_blur still at orig, blurred is intermediate
+        col_t = W // 2 - 3
+        v_nb = no_blur[0, 0, col_t, 0].item()
+        v_bl = blurred[0, 0, col_t, 0].item()
+        assert abs(v_nb - 0.05) < 1e-6, f"no_blur at col {col_t} should be 0.05, got {v_nb:.4f}"
+        assert 0.05 < v_bl < 0.95, f"blurred at col {col_t} should be intermediate, got {v_bl:.4f}"
+        assert abs(v_bl - v_nb) > 0.01, f"blurred should differ from no_blur at col {col_t}"
 
 
 class TestInpaintRuntimeParity:
@@ -604,16 +651,15 @@ class TestInpaintRuntimeParity:
             "Stage 2 audio must receive initial_latent from stage 1"
         )
 
-    def test_stage2_green_guide_uses_half_res(self):
-        """Stage 2 must append green composite IC-LoRA guide conditioning
-        via _encode_green_guide_conditioning with the SAME half-res green_half
-        tensor as stage1 (official node 5378, mask r=15).
+    def test_stage2_guided_by_encoded_blend_not_green_guide(self):
+        """Stage 2 must NOT call _encode_green_guide_conditioning — it is
+        guided by encoded_blend as initial_latent instead.
 
-        Official parity: node 5114 uses same half-res green guide for both
-        stages; stage2 passes through LTXVCropGuides temporal keyframe-crop;
-        installed clear_conditioning() already handles it.
-        Not using green_full (full-res, mask r=30) avoids sharper original
-        content leaking into stage2 conditioning.
+        Correct flow:
+        - Stage 1 uses _encode_green_guide_conditioning (via green_half).
+        - Stage 1 blend is VAE-encoded to encoded_blend.
+        - Stage 2 receives encoded_blend as initial_latent — no IC-LoRA
+        green guide conditioning at stage2.
         """
         import os
         pipe_path = os.path.join(
@@ -624,28 +670,30 @@ class TestInpaintRuntimeParity:
         with open(pipe_path) as f:
             source = f.read()
 
-        # Both stages call _encode_green_guide_conditioning
-        assert source.count("self._encode_green_guide_conditioning") == 2, (
-            "Both S1 and S2 must have _encode_green_guide_conditioning calls"
+        # Only stage1 calls _encode_green_guide_conditioning
+        assert source.count("self._encode_green_guide_conditioning") == 1, (
+            "_encode_green_guide_conditioning must be called only by stage1, "
+            "not stage2"
         )
-        # Stage 2 must NOT use green_full for guide conditioning
-        # Match the pattern around stage2's green guide conditioning call
-        # green_full should only appear in final blend image_b, not in conditioning
-        # Find the stage2 green guide block and verify it uses green_half
-        assert "green_half" in source, "green_half tensor must exist"
-        # Verify stage2 conditioning block references green_half by checking
-        # that the ONLY tensor=green_full occurrence is in the final blend
-        # section, not in conditioning
+        # stage2_conditionings block must not contain _encode_green_guide_conditioning
+        # or green_half — it uses combined_image_conditionings with stage1_ltx_images
         cond_blocks = source.split("stage2_conditionings")
         assert len(cond_blocks) >= 2, "Must find stage2 conditionings block"
         stage2_block = cond_blocks[1].split("video_state_s2")[0]
-        assert "green_half" in stage2_block, (
-            "Stage 2 conditioning block must use green_half — "
-            "green_full in stage2 conditioning causes sharper leaked content"
+        assert "_encode_green_guide_conditioning" not in stage2_block, (
+            "Stage 2 conditionings must NOT call _encode_green_guide_conditioning"
         )
-        assert "green_full" not in stage2_block, (
-            "Stage 2 conditioning must NOT use green_full — "
-            "that was the green-leak root cause"
+        assert "green_half" not in stage2_block, (
+            "Stage 2 conditionings must NOT reference green_half tensor"
+        )
+        # Stage 2 receives encoded_blend as initial_latent (inside the
+        # video_state_s2 pipeline call, after the second stage2_conditionings
+        # occurrence which is in conditionings=)
+        assert len(cond_blocks) >= 3, "stage2_conditionings must appear as assignment + usage"
+        stage2_pipeline_block = cond_blocks[2]
+        assert "initial_latent=encoded_blend" in stage2_pipeline_block, (
+            "Stage 2 must pass encoded_blend as initial_latent — "
+            "was the green-leak root cause fix"
         )
 
 def test_resize_video_mask_spatial():

@@ -17,8 +17,8 @@ _fp8_lora_fuse_patched = False
 
 # ponytail: mask_grow_px controls LTXVDilateVideoMask radii only (derive_stage_radii).
 # Blend low-res dilation constants are separate controls — NOT related to mask dilation radii.
-# INPAINT_BLEND1_LOW_RES_DILATION=5 for bridge blend (stage1, node 5266, linked input).
-# INPAINT_BLEND2_LOW_RES_DILATION=6 for final blend (stage2, node 5226, linked input).
+# INPAINT_BLEND1_LOW_RES_DILATION=5 for bridge blend (stage1, node 5266, linked input) to soften edge ghosting at stage1.
+# INPAINT_BLEND2_LOW_RES_DILATION=6 for final blend (stage2, node 5226, linked input); user-controlled via laplacian_blend_grow param, default=6.
 INPAINT_BLEND1_LOW_RES_DILATION = 5
 INPAINT_BLEND2_LOW_RES_DILATION = 6
 
@@ -246,70 +246,90 @@ class LTXIcLoraPipeline:
 
     @staticmethod
     def _composite_in_outpainting(
-        output_path: str,
+        video: torch.Tensor,
         original_video_path: str,
         mask_path: str,
-    ) -> None:
-        """Blend generated output with original video using mask video.
+        height: int,
+        width: int,
+        num_frames: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Blend generated video tensor with original video using mask video.
 
         White mask (255) = keep generated region, black mask (0) = preserve original.
-        Uses grayscale alpha compositing: result = gen * (mask/255) + orig * (1 - mask/255).
+        Reads original/mask via decode_video_by_frame + video_preprocess, composites
+        in float [0, 1] space, returns tensor in same shape/dtype as input video.
         """
-        import cv2
-        import numpy as np
+        from ltx_pipelines.utils.media_io import decode_video_by_frame, video_preprocess
 
-        out_cap = cv2.VideoCapture(output_path)
-        orig_cap = cv2.VideoCapture(original_video_path)
-        mask_cap = cv2.VideoCapture(mask_path)
+        # Read original video: decode yields (1, H, W, 3) uint8 → preprocess gives (1, 3, F, H, W) in [-1, 1]
+        orig_gen = decode_video_by_frame(path=original_video_path, frame_cap=num_frames, device=device)
+        orig_norm = video_preprocess(orig_gen, height, width, torch.float32, device)
+        orig_01 = (orig_norm[0].permute(1, 2, 3, 0) + 1.0) / 2.0  # (F, H, W, 3) in [0, 1]
 
-        out_fps = out_cap.get(cv2.CAP_PROP_FPS)
-        out_w = int(out_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        out_h = int(out_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        out_count = int(out_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        # Read mask
+        mask_gen = decode_video_by_frame(path=mask_path, frame_cap=num_frames, device=device)
+        mask_norm = video_preprocess(mask_gen, height, width, torch.float32, device)
+        mask_01 = (mask_norm[0].mean(dim=0) + 1.0) / 2.0  # (F, H, W) in [0, 1], grayscale
 
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
-        tmp_path = output_path + ".composite_tmp.mp4"
-        writer = cv2.VideoWriter(tmp_path, fourcc, out_fps, (out_w, out_h))  # type: ignore[arg-type]
+        # Handle short original/mask: repeat last frame or black fallback
+        F = video.shape[0]
+        if orig_01.shape[0] < F:
+            last = orig_01[-1:, ...]
+            pad = F - orig_01.shape[0]
+            orig_01 = torch.cat([orig_01, last.expand(pad, -1, -1, -1)], dim=0)
+        if mask_01.shape[0] < F:
+            pad = F - mask_01.shape[0]
+            mask_01 = torch.cat([mask_01, torch.zeros(pad, height, width, device=device, dtype=torch.float32)], dim=0)
 
-        for _ in range(out_count):
-            ret_out, out_frame = out_cap.read()
-            if not ret_out:
-                break
+        # Convert generated to [0, 1] float
+        gen_01 = video.to(dtype=torch.float32, device=device)
+        if gen_01.max() > 1.0:
+            gen_01 = gen_01 / 255.0  # assume uint8 [0, 255]
 
-            ret_orig, orig_frame = orig_cap.read()
-            if not ret_orig:
-                orig_frame = out_frame.copy()
+        # Composite: result = gen * mask + orig * (1 - mask)
+        mask_3ch = mask_01.unsqueeze(-1).expand(-1, -1, -1, 3).to(device=device)
+        composite_01 = gen_01 * mask_3ch + orig_01.to(device=device) * (1.0 - mask_3ch)
 
-            ret_mask, mask_frame = mask_cap.read()
-            if not ret_mask:
-                mask_frame = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+        # Convert back to input dtype/range
+        if video.dtype == torch.uint8:
+            return (composite_01.clamp(0, 1) * 255).to(dtype=torch.uint8, device=device)
+        return composite_01.clamp(0, 1).to(dtype=video.dtype, device=device)
 
-            if orig_frame.shape[:2] != (out_h, out_w):
-                orig_frame = cv2.resize(orig_frame, (out_w, out_h))
-            if mask_frame.shape[:2] != (out_h, out_w):
-                mask_frame = cv2.resize(mask_frame, (out_w, out_h))
+    @staticmethod
+    def _apply_raw_mask_guard(
+        blend: torch.Tensor,
+        raw_mask: torch.Tensor,
+        original_frames: torch.Tensor,
+        blur_radius: int = 0,
+    ) -> torch.Tensor:
+        """Clamp generated pixels outside raw (undilated) user mask back to original.
 
-            mask_gray = (
-                cv2.cvtColor(mask_frame, cv2.COLOR_BGR2GRAY)
-                if mask_frame.ndim == 3 and mask_frame.shape[2] >= 3
-                else mask_frame.reshape(out_h, out_w)
-            )
-            mask_norm = mask_gray.astype(np.float32) / 255.0
-            mask_3ch = np.stack([mask_norm] * 3, axis=2)
+        When blur_radius > 0, threshold raw_mask > 0.5 then spatial-box-blur the
+        binary alpha with avg_pool2d for a soft feathered edge at final output.
+        blur_radius=0 preserves exact grayscale compositing (existing behavior).
 
-            composite = (
-                out_frame.astype(np.float32) * mask_3ch
-                + orig_frame.astype(np.float32) * (1.0 - mask_3ch)
-            )
-            writer.write(np.clip(composite, 0, 255).astype(np.uint8))
-
-        out_cap.release()
-        orig_cap.release()
-        mask_cap.release()
-        writer.release()
-
-        import os
-        os.replace(tmp_path, output_path)
+        mask is (F, H, W) grayscale [0, 1]; blend and original_frames are (F, H, W, 3) [0, 1].
+        """
+        # ponytail: final guard uses raw user mask (optionally blurred for feather);
+        # dilation remains for model context only.
+        alpha = raw_mask[:blend.shape[0]].to(device=blend.device, dtype=blend.dtype)
+        if blur_radius > 0:
+            # Threshold to binary, then box blur for soft edge
+            alpha = (alpha > 0.5).to(blend.dtype)
+            k = 2 * blur_radius + 1
+            alpha = F.avg_pool2d(
+                alpha.unsqueeze(1),  # (F, 1, H, W)
+                kernel_size=k,
+                stride=1,
+                padding=blur_radius,
+                count_include_pad=False,
+            ).squeeze(1)  # (F, H, W)
+            alpha = alpha.clamp(0.0, 1.0)
+        alpha_4d = alpha.unsqueeze(-1)  # (F, H, W, 1)
+        return blend * alpha_4d + original_frames[:blend.shape[0]].to(device=blend.device, dtype=blend.dtype) * (
+            1.0 - alpha_4d
+        )
 
     @torch.inference_mode()
     def generate(
@@ -328,7 +348,7 @@ class LTXIcLoraPipeline:
         original_video_path: str | None = None,
     ) -> None:
         tiling_config = default_tiling_config()
-        video, audio = self._run_inference(
+        result = self._run_inference(
             prompt=prompt,
             seed=seed,
             height=height,
@@ -342,11 +362,23 @@ class LTXIcLoraPipeline:
             conditioning_strength=conditioning_strength,
             original_video_path=original_video_path,
         )
-        chunks = video_chunks_number(num_frames, tiling_config)
-        encode_video_output(video=video, audio=audio, fps=int(frame_rate), output_path=output_path, video_chunks_number_value=chunks)
+        video, audio = result
 
         if original_video_path is not None and mask_path is not None:
-            self._composite_in_outpainting(output_path, original_video_path, mask_path)
+            if isinstance(video, Iterator):
+                video = torch.cat(list(video), dim=0)
+            video = self._composite_in_outpainting(
+                video=video,
+                original_video_path=original_video_path,
+                mask_path=mask_path,
+                height=height,
+                width=width,
+                num_frames=num_frames,
+                device=self.pipeline.device,
+            )
+
+        chunks = video_chunks_number(num_frames, tiling_config)
+        encode_video_output(video=video, audio=audio, fps=int(frame_rate), output_path=output_path, video_chunks_number_value=chunks)
 
     # ------------------------------------------------------------------ #
     # Official two-stage IC-LoRA inpaint (LTX-2.3_ICLoRA_Inpaint_Two_Stage)
@@ -619,26 +651,20 @@ class LTXIcLoraPipeline:
         # Official Comfy workflow uses euler_cfg_pp (stage1) and
         # euler_ancestral_cfg_pp (stage2) via LTXVCFGGuider.
         # Not implemented in installed ltx_pipelines. Add when available.
+        # Stage2 is guided by encoded_blend initial latent (VAE-encoded stage1 blend at full res).
+        # Do NOT inject the half-res green guide (green_half) here — it is already used in stage1
+        # conditionings and re-encoding it for stage2 at full res produces an incorrect
+        # half-res embedding in the full frame.
         stage2_conditionings = self.pipeline.image_conditioner(
-            lambda enc: (
-                combined_image_conditionings(
-                    images=stage1_ltx_images,
-                    height=height,
-                    width=width,
-                    video_encoder=enc,
-                    dtype=dtype,
-                    device=device,
-                )
-                + self._encode_green_guide_conditioning(
-                    enc=enc,
-                    tensor=green_half,
-                    strength=conditioning_strength,
-                )
+            lambda enc: combined_image_conditionings(
+                images=stage1_ltx_images,
+                height=height,
+                width=width,
+                video_encoder=enc,
+                dtype=dtype,
+                device=device,
             )
         )
-        # ponytail: official node 5114 uses same half-res green guide (node 5378, mask r=15)
-        # for both stages. Stage2 passes through LTXVCropGuides (temporal keyframe-crop) in official
-        # workflow; installed clear_conditioning() already handles it.
 
         # Official: stage2 uses seed (not seed+1)
         generator_s2 = torch.Generator(device=device).manual_seed(seed)
@@ -692,6 +718,17 @@ class LTXIcLoraPipeline:
             max_level=7,
             mask_low_res_dilation=laplacian_blend_grow,
             device=device,
+        )
+
+        # Final raw-mask guard: clamp anything outside user mask back to original.
+        # Blurs the raw mask threshold to feather the final composite edge.
+        # ponytail: final guard uses raw user mask blurred for final feather;
+        # dilation remains for model context only.
+        blend_stage2 = self._apply_raw_mask_guard(
+            blend_stage2,
+            mask_full_gray[:blend_stage2.shape[0]],
+            video_full_frames_01[:blend_stage2.shape[0]],
+            blur_radius=laplacian_blend_grow,
         )
 
         # ------------------------------------------------------------------ #

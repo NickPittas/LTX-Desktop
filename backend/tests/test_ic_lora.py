@@ -1151,3 +1151,92 @@ class TestIcLoraLaplacianBlendGrow:
         assert kwargs.get("mask_grow_px") == 30, (
             f"mask_grow_px should still default to 30, got {kwargs.get('mask_grow_px')!r}"
         )
+
+
+class TestIcLoraResolution:
+    """All IC-LoRA workflows preserve input resolution (aligned to 64)."""
+
+    def test_in_outpainting_1920x1080_preserves_resolution(self, client, test_state,
+                                                            create_fake_model_files,
+                                                            fake_services):
+        """1920x1080 input in_outpainting calls generate_inpaint with 1920x1088."""
+        create_fake_model_files()
+        from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
+        adapter = OFFICIAL_LTX23_ADAPTERS["in_outpainting"]
+        adapter_path = test_state.config.default_models_dir / adapter.filename
+        adapter_path.parent.mkdir(parents=True, exist_ok=True)
+        adapter_path.write_bytes(b"\x00" * 1024)
+
+        test_state.state.app_settings.use_local_text_encoder = True
+        fake_services.ic_lora_pipeline.bind_singleton(fake_services.ic_lora_pipeline)
+
+        video_path = test_state.config.outputs_dir / "test_video.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(
+            str(video_path),
+            FakeCapture(frames=["frame-a", "frame-b"], width=1920, height=1080),
+        )
+
+        mask_path = test_state.config.outputs_dir / "test_mask.mp4"
+        mask_path.write_bytes(b"\x00" * 100)
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "prompt": "add a car",
+                "images": [],
+                "adapter_id": "in_outpainting",
+                "mask_path": str(mask_path),
+            },
+        )
+        assert response.status_code == 200, f"Unexpected status: {response.json()}"
+        kwargs = fake_services.ic_lora_pipeline.generate_calls[0]
+        assert kwargs["width"] == 1920, f"Expected width=1920, got {kwargs['width']}"
+        assert kwargs["height"] == 1088, f"Expected height=1088, got {kwargs['height']}"
+
+    def test_non_inpaint_preserves_aligned_input_dimensions(self, client, test_state,
+                                                              create_fake_model_files,
+                                                              fake_services):
+        """Non-in_outpainting adapter also preserves aligned input dimensions."""
+        create_fake_model_files()
+        test_state.state.app_settings.use_local_text_encoder = True
+        fake_services.ic_lora_pipeline.bind_singleton(fake_services.ic_lora_pipeline)
+
+        adapter_dir = test_state.config.default_models_dir / "adapters"
+        adapter_dir.mkdir(parents=True, exist_ok=True)
+        adapter_file = adapter_dir / "water_simulation.safetensors"
+        adapter_file.write_bytes(b"\x00" * 1024)
+
+        profile = ModelProfilePayload(
+            id="test-profile",
+            name="Test Profile",
+            source="official",
+            components=ModelComponentPaths(
+                official_adapters={"water_simulation": str(adapter_file)},
+            ),
+        )
+        test_state.state.model_profiles = [profile]
+        test_state.state.active_model_profile_id = "test-profile"
+
+        video_path = test_state.config.outputs_dir / "test_video.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(
+            str(video_path),
+            FakeCapture(frames=["frame-a", "frame-b"], width=1920, height=1080),
+        )
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "prompt": "test prompt",
+                "images": [],
+                "adapter_id": "water_simulation",
+            },
+        )
+        assert response.status_code == 200, f"Unexpected status: {response.json()}"
+        kwargs = fake_services.ic_lora_pipeline.generate_calls[0]
+        # Non-inpaint now also preserves aligned input resolution
+        assert kwargs["width"] == 1920, f"Expected width=1920, got {kwargs['width']}"
+        assert kwargs["height"] == 1088, f"Expected height=1088, got {kwargs['height']}"

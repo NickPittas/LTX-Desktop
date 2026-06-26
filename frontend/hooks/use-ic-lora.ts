@@ -65,12 +65,8 @@ export function useIcLora() {
     if (params.maskPath) {
       body.mask_path = params.maskPath
     }
-    if (params.maskGrowPx !== undefined) {
-      body.mask_grow_px = params.maskGrowPx
-    }
-    if (params.laplacianBlendGrow !== undefined) {
-      body.laplacian_blend_grow = params.laplacianBlendGrow
-    }
+    body.mask_grow_px = params.maskGrowPx ?? 30
+    body.laplacian_blend_grow = params.laplacianBlendGrow ?? 6
     if (params.images && params.images.length > 0) {
       body.images = params.images
     }
