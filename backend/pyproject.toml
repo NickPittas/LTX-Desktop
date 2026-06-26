@@ -29,6 +29,8 @@ dependencies = [
     "triton-windows; sys_platform == 'win32'",
     "triton; sys_platform == 'linux'",
     "gguf>=0.13.0",
+    "llama-cpp-python>=0.3.9",
+    "kornia==0.8.3",
 ]
 
 [[tool.uv.index]]
@@ -52,3 +54,4 @@ dev = ["pyright>=1.1.380", "debugpy>=1.8"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+

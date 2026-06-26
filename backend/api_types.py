@@ -12,6 +12,19 @@ ModelCheckpointID = Literal[
     "ltx-2.3-22b-distilled",
     "ltx-2.3-spatial-upscaler-x2-1.0",
     "ltx-2.3-22b-ic-lora-union-control-ref0.5",
+    "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5",
+    "ltx-2.3-22b-ic-lora-ingredients-0.9",
+    "ltx-2.3-22b-ic-lora-water-simulation-0.9",
+    "ltx-2.3-22b-ic-lora-decompression-0.9",
+    "ltx-2.3-22b-ic-lora-deblur-0.9",
+    "ltx-2.3-22b-ic-lora-colorization-0.9",
+    "ltx-2.3-22b-ic-lora-day-to-night-0.9",
+    "ltx-2.3-22b-ic-lora-in-outpainting-0.9",
+    "ltx-2.3-22b-ic-lora-instant-shave-0.9",
+    "ltx-2.3-22b-ic-lora-cross-eyed-0.9",
+    "ltx-2.3-22b-ic-lora-hdr-0.9",
+    "ltx-2.3-22b-ic-lora-hdr-scene-emb",
+    "ltx-2.3-22b-ic-lora-lipdub-0.9",
     "dpt-hybrid-midas",
     "yolox-l-torchscript",
     "dw-ll-ucoco-384-bs5",
@@ -449,6 +462,7 @@ class AdapterRecommendationResponse(BaseModel):
     pipeline: AdapterPipeline
     required: list[AdapterRequirementItem]
     missing: list[AdapterID]
+    cps_to_download: list[ModelCheckpointID]
 
 
 # ============================================================
@@ -592,10 +606,14 @@ def _default_ic_lora_images() -> list[IcLoraImageInput]:
 class IcLoraGenerateRequest(BaseModel):
     model_config = ConfigDict(strict=True)
     video_path: str
-    conditioning_type: ConditioningType
-    prompt: NonEmptyPrompt
+    conditioning_type: ConditioningType | None = None
+    prompt: str = ""
     conditioning_strength: float = 1.0
     num_inference_steps: int = 30
     cfg_guidance_scale: float = 1.0
     negative_prompt: str = ""
     images: list[IcLoraImageInput] = Field(default_factory=_default_ic_lora_images)
+    adapter_id: AdapterID | None = None
+    mask_path: str | None = None
+    mask_grow_px: int = Field(default=30, ge=0, le=128, description="Mask dilation radius in pixels. Controls LTXVDilateVideoMask radii. 0=no dilation, default=30 matches official full-res (stage2) radius")
+    laplacian_blend_grow: int = Field(default=6, ge=0, le=15, description="Controls final LTXVLaplacianPyramidBlend.mask_low_res_dilation for inpainting Laplacian pyramid blend. 0=no low-res dilation, default=6 matches official final blend node 5226. Separate from mask_grow_px which controls LTXVDilateVideoMask radii.")

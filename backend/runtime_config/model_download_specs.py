@@ -292,6 +292,110 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
                 repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control",
                 description="Union IC-LoRA control model",
             )
+        case "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5":
+            return ModelCheckpointSpec(
+                relative_path=Path("ltx-2.3-22b-ic-lora-motion-track-control-ref0.5.safetensors"),
+                expected_size_bytes=310_000_000,
+                is_folder=False,
+                repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Motion-Track-Control",
+                description="Motion Track Control IC-LoRA",
+            )
+        case "ltx-2.3-22b-ic-lora-ingredients-0.9":
+            return ModelCheckpointSpec(
+                relative_path=Path("ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors"),
+                expected_size_bytes=624_100_000,
+                is_folder=False,
+                repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Ingredients",
+                description="Ingredients IC-LoRA",
+            )
+        case "ltx-2.3-22b-ic-lora-water-simulation-0.9":
+            return ModelCheckpointSpec(
+                relative_path=Path("ltx-2.3-22b-ic-lora-water-simulation-0.9.safetensors"),
+                expected_size_bytes=624_100_000,
+                is_folder=False,
+                repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Water-Simulation",
+                description="Water Simulation IC-LoRA",
+            )
+        case "ltx-2.3-22b-ic-lora-decompression-0.9":
+            return ModelCheckpointSpec(
+                relative_path=Path("ltx-2.3-22b-ic-lora-decompression-0.9.safetensors"),
+                expected_size_bytes=312_100_000,
+                is_folder=False,
+                repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Decompression",
+                description="Decompression IC-LoRA",
+            )
+        case "ltx-2.3-22b-ic-lora-deblur-0.9":
+            return ModelCheckpointSpec(
+                relative_path=Path("ltx-2.3-22b-ic-lora-deblur-0.9.safetensors"),
+                expected_size_bytes=312_100_000,
+                is_folder=False,
+                repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Deblur",
+                description="Deblur IC-LoRA",
+            )
+        case "ltx-2.3-22b-ic-lora-colorization-0.9":
+            return ModelCheckpointSpec(
+                relative_path=Path("ltx-2.3-22b-ic-lora-colorization-0.9.safetensors"),
+                expected_size_bytes=312_100_000,
+                is_folder=False,
+                repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Colorization",
+                description="Colorization IC-LoRA",
+            )
+        case "ltx-2.3-22b-ic-lora-day-to-night-0.9":
+            return ModelCheckpointSpec(
+                relative_path=Path("ltx-2.3-22b-ic-lora-day-to-night-0.9.safetensors"),
+                expected_size_bytes=312_100_000,
+                is_folder=False,
+                repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Day-To-Night",
+                description="Day to Night IC-LoRA",
+            )
+        case "ltx-2.3-22b-ic-lora-in-outpainting-0.9":
+            return ModelCheckpointSpec(
+                relative_path=Path("ltx-2.3-22b-ic-lora-in-outpainting-0.9.safetensors"),
+                expected_size_bytes=624_100_000,
+                is_folder=False,
+                repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-In-Outpainting",
+                description="In/Outpainting IC-LoRA",
+            )
+        case "ltx-2.3-22b-ic-lora-instant-shave-0.9":
+            return ModelCheckpointSpec(
+                relative_path=Path("ltx-2.3-22b-ic-lora-instant-shave-0.9.safetensors"),
+                expected_size_bytes=624_100_000,
+                is_folder=False,
+                repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Instant-Shave",
+                description="Instant Shave IC-LoRA",
+            )
+        case "ltx-2.3-22b-ic-lora-cross-eyed-0.9":
+            return ModelCheckpointSpec(
+                relative_path=Path("ltx-2.3-22b-ic-lora-cross-eyed-0.9.safetensors"),
+                expected_size_bytes=312_100_000,
+                is_folder=False,
+                repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Cross-Eyed",
+                description="Cross Eyed IC-LoRA",
+            )
+        case "ltx-2.3-22b-ic-lora-hdr-0.9":
+            return ModelCheckpointSpec(
+                relative_path=Path("ltx-2.3-22b-ic-lora-hdr-0.9.safetensors"),
+                expected_size_bytes=312_100_000,
+                is_folder=False,
+                repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-HDR",
+                description="HDR IC-LoRA",
+            )
+        case "ltx-2.3-22b-ic-lora-hdr-scene-emb":
+            return ModelCheckpointSpec(
+                relative_path=Path("ltx-2.3-22b-ic-lora-hdr-scene-emb.safetensors"),
+                expected_size_bytes=12_000_000,
+                is_folder=False,
+                repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-HDR",
+                description="HDR Scene Embeddings",
+            )
+        case "ltx-2.3-22b-ic-lora-lipdub-0.9":
+            return ModelCheckpointSpec(
+                relative_path=Path("ltx-2.3-22b-ic-lora-lipdub-0.9.safetensors"),
+                expected_size_bytes=2_352_400_000,
+                is_folder=False,
+                repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-LipDub",
+                description="LipDub IC-LoRA",
+            )
         case "dpt-hybrid-midas":
             return ModelCheckpointSpec(
                 relative_path=Path("dpt-hybrid-midas"),
@@ -401,6 +505,25 @@ def get_ltx_model_id_for_cp(cp_id: ModelCheckpointID) -> LTXLocalModelId | None:
         if get_ltx_model_spec(model_id).model_cp == cp_id:
             return model_id
     return None
+
+
+# ponytail: explicit dict, no new class. Add entry when an adapter has a downloadable CP spec.
+ADAPTER_TO_CP_ID: dict[AdapterID, ModelCheckpointID] = {
+    "union_control": "ltx-2.3-22b-ic-lora-union-control-ref0.5",
+    "motion_track_control": "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5",
+    "ingredients": "ltx-2.3-22b-ic-lora-ingredients-0.9",
+    "water_simulation": "ltx-2.3-22b-ic-lora-water-simulation-0.9",
+    "decompression": "ltx-2.3-22b-ic-lora-decompression-0.9",
+    "deblur": "ltx-2.3-22b-ic-lora-deblur-0.9",
+    "colorization": "ltx-2.3-22b-ic-lora-colorization-0.9",
+    "day_to_night": "ltx-2.3-22b-ic-lora-day-to-night-0.9",
+    "in_outpainting": "ltx-2.3-22b-ic-lora-in-outpainting-0.9",
+    "instant_shave": "ltx-2.3-22b-ic-lora-instant-shave-0.9",
+    "cross_eyed": "ltx-2.3-22b-ic-lora-cross-eyed-0.9",
+    "hdr": "ltx-2.3-22b-ic-lora-hdr-0.9",
+    "hdr_scene_embeddings": "ltx-2.3-22b-ic-lora-hdr-scene-emb",
+    "lipdub": "ltx-2.3-22b-ic-lora-lipdub-0.9",
+}
 
 
 def get_ic_loras_cp_ids(ic_loras_spec: LtxIcLorasSpec) -> tuple[ModelCheckpointID, ...]:

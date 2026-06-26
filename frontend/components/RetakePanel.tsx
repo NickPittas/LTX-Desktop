@@ -110,7 +110,10 @@ export function RetakePanel({
 
     const extractThumbnails = async () => {
       const video = document.createElement('video')
-      video.crossOrigin = 'anonymous'
+      // ponytail: skip crossOrigin for local file URLs — CORS breaks on file:///ltx-file://
+      if (!videoUrl.startsWith('ltx-file://') && !videoUrl.startsWith('file://')) {
+        video.crossOrigin = 'anonymous'
+      }
       video.preload = 'auto'
       video.muted = true
       video.src = videoUrl
@@ -433,6 +436,7 @@ export function RetakePanel({
               className="w-full h-full object-contain"
               onClick={togglePlay}
               onEnded={() => setIsPlaying(false)}
+              onError={(e) => console.error('[RetakePanel] video error', e.currentTarget.error?.message || e.currentTarget.error)}
             />
             <div className="absolute bottom-2 left-2 flex items-center gap-1.5">
               <button

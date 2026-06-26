@@ -106,6 +106,41 @@ def test_downloading_path_is_derived_from_spec():
     assert resolve_downloading_target_path(models_dir, "ltx-2.3-22b-distilled") == downloading_dir / "ltx-2.3-22b-distilled.safetensors"
 
 
+def test_official_ic_lora_adapter_cp_specs_match_registry():
+    """Each IC-LoRA adapter with a CP entry maps to the correct repo_id and filename."""
+    from runtime_config.model_download_specs import ADAPTER_TO_CP_ID, OFFICIAL_LTX23_ADAPTERS
+
+    for adapter_id, cp_id in ADAPTER_TO_CP_ID.items():
+        adapter = OFFICIAL_LTX23_ADAPTERS[adapter_id]
+        spec = get_model_cp_spec(cp_id)
+        expected_filename = spec.relative_path.name
+        assert adapter.filename == expected_filename, (
+            f"{adapter_id}: registry filename {adapter.filename!r} != spec filename {expected_filename!r}"
+        )
+        assert adapter.repo_id == spec.repo_id, (
+            f"{adapter_id}: registry repo {adapter.repo_id!r} != spec repo {spec.repo_id!r}"
+        )
+
+
+def test_adapter_to_cp_id_covers_every_non_distilled_adapter():
+    """Every non-distilled adapter has a CP entry and vice-versa."""
+    from runtime_config.model_download_specs import ADAPTER_TO_CP_ID, OFFICIAL_LTX23_ADAPTERS
+
+    assert set(ADAPTER_TO_CP_ID) == {
+        id
+        for id, adapter in OFFICIAL_LTX23_ADAPTERS.items()
+        if adapter.kind != "distilled_lora"
+    }
+
+
+def test_official_ic_lora_adapter_cp_specs_reject_distilled_only():
+    """Only IC-LoRA (non-distilled) adapters get CP entries."""
+    from runtime_config.model_download_specs import ADAPTER_TO_CP_ID
+
+    assert "distilled_lora_384" not in ADAPTER_TO_CP_ID
+    assert "distilled_lora_384_1_1" not in ADAPTER_TO_CP_ID
+
+
 def test_relative_paths_are_unique():
     relative_paths = {get_model_cp_spec(cp_id).relative_path for cp_id in ALL_MODEL_CP_IDS}
     assert len(relative_paths) == len(ALL_MODEL_CP_IDS)

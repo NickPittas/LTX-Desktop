@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { ApiClient } from '../lib/api-client'
 import { logger } from '../lib/logger'
 
@@ -31,8 +31,12 @@ export function useRetake() {
     result: null,
   })
 
-  const submitRetake = useCallback(async (params: RetakeSubmitParams) => {
+  const onCompleteRef = useRef<((result: RetakeResult) => void) | undefined>()
+
+  const submitRetake = useCallback(async (params: RetakeSubmitParams, onComplete?: (result: RetakeResult) => void) => {
     if (!params.videoPath) return
+
+    onCompleteRef.current = onComplete
 
     setState({
       isRetaking: true,
@@ -73,13 +77,18 @@ export function useRetake() {
     }
 
     if ('video_path' in payload) {
+      const res: RetakeResult = {
+        videoPath: payload.video_path,
+      }
+      // Fire onComplete before local setState — runs ProjectContext mutations
+      // even if GenSpace has unmounted (Bug A fix)
+      onCompleteRef.current?.(res)
+      onCompleteRef.current = undefined
       setState({
         isRetaking: false,
         retakeStatus: 'Retake complete!',
         retakeError: null,
-        result: {
-          videoPath: payload.video_path,
-        },
+        result: res,
       })
       return
     }

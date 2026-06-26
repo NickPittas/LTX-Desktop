@@ -304,8 +304,9 @@ class PipelinesHandler(StateHandlerBase):
 
     def load_ic_lora(
         self,
-        lora_path: str,
-        depth_model_path: str,
+        lora_paths: list[str],
+        depth_model_path: str | None,
+        adapter_path: str | None = None,
     ) -> ICLoraState:
         self._install_text_patches_if_needed()
 
@@ -313,12 +314,14 @@ class PipelinesHandler(StateHandlerBase):
             match self.state.gpu_slot:
                 case GpuSlot(
                     active_pipeline=ICLoraState(
-                        lora_path=current_lora_path,
+                        lora_paths=current_lora_paths,
                         depth_model_path=current_depth_model_path,
+                        adapter_path=current_adapter_path,
                     ) as state
                 ) if (
-                    current_lora_path == lora_path
+                    current_lora_paths == lora_paths
                     and current_depth_model_path == depth_model_path
+                    and current_adapter_path == adapter_path
                 ):
                     return state
                 case _:
@@ -332,17 +335,20 @@ class PipelinesHandler(StateHandlerBase):
             checkpoint_path,
             gemma_root,
             upsampler_path,
-            lora_path,
+            lora_paths,
             self.config.device,
             streaming_prefetch_count_for_mode(self.config.local_generations_mode),
             components=components,
         )
-        depth_pipeline = self._depth_processor_pipeline_class.create(depth_model_path, self.config.device)
+        depth_pipeline: DepthProcessorPipeline | None = None
+        if depth_model_path is not None:
+            depth_pipeline = self._depth_processor_pipeline_class.create(depth_model_path, self.config.device)
         state = ICLoraState(
             pipeline=pipeline,
-            lora_path=lora_path,
+            lora_paths=lora_paths,
             depth_pipeline=depth_pipeline,
             depth_model_path=depth_model_path,
+            adapter_path=adapter_path,
         )
 
         with self._lock:

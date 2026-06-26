@@ -56,6 +56,7 @@ class LTXTextEncoder:
                 device: Any,
                 registry: Any = None,
             ) -> None:
+                logger.info("PromptEncoder init gemma_root=%s checkpoint=%s", gemma_root or "<api>", checkpoint_path)
                 if not gemma_root:
                     self_encoder._dtype = dtype  # type: ignore[attr-defined]
                     self_encoder._device = device  # type: ignore[attr-defined]
@@ -88,6 +89,11 @@ class LTXTextEncoder:
                 state = state_getter()
                 te_state = state.text_encoder
                 if te_state is not None and te_state.api_embeddings is not None:
+                    logger.info(
+                        "PromptEncoder using API embeddings for %d prompt(s), enhance=%s",
+                        len(prompts),
+                        bool(kwargs.get("enhance_first_prompt")),
+                    )
                     video_context = te_state.api_embeddings.video_context
                     audio_context = te_state.api_embeddings.audio_context
                     # Create a dummy attention mask matching the sequence length
@@ -111,6 +117,11 @@ class LTXTextEncoder:
                             ))
                     return results
 
+                logger.info(
+                    "PromptEncoder using local encoder for %d prompt(s), enhance=%s",
+                    len(prompts),
+                    bool(kwargs.get("enhance_first_prompt")),
+                )
                 return original_call(self_encoder, prompts, **kwargs)
 
             PromptEncoder.__call__ = patched_call  # type: ignore[assignment]

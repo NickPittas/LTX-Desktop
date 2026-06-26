@@ -42,6 +42,8 @@ function AppContent() {
     null,
   )
   const setupCompletionInFlightRef = useRef<Promise<void> | null>(null)
+  const localSetupCompletedRef = useRef(false)
+  const pendingLocalModelsSetupRef = useRef(false)
 
   type ApiGatewayRequest = {
     requiredKeys: Array<'ltx' | 'fal'>
@@ -52,6 +54,7 @@ function AppContent() {
   }
 
   const [apiGatewayRequest, setApiGatewayRequest] = useState<ApiGatewayRequest | null>(null)
+  const forcedApiGatewayRequestRef = useRef(false)
 
   const isBackendRestarting = processStatus === 'restarting'
   const isBackendDead = processStatus === 'dead'
@@ -71,6 +74,7 @@ function AppContent() {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail ?? {}
       const requiredKeys = Array.isArray(detail.requiredKeys) ? detail.requiredKeys : ['ltx']
+      forcedApiGatewayRequestRef.current = false
       setApiGatewayRequest({
         requiredKeys,
         title: detail.title ?? 'Connect API Keys',
@@ -124,6 +128,17 @@ function AppContent() {
     void checkFirstRun()
   }, [])
 
+  // ponytail: decouple settings-open from LaunchGate async lifecycle
+  // upgrade path: move to a dedicated post-setup action queue
+  useEffect(() => {
+    if (setupState === null || setupState === 'loading') return
+    if (setupState.needsSetup || setupState.needsLicense) return
+    if (!pendingLocalModelsSetupRef.current) return
+    pendingLocalModelsSetupRef.current = false
+    setSettingsInitialTab('models')
+    setIsSettingsOpen(true)
+  }, [setupState])
+
   const handleFirstRunComplete = useCallback(async () => {
     if (setupCompletionInFlightRef.current) {
       return setupCompletionInFlightRef.current
@@ -144,6 +159,7 @@ function AppContent() {
 
     try {
       await inFlightPromise
+      localSetupCompletedRef.current = true
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Failed to finalize setup.'
       setFirstRunFinalizeError(message)
@@ -185,6 +201,15 @@ function AppContent() {
     isForcedFirstRun && isLoaded && settings.hasLtxApiKey && !isFinalizingFirstRun && !firstRunFinalizeError
 
   const areModelsReady = useCallback(async () => {
+    const profilesResult = await ApiClient.getModelProfiles()
+    if (profilesResult.ok) {
+      const activeId = profilesResult.data.active_model_profile_id
+      const activeProfile = profilesResult.data.profiles?.find((profile) => profile.id === activeId)
+      if (activeProfile?.components?.transformer) {
+        return true
+      }
+    }
+
     const [ltxResult, imgGenResult] = await Promise.all([
       ApiClient.getLtxRecommendation(),
       ApiClient.getImgGenRecommendation(),
@@ -212,6 +237,13 @@ function AppContent() {
 
   useEffect(() => {
     if (setupState === 'loading' || waitingForRuntimePolicy || backendLoading || !connected) {
+      return
+    }
+
+    // ponytail: one-time bypass for local/manual model setup completion
+    if (localSetupCompletedRef.current) {
+      localSetupCompletedRef.current = false
+      setRequiredModelsGate('ready')
       return
     }
 
@@ -346,6 +378,7 @@ function AppContent() {
 
   useEffect(() => {
     if (shouldBlockForLtxKey && apiGatewayRequest === null) {
+      forcedApiGatewayRequestRef.current = true
       setApiGatewayRequest({
         requiredKeys: ['ltx'],
         title: 'Connect API Keys',
@@ -353,6 +386,9 @@ function AppContent() {
         blocking: true,
         includeOptionalMissing: true,
       })
+    } else if (!shouldBlockForLtxKey && apiGatewayRequest !== null && apiGatewayRequest.blocking && forcedApiGatewayRequestRef.current) {
+      forcedApiGatewayRequestRef.current = false
+      setApiGatewayRequest(null)
     }
   }, [shouldBlockForLtxKey, apiGatewayRequest])
 
@@ -487,7 +523,15 @@ function AppContent() {
   }
 
   if (setupState.needsSetup && !forceApiGenerations) {
-    return <LaunchGate showLicenseStep={false} onComplete={handleFirstRunComplete} />
+    return (
+      <LaunchGate
+        showLicenseStep={false}
+        onComplete={handleFirstRunComplete}
+        onLocalModelsComplete={() => {
+          pendingLocalModelsSetupRef.current = true
+        }}
+      />
+    )
   }
 
   if (requiredModelsGate === 'missing') {

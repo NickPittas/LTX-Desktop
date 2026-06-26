@@ -404,6 +404,7 @@ export const VideoEditorSourceMonitor = React.forwardRef<VideoEditorSourceMonito
                   sourceVideoRef.current.play().catch(() => {})
                   setSourceIsPlaying(true)
                 }}
+                onError={(e) => console.error('[SourceMonitor] video error', e.currentTarget.error?.message || e.currentTarget.error)}
                 playsInline
               />
             ) : sourceAsset.type === 'image' ? (

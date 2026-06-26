@@ -91,13 +91,48 @@ def test_ic_lora_load_includes_depth_resources(test_state, fake_services, create
     lora_path = str(resolve_model_path(test_state.config.default_models_dir, model_spec.ic_loras_spec.canny_cp))
     depth_path = str(resolve_model_path(test_state.config.default_models_dir, DEPTH_PROCESSOR_CP_ID))
 
-    ic_state = test_state.pipelines.load_ic_lora(lora_path, depth_path)
+    ic_state = test_state.pipelines.load_ic_lora(lora_paths=[lora_path], depth_model_path=depth_path)
 
     assert isinstance(ic_state, ICLoraState)
     assert ic_state.pipeline is fake_services.ic_lora_pipeline
     assert ic_state.depth_pipeline is fake_services.depth_processor_pipeline
-    assert ic_state.lora_path == lora_path
+    assert ic_state.lora_paths == [lora_path]
     assert ic_state.depth_model_path == depth_path
+    assert ic_state.adapter_path is None
+
+
+def test_ic_lora_adapter_path_changes_cache_key(test_state, fake_services, create_fake_model_files, create_fake_ic_lora_files):
+    create_fake_model_files()
+    create_fake_ic_lora_files()
+    model_spec = _current_model_spec()
+    lora_path = str(resolve_model_path(test_state.config.default_models_dir, model_spec.ic_loras_spec.canny_cp))
+    depth_path = str(resolve_model_path(test_state.config.default_models_dir, DEPTH_PROCESSOR_CP_ID))
+
+    adapter_path_a = "/fake/path/adapter_a.safetensors"
+    adapter_path_b = "/fake/path/adapter_b.safetensors"
+
+    # First load with adapter a
+    state_a = test_state.pipelines.load_ic_lora(lora_paths=[lora_path], depth_model_path=depth_path, adapter_path=adapter_path_a)
+    assert state_a.adapter_path == adapter_path_a
+    assert fake_services.ic_lora_pipeline.last_lora_paths == [lora_path]
+    # adapter_path is orthogonal to lora_paths — it's stored on the state for cache-key tracking
+
+    # Same adapter a should return cached
+    state_a_cached = test_state.pipelines.load_ic_lora(lora_paths=[lora_path], depth_model_path=depth_path, adapter_path=adapter_path_a)
+    assert state_a_cached is state_a
+
+    # Different adapter b should reload
+    state_b = test_state.pipelines.load_ic_lora(lora_paths=[lora_path], depth_model_path=depth_path, adapter_path=adapter_path_b)
+    assert state_b is not state_a
+    assert state_b.adapter_path == adapter_path_b
+    assert fake_services.ic_lora_pipeline.last_lora_paths == [lora_path]
+
+    # No adapter (legacy) should cache separately
+    state_legacy = test_state.pipelines.load_ic_lora(lora_paths=[lora_path], depth_model_path=depth_path)
+    assert state_legacy is not state_a
+    assert state_legacy is not state_b
+    assert state_legacy.adapter_path is None
+    assert fake_services.ic_lora_pipeline.last_lora_paths == [lora_path]
 
 
 def test_ic_lora_unload_clears_preprocessing_resources(test_state, create_fake_model_files, create_fake_ic_lora_files):
@@ -106,7 +141,7 @@ def test_ic_lora_unload_clears_preprocessing_resources(test_state, create_fake_m
     model_spec = _current_model_spec()
     lora_path = str(resolve_model_path(test_state.config.default_models_dir, model_spec.ic_loras_spec.canny_cp))
     depth_path = str(resolve_model_path(test_state.config.default_models_dir, DEPTH_PROCESSOR_CP_ID))
-    test_state.pipelines.load_ic_lora(lora_path, depth_path)
+    test_state.pipelines.load_ic_lora(lora_paths=[lora_path], depth_model_path=depth_path)
 
     assert isinstance(test_state.state.gpu_slot, GpuSlot)
     assert isinstance(test_state.state.gpu_slot.active_pipeline, ICLoraState)

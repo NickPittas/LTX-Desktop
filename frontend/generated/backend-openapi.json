@@ -3,6 +3,36 @@
     "schemas": {
       "AdapterRecommendationResponse": {
         "properties": {
+          "cps_to_download": {
+            "items": {
+              "enum": [
+                "ltx-2.3-22b-distilled",
+                "ltx-2.3-spatial-upscaler-x2-1.0",
+                "ltx-2.3-22b-ic-lora-union-control-ref0.5",
+                "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5",
+                "ltx-2.3-22b-ic-lora-ingredients-0.9",
+                "ltx-2.3-22b-ic-lora-water-simulation-0.9",
+                "ltx-2.3-22b-ic-lora-decompression-0.9",
+                "ltx-2.3-22b-ic-lora-deblur-0.9",
+                "ltx-2.3-22b-ic-lora-colorization-0.9",
+                "ltx-2.3-22b-ic-lora-day-to-night-0.9",
+                "ltx-2.3-22b-ic-lora-in-outpainting-0.9",
+                "ltx-2.3-22b-ic-lora-instant-shave-0.9",
+                "ltx-2.3-22b-ic-lora-cross-eyed-0.9",
+                "ltx-2.3-22b-ic-lora-hdr-0.9",
+                "ltx-2.3-22b-ic-lora-hdr-scene-emb",
+                "ltx-2.3-22b-ic-lora-lipdub-0.9",
+                "dpt-hybrid-midas",
+                "yolox-l-torchscript",
+                "dw-ll-ucoco-384-bs5",
+                "gemma-3-12b-it-qat-q4_0-unquantized",
+                "z-image-turbo"
+              ],
+              "type": "string"
+            },
+            "title": "Cps To Download",
+            "type": "array"
+          },
           "missing": {
             "items": {
               "enum": [
@@ -59,7 +89,8 @@
         "required": [
           "pipeline",
           "required",
-          "missing"
+          "missing",
+          "cps_to_download"
         ],
         "title": "AdapterRecommendationResponse",
         "type": "object"
@@ -479,6 +510,19 @@
                 "ltx-2.3-22b-distilled",
                 "ltx-2.3-spatial-upscaler-x2-1.0",
                 "ltx-2.3-22b-ic-lora-union-control-ref0.5",
+                "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5",
+                "ltx-2.3-22b-ic-lora-ingredients-0.9",
+                "ltx-2.3-22b-ic-lora-water-simulation-0.9",
+                "ltx-2.3-22b-ic-lora-decompression-0.9",
+                "ltx-2.3-22b-ic-lora-deblur-0.9",
+                "ltx-2.3-22b-ic-lora-colorization-0.9",
+                "ltx-2.3-22b-ic-lora-day-to-night-0.9",
+                "ltx-2.3-22b-ic-lora-in-outpainting-0.9",
+                "ltx-2.3-22b-ic-lora-instant-shave-0.9",
+                "ltx-2.3-22b-ic-lora-cross-eyed-0.9",
+                "ltx-2.3-22b-ic-lora-hdr-0.9",
+                "ltx-2.3-22b-ic-lora-hdr-scene-emb",
+                "ltx-2.3-22b-ic-lora-lipdub-0.9",
                 "dpt-hybrid-midas",
                 "yolox-l-torchscript",
                 "dw-ll-ucoco-384-bs5",
@@ -556,6 +600,19 @@
                 "ltx-2.3-22b-distilled",
                 "ltx-2.3-spatial-upscaler-x2-1.0",
                 "ltx-2.3-22b-ic-lora-union-control-ref0.5",
+                "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5",
+                "ltx-2.3-22b-ic-lora-ingredients-0.9",
+                "ltx-2.3-22b-ic-lora-water-simulation-0.9",
+                "ltx-2.3-22b-ic-lora-decompression-0.9",
+                "ltx-2.3-22b-ic-lora-deblur-0.9",
+                "ltx-2.3-22b-ic-lora-colorization-0.9",
+                "ltx-2.3-22b-ic-lora-day-to-night-0.9",
+                "ltx-2.3-22b-ic-lora-in-outpainting-0.9",
+                "ltx-2.3-22b-ic-lora-instant-shave-0.9",
+                "ltx-2.3-22b-ic-lora-cross-eyed-0.9",
+                "ltx-2.3-22b-ic-lora-hdr-0.9",
+                "ltx-2.3-22b-ic-lora-hdr-scene-emb",
+                "ltx-2.3-22b-ic-lora-lipdub-0.9",
                 "dpt-hybrid-midas",
                 "yolox-l-torchscript",
                 "dw-ll-ucoco-384-bs5",
@@ -574,6 +631,19 @@
                 "ltx-2.3-22b-distilled",
                 "ltx-2.3-spatial-upscaler-x2-1.0",
                 "ltx-2.3-22b-ic-lora-union-control-ref0.5",
+                "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5",
+                "ltx-2.3-22b-ic-lora-ingredients-0.9",
+                "ltx-2.3-22b-ic-lora-water-simulation-0.9",
+                "ltx-2.3-22b-ic-lora-decompression-0.9",
+                "ltx-2.3-22b-ic-lora-deblur-0.9",
+                "ltx-2.3-22b-ic-lora-colorization-0.9",
+                "ltx-2.3-22b-ic-lora-day-to-night-0.9",
+                "ltx-2.3-22b-ic-lora-in-outpainting-0.9",
+                "ltx-2.3-22b-ic-lora-instant-shave-0.9",
+                "ltx-2.3-22b-ic-lora-cross-eyed-0.9",
+                "ltx-2.3-22b-ic-lora-hdr-0.9",
+                "ltx-2.3-22b-ic-lora-hdr-scene-emb",
+                "ltx-2.3-22b-ic-lora-lipdub-0.9",
                 "dpt-hybrid-midas",
                 "yolox-l-torchscript",
                 "dw-ll-ucoco-384-bs5",
@@ -593,6 +663,19 @@
                   "ltx-2.3-22b-distilled",
                   "ltx-2.3-spatial-upscaler-x2-1.0",
                   "ltx-2.3-22b-ic-lora-union-control-ref0.5",
+                  "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5",
+                  "ltx-2.3-22b-ic-lora-ingredients-0.9",
+                  "ltx-2.3-22b-ic-lora-water-simulation-0.9",
+                  "ltx-2.3-22b-ic-lora-decompression-0.9",
+                  "ltx-2.3-22b-ic-lora-deblur-0.9",
+                  "ltx-2.3-22b-ic-lora-colorization-0.9",
+                  "ltx-2.3-22b-ic-lora-day-to-night-0.9",
+                  "ltx-2.3-22b-ic-lora-in-outpainting-0.9",
+                  "ltx-2.3-22b-ic-lora-instant-shave-0.9",
+                  "ltx-2.3-22b-ic-lora-cross-eyed-0.9",
+                  "ltx-2.3-22b-ic-lora-hdr-0.9",
+                  "ltx-2.3-22b-ic-lora-hdr-scene-emb",
+                  "ltx-2.3-22b-ic-lora-lipdub-0.9",
                   "dpt-hybrid-midas",
                   "yolox-l-torchscript",
                   "dw-ll-ucoco-384-bs5",
@@ -1259,6 +1342,35 @@
       },
       "IcLoraGenerateRequest": {
         "properties": {
+          "adapter_id": {
+            "anyOf": [
+              {
+                "enum": [
+                  "distilled_lora_384",
+                  "distilled_lora_384_1_1",
+                  "union_control",
+                  "motion_track_control",
+                  "ingredients",
+                  "water_simulation",
+                  "decompression",
+                  "deblur",
+                  "colorization",
+                  "day_to_night",
+                  "in_outpainting",
+                  "instant_shave",
+                  "cross_eyed",
+                  "hdr",
+                  "hdr_scene_embeddings",
+                  "lipdub"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adapter Id"
+          },
           "cfg_guidance_scale": {
             "default": 1.0,
             "title": "Cfg Guidance Scale",
@@ -1270,12 +1382,19 @@
             "type": "number"
           },
           "conditioning_type": {
-            "enum": [
-              "canny",
-              "depth"
+            "anyOf": [
+              {
+                "enum": [
+                  "canny",
+                  "depth"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
             ],
-            "title": "Conditioning Type",
-            "type": "string"
+            "title": "Conditioning Type"
           },
           "images": {
             "items": {
@@ -1283,6 +1402,33 @@
             },
             "title": "Images",
             "type": "array"
+          },
+          "laplacian_blend_grow": {
+            "default": 6,
+            "description": "Controls final LTXVLaplacianPyramidBlend.mask_low_res_dilation for inpainting Laplacian pyramid blend. 0=no low-res dilation, default=6 matches official final blend node 5226. Separate from mask_grow_px which controls LTXVDilateVideoMask radii.",
+            "maximum": 15.0,
+            "minimum": 0.0,
+            "title": "Laplacian Blend Grow",
+            "type": "integer"
+          },
+          "mask_grow_px": {
+            "default": 30,
+            "description": "Mask dilation radius in pixels. Controls LTXVDilateVideoMask radii. 0=no dilation, default=30 matches official full-res (stage2) radius",
+            "maximum": 128.0,
+            "minimum": 0.0,
+            "title": "Mask Grow Px",
+            "type": "integer"
+          },
+          "mask_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mask Path"
           },
           "negative_prompt": {
             "default": "",
@@ -1295,7 +1441,7 @@
             "type": "integer"
           },
           "prompt": {
-            "minLength": 1,
+            "default": "",
             "title": "Prompt",
             "type": "string"
           },
@@ -1305,9 +1451,7 @@
           }
         },
         "required": [
-          "video_path",
-          "conditioning_type",
-          "prompt"
+          "video_path"
         ],
         "title": "IcLoraGenerateRequest",
         "type": "object"
@@ -1344,6 +1488,19 @@
                   "ltx-2.3-22b-distilled",
                   "ltx-2.3-spatial-upscaler-x2-1.0",
                   "ltx-2.3-22b-ic-lora-union-control-ref0.5",
+                  "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5",
+                  "ltx-2.3-22b-ic-lora-ingredients-0.9",
+                  "ltx-2.3-22b-ic-lora-water-simulation-0.9",
+                  "ltx-2.3-22b-ic-lora-decompression-0.9",
+                  "ltx-2.3-22b-ic-lora-deblur-0.9",
+                  "ltx-2.3-22b-ic-lora-colorization-0.9",
+                  "ltx-2.3-22b-ic-lora-day-to-night-0.9",
+                  "ltx-2.3-22b-ic-lora-in-outpainting-0.9",
+                  "ltx-2.3-22b-ic-lora-instant-shave-0.9",
+                  "ltx-2.3-22b-ic-lora-cross-eyed-0.9",
+                  "ltx-2.3-22b-ic-lora-hdr-0.9",
+                  "ltx-2.3-22b-ic-lora-hdr-scene-emb",
+                  "ltx-2.3-22b-ic-lora-lipdub-0.9",
                   "dpt-hybrid-midas",
                   "yolox-l-torchscript",
                   "dw-ll-ucoco-384-bs5",
@@ -1477,6 +1634,19 @@
                 "ltx-2.3-22b-distilled",
                 "ltx-2.3-spatial-upscaler-x2-1.0",
                 "ltx-2.3-22b-ic-lora-union-control-ref0.5",
+                "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5",
+                "ltx-2.3-22b-ic-lora-ingredients-0.9",
+                "ltx-2.3-22b-ic-lora-water-simulation-0.9",
+                "ltx-2.3-22b-ic-lora-decompression-0.9",
+                "ltx-2.3-22b-ic-lora-deblur-0.9",
+                "ltx-2.3-22b-ic-lora-colorization-0.9",
+                "ltx-2.3-22b-ic-lora-day-to-night-0.9",
+                "ltx-2.3-22b-ic-lora-in-outpainting-0.9",
+                "ltx-2.3-22b-ic-lora-instant-shave-0.9",
+                "ltx-2.3-22b-ic-lora-cross-eyed-0.9",
+                "ltx-2.3-22b-ic-lora-hdr-0.9",
+                "ltx-2.3-22b-ic-lora-hdr-scene-emb",
+                "ltx-2.3-22b-ic-lora-lipdub-0.9",
                 "dpt-hybrid-midas",
                 "yolox-l-torchscript",
                 "dw-ll-ucoco-384-bs5",
@@ -1509,6 +1679,19 @@
                 "ltx-2.3-22b-distilled",
                 "ltx-2.3-spatial-upscaler-x2-1.0",
                 "ltx-2.3-22b-ic-lora-union-control-ref0.5",
+                "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5",
+                "ltx-2.3-22b-ic-lora-ingredients-0.9",
+                "ltx-2.3-22b-ic-lora-water-simulation-0.9",
+                "ltx-2.3-22b-ic-lora-decompression-0.9",
+                "ltx-2.3-22b-ic-lora-deblur-0.9",
+                "ltx-2.3-22b-ic-lora-colorization-0.9",
+                "ltx-2.3-22b-ic-lora-day-to-night-0.9",
+                "ltx-2.3-22b-ic-lora-in-outpainting-0.9",
+                "ltx-2.3-22b-ic-lora-instant-shave-0.9",
+                "ltx-2.3-22b-ic-lora-cross-eyed-0.9",
+                "ltx-2.3-22b-ic-lora-hdr-0.9",
+                "ltx-2.3-22b-ic-lora-hdr-scene-emb",
+                "ltx-2.3-22b-ic-lora-lipdub-0.9",
                 "dpt-hybrid-midas",
                 "yolox-l-torchscript",
                 "dw-ll-ucoco-384-bs5",
@@ -1568,6 +1751,19 @@
                 "ltx-2.3-22b-distilled",
                 "ltx-2.3-spatial-upscaler-x2-1.0",
                 "ltx-2.3-22b-ic-lora-union-control-ref0.5",
+                "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5",
+                "ltx-2.3-22b-ic-lora-ingredients-0.9",
+                "ltx-2.3-22b-ic-lora-water-simulation-0.9",
+                "ltx-2.3-22b-ic-lora-decompression-0.9",
+                "ltx-2.3-22b-ic-lora-deblur-0.9",
+                "ltx-2.3-22b-ic-lora-colorization-0.9",
+                "ltx-2.3-22b-ic-lora-day-to-night-0.9",
+                "ltx-2.3-22b-ic-lora-in-outpainting-0.9",
+                "ltx-2.3-22b-ic-lora-instant-shave-0.9",
+                "ltx-2.3-22b-ic-lora-cross-eyed-0.9",
+                "ltx-2.3-22b-ic-lora-hdr-0.9",
+                "ltx-2.3-22b-ic-lora-hdr-scene-emb",
+                "ltx-2.3-22b-ic-lora-lipdub-0.9",
                 "dpt-hybrid-midas",
                 "yolox-l-torchscript",
                 "dw-ll-ucoco-384-bs5",
@@ -1585,6 +1781,19 @@
                 "ltx-2.3-22b-distilled",
                 "ltx-2.3-spatial-upscaler-x2-1.0",
                 "ltx-2.3-22b-ic-lora-union-control-ref0.5",
+                "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5",
+                "ltx-2.3-22b-ic-lora-ingredients-0.9",
+                "ltx-2.3-22b-ic-lora-water-simulation-0.9",
+                "ltx-2.3-22b-ic-lora-decompression-0.9",
+                "ltx-2.3-22b-ic-lora-deblur-0.9",
+                "ltx-2.3-22b-ic-lora-colorization-0.9",
+                "ltx-2.3-22b-ic-lora-day-to-night-0.9",
+                "ltx-2.3-22b-ic-lora-in-outpainting-0.9",
+                "ltx-2.3-22b-ic-lora-instant-shave-0.9",
+                "ltx-2.3-22b-ic-lora-cross-eyed-0.9",
+                "ltx-2.3-22b-ic-lora-hdr-0.9",
+                "ltx-2.3-22b-ic-lora-hdr-scene-emb",
+                "ltx-2.3-22b-ic-lora-lipdub-0.9",
                 "dpt-hybrid-midas",
                 "yolox-l-torchscript",
                 "dw-ll-ucoco-384-bs5",
@@ -1878,6 +2087,19 @@
                 "ltx-2.3-22b-distilled",
                 "ltx-2.3-spatial-upscaler-x2-1.0",
                 "ltx-2.3-22b-ic-lora-union-control-ref0.5",
+                "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5",
+                "ltx-2.3-22b-ic-lora-ingredients-0.9",
+                "ltx-2.3-22b-ic-lora-water-simulation-0.9",
+                "ltx-2.3-22b-ic-lora-decompression-0.9",
+                "ltx-2.3-22b-ic-lora-deblur-0.9",
+                "ltx-2.3-22b-ic-lora-colorization-0.9",
+                "ltx-2.3-22b-ic-lora-day-to-night-0.9",
+                "ltx-2.3-22b-ic-lora-in-outpainting-0.9",
+                "ltx-2.3-22b-ic-lora-instant-shave-0.9",
+                "ltx-2.3-22b-ic-lora-cross-eyed-0.9",
+                "ltx-2.3-22b-ic-lora-hdr-0.9",
+                "ltx-2.3-22b-ic-lora-hdr-scene-emb",
+                "ltx-2.3-22b-ic-lora-lipdub-0.9",
                 "dpt-hybrid-midas",
                 "yolox-l-torchscript",
                 "dw-ll-ucoco-384-bs5",
@@ -1902,6 +2124,19 @@
                 "ltx-2.3-22b-distilled",
                 "ltx-2.3-spatial-upscaler-x2-1.0",
                 "ltx-2.3-22b-ic-lora-union-control-ref0.5",
+                "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5",
+                "ltx-2.3-22b-ic-lora-ingredients-0.9",
+                "ltx-2.3-22b-ic-lora-water-simulation-0.9",
+                "ltx-2.3-22b-ic-lora-decompression-0.9",
+                "ltx-2.3-22b-ic-lora-deblur-0.9",
+                "ltx-2.3-22b-ic-lora-colorization-0.9",
+                "ltx-2.3-22b-ic-lora-day-to-night-0.9",
+                "ltx-2.3-22b-ic-lora-in-outpainting-0.9",
+                "ltx-2.3-22b-ic-lora-instant-shave-0.9",
+                "ltx-2.3-22b-ic-lora-cross-eyed-0.9",
+                "ltx-2.3-22b-ic-lora-hdr-0.9",
+                "ltx-2.3-22b-ic-lora-hdr-scene-emb",
+                "ltx-2.3-22b-ic-lora-lipdub-0.9",
                 "dpt-hybrid-midas",
                 "yolox-l-torchscript",
                 "dw-ll-ucoco-384-bs5",
@@ -2507,6 +2742,19 @@
                   "ltx-2.3-22b-distilled",
                   "ltx-2.3-spatial-upscaler-x2-1.0",
                   "ltx-2.3-22b-ic-lora-union-control-ref0.5",
+                  "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5",
+                  "ltx-2.3-22b-ic-lora-ingredients-0.9",
+                  "ltx-2.3-22b-ic-lora-water-simulation-0.9",
+                  "ltx-2.3-22b-ic-lora-decompression-0.9",
+                  "ltx-2.3-22b-ic-lora-deblur-0.9",
+                  "ltx-2.3-22b-ic-lora-colorization-0.9",
+                  "ltx-2.3-22b-ic-lora-day-to-night-0.9",
+                  "ltx-2.3-22b-ic-lora-in-outpainting-0.9",
+                  "ltx-2.3-22b-ic-lora-instant-shave-0.9",
+                  "ltx-2.3-22b-ic-lora-cross-eyed-0.9",
+                  "ltx-2.3-22b-ic-lora-hdr-0.9",
+                  "ltx-2.3-22b-ic-lora-hdr-scene-emb",
+                  "ltx-2.3-22b-ic-lora-lipdub-0.9",
                   "dpt-hybrid-midas",
                   "yolox-l-torchscript",
                   "dw-ll-ucoco-384-bs5",

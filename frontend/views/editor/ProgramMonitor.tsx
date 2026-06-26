@@ -113,6 +113,7 @@ function createMonitorVideoElement(src: string): HTMLVideoElement {
   video.muted = true
   video.style.cssText = BASE_VIDEO_STYLE
   video.src = pathToFileUrl(src)
+  video.onerror = () => console.error('[ProgramMonitor] createMonitorVideoElement error', video.error?.message || video.error)
   video.load()
   return video
 }
@@ -1224,6 +1225,7 @@ export const ProgramMonitor = React.forwardRef<ProgramMonitorHandle, ProgramMoni
                         muted
                         playsInline
                         preload="auto"
+                        onError={(e) => console.error('[ProgramMonitor] compositing video error', e.currentTarget.error?.message || e.currentTarget.error)}
                         ref={(el) => {
                           if (el) {
                             compositingMediaRefs.current.set(lowerClip.id, el)
@@ -1274,6 +1276,7 @@ export const ProgramMonitor = React.forwardRef<ProgramMonitorHandle, ProgramMoni
                           playsInline
                           muted
                           preload="auto"
+                          onError={(e) => console.error('[ProgramMonitor] dissolve video error', e.currentTarget.error?.message || e.currentTarget.error)}
                         />
                       )
                     }

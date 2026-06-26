@@ -20,7 +20,7 @@ interface SettingsModalProps {
 type TabId = 'general' | 'apiKeys' | 'promptEnhancer' | 'models' | 'about'
 
 export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProps) {
-  const { settings, updateSettings, saveLtxApiKey, saveFalApiKey, saveGeminiApiKey, forceApiGenerations } = useAppSettings()
+  const { settings, updateSettings, refreshSettings, saveLtxApiKey, saveFalApiKey, saveGeminiApiKey, forceApiGenerations } = useAppSettings()
   const onSettingsChange = (next: AppSettings) => updateSettings(next)
   const [activeTab, setActiveTab] = useState<TabId>('general')
   const [ltxApiKeyInput, setLtxApiKeyInput] = useState('')
@@ -56,6 +56,12 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
   // Models tab — profiles + adapters
   const profiles = useModelProfiles(isOpen)
   const adapters = useOfficialAdapters(undefined, isOpen)
+  const activeProfile = useMemo(() => {
+    const activeId = profiles.data?.active_model_profile_id
+    return activeId ? profiles.data?.profiles?.find(p => p.id === activeId) ?? null : null
+  }, [profiles.data])
+  const localPromptEnhancerAvailable = !!activeProfile?.components?.text_encoder_root && activeProfile.components.text_encoder_format !== 'api'
+  const promptEnhancerAvailable = settings.hasLtxApiKey || localPromptEnhancerAvailable
   const [wizardOpen, setWizardOpen] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
 
@@ -365,6 +371,34 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                       const result = await window.electronAPI.openProjectAssetsPathChangeDialog()
                       if (result.success) {
                         setProjectAssetsPath(result.path)
+                      }
+                    }}
+                  >
+                    <Folder className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <Boxes className="h-4 w-4 text-blue-400" />
+                  <h3 className="text-sm font-semibold text-white">Models Folder</h3>
+                </div>
+                <p className="text-xs text-zinc-500 leading-relaxed">
+                  Downloads, profile auto-fill, Gemma, and IC-LoRA checks use this one folder.
+                </p>
+                <div className="flex gap-2">
+                  <div className="flex-1 px-3 py-2 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-300 text-sm truncate select-text">
+                    {settings.modelsDir || <span className="text-zinc-600">Default app models folder</span>}
+                  </div>
+                  <Button
+                    variant="outline"
+                    className="border-zinc-700 flex-shrink-0"
+                    onClick={async () => {
+                      const result = await window.electronAPI.openModelsDirChangeDialog()
+                      if (result.success) {
+                        updateSettings({ modelsDir: result.path })
+                        await refreshSettings()
                       }
                     }}
                   >
@@ -998,20 +1032,20 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                 </div>
 
                 <p className="text-xs text-zinc-500 leading-relaxed">
-                  Automatically enhances your prompts via the LTX API with rich visual details, sound descriptions,
+                  Automatically enhances your prompts with rich visual details, sound descriptions,
                   and motion cues to help generate higher quality videos. Control independently for each generation type.
                 </p>
 
-                {!settings.hasLtxApiKey ? (
+                {!promptEnhancerAvailable ? (
                   <div className="space-y-4 mt-2">
                     <div className="bg-amber-500/5 border border-amber-500/20 rounded-lg p-4 space-y-3">
                       <div className="flex items-start gap-2.5">
                         <AlertCircle className="h-4 w-4 text-amber-400 mt-0.5 flex-shrink-0" />
                         <div className="space-y-2">
-                          <p className="text-sm text-amber-300 font-medium">LTX API key required</p>
+                          <p className="text-sm text-amber-300 font-medium">API key or local encoder required</p>
                           <p className="text-xs text-zinc-400 leading-relaxed">
-                            Prompt enhancement runs server-side on the LTX API. To use this feature, you need to configure
-                            an API key in the API Keys tab.
+                            Configure an LTX API key in the API Keys tab, or activate a model profile with a
+                            local text encoder (e.g. Gemma GGUF).
                           </p>
                         </div>
                       </div>
@@ -1025,6 +1059,12 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                   </div>
                 ) : (
                   <>
+                    {localPromptEnhancerAvailable && (
+                      <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-lg px-4 py-3 flex items-center gap-3">
+                        <Check className="h-4 w-4 text-emerald-400 flex-shrink-0" />
+                        <span className="text-xs text-emerald-300">Using local Gemma from active profile</span>
+                      </div>
+                    )}
                     {/* T2V Toggle */}
                     <div
                       className="flex items-center justify-between bg-zinc-800/50 rounded-lg px-4 py-3 border border-zinc-700/50 cursor-pointer"

@@ -86,6 +86,18 @@ class TestLtxSplitSafetensorsIntegration:
         assert isinstance(cp, str), f"Expected str, got {type(cp)}"
         assert cp.endswith(".safetensors")
 
+    def test_split_profile_components_carry_vae_paths(
+        self, test_state, tmp_path, fake_services
+    ):
+        """Split safetensors profile resolves with video/audio VAE paths."""
+        profile = _activate_split_profile(test_state, tmp_path)
+        from services.ltx_components import resolve_components
+        r = resolve_components(profile)
+        assert r.video_vae_path is not None
+        assert r.video_vae_path.endswith("vvae.safetensors")
+        assert r.audio_vae_path is not None
+        assert r.audio_vae_path.endswith("avae.safetensors")
+
 
 def _activate_gguf_profile(test_state, tmp_path: Path):
     """Create a GGUF transformer profile directly in state and activate it."""

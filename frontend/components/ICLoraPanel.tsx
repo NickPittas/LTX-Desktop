@@ -1,6 +1,6 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import {
-  Upload, Loader2, Film, Sparkles,
+  Upload, Loader2, Film, Sparkles, Image as ImageIcon,
   RefreshCw, Download, AlertCircle, Trash2,
 } from 'lucide-react'
 import { ApiClient, type ApiRequestBodyOf, type ApiSuccessOf } from '../lib/api-client'
@@ -9,7 +9,7 @@ import { pathToFileUrl } from '../lib/file-url'
 import { useHfAuth } from '../hooks/use-hf-auth'
 import { useHfModelAccess } from '../hooks/use-hf-model-access'
 
-export type ICLoraConditioningType = 'canny' | 'depth'
+export type ICLoraConditioningType = 'canny' | 'depth' | null
 
 interface ICLoraPanelProps {
   initialVideoPath?: string | null
@@ -26,11 +26,55 @@ interface ICLoraPanelProps {
     videoPath: string | null
     conditioningType: ICLoraConditioningType
     conditioningStrength: number
+    adapterId: string | null
+    maskPath: string | null
+    images: { path: string; frame?: number; strength?: number }[]
     ready: boolean
+    maskGrowPx: number
+    laplacianBlendGrow: number
   }) => void
 }
 
+export type AdapterWorkflow = 'standard_video' | 'ingredients' | 'in_outpainting' | 'unavailable'
+
+export interface AdapterEntry {
+  value: string
+  label: string
+  workflow: AdapterWorkflow
+  /** Only for unavailable adapters — explains why not wired yet. */
+  reason?: string
+}
+
+// ponytail: flat registry, not from backend. If backend adds/excludes adapters,
+// add a /api/ic-lora/adapters endpoint and fetch this dynamically.
+export const IC_LORA_ADAPTERS: AdapterEntry[] = [
+  // standard_video — source video only, no extra conditioning
+  { value: 'water_simulation', label: 'Water Simulation', workflow: 'standard_video' },
+  { value: 'decompression', label: 'Decompression', workflow: 'standard_video' },
+  { value: 'deblur', label: 'Deblur', workflow: 'standard_video' },
+  { value: 'colorization', label: 'Colorization', workflow: 'standard_video' },
+  { value: 'day_to_night', label: 'Day to Night', workflow: 'standard_video' },
+  { value: 'instant_shave', label: 'Instant Shave', workflow: 'standard_video' },
+  { value: 'cross_eyed', label: 'Cross Eyed', workflow: 'standard_video' },
+  // ingredients — needs one reference image
+  { value: 'ingredients', label: 'Ingredients', workflow: 'ingredients' },
+  // in_outpainting — inpaint supported; outpaint not yet
+  { value: 'in_outpainting', label: 'In/Outpainting', workflow: 'in_outpainting' },
+  // unavailable — visible but cannot be selected
+  { value: 'motion_track_control', label: 'Motion Track Control', workflow: 'unavailable', reason: 'Motion track workflow not wired yet' },
+  { value: 'hdr', label: 'HDR', workflow: 'unavailable', reason: 'HDR workflow not wired yet' },
+  { value: 'lipdub', label: 'LipDub', workflow: 'unavailable', reason: 'LipDub requires audio workflow — not wired yet' },
+]
+
+const availableAdapters = IC_LORA_ADAPTERS.filter(a => a.workflow !== 'unavailable')
+const unavailableAdapters = IC_LORA_ADAPTERS.filter(a => a.workflow === 'unavailable')
+
+function getAdapterEntry(value: string | null): AdapterEntry | undefined {
+  return IC_LORA_ADAPTERS.find(a => a.value === value)
+}
+
 export const CONDITIONING_TYPES: { value: ICLoraConditioningType; label: string; desc: string }[] = [
+  { value: null, label: 'None', desc: 'No conditioning' },
   { value: 'canny', label: 'Canny Edges', desc: 'Edge detection' },
   { value: 'depth', label: 'Depth Map', desc: 'Estimated depth' },
 ]
@@ -58,13 +102,22 @@ export function ICLoraPanel({
   const inputVideoUrl = inputVideoPath ? pathToFileUrl(inputVideoPath) : null
   const [inputTime, setInputTime] = useState(0)
 
-  const [internalCondType, setInternalCondType] = useState<ICLoraConditioningType>('canny')
+  const [internalCondType, setInternalCondType] = useState<ICLoraConditioningType>(null)
   const [internalCondStrength, setInternalCondStrength] = useState(1.0)
+  const [internalAdapterId, setInternalAdapterId] = useState<string | null>(null)
   const conditioningType = conditioningTypeProp ?? internalCondType
   const conditioningStrength = conditioningStrengthProp ?? internalCondStrength
   const [conditioningPreview, setConditioningPreview] = useState<string | null>(null)
   const [isExtracting, setIsExtracting] = useState(false)
 
+  const [maskPath, setMaskPath] = useState<string | null>(null)
+  const [maskGrowPx, setMaskGrowPx] = useState(30)
+  const [laplacianBlendGrow, setLaplacianBlendGrow] = useState(6)
+  const [ingredientPaths, setIngredientPaths] = useState<string[]>([])
+
+  const showConditioning = internalCondType !== null
+  const depthCpId = 'dpt-hybrid-midas' as ModelCheckpointID
+  const needsDepthCp = showConditioning && conditioningType === 'depth'
   const [requiredIcLoraCpIds, setRequiredIcLoraCpIds] = useState<ModelCheckpointID[]>([])
   const [isCheckingIcLora, setIsCheckingIcLora] = useState(false)
   const [isDownloadingIcLora, setIsDownloadingIcLora] = useState(false)
@@ -73,45 +126,82 @@ export function ICLoraPanel({
   const [downloadSessionId, setDownloadSessionId] = useState<string | null>(null)
   const [extractError, setExtractError] = useState<string | null>(null)
   const [isDragOver, setIsDragOver] = useState(false)
-  const icLoraReady = requiredIcLoraCpIds.length === 0
+  const allRequiredCpIds = useMemo(() => {
+    return needsDepthCp && !requiredIcLoraCpIds.includes(depthCpId)
+      ? [...requiredIcLoraCpIds, depthCpId]
+      : requiredIcLoraCpIds
+  }, [requiredIcLoraCpIds, needsDepthCp])
+  const icLoraReady = allRequiredCpIds.length === 0
   const { hfAuthStatus, hfAuthPolling, startHuggingFaceLogin } = useHfAuth(!icLoraReady)
-  const { accessMap, allAuthorized } = useHfModelAccess(requiredIcLoraCpIds, hfAuthStatus)
+  const { accessMap, allAuthorized } = useHfModelAccess(allRequiredCpIds, hfAuthStatus)
 
   useEffect(() => {
     if (resetKey === undefined) return
     setInputVideoPath(initialVideoPath || null)
     setInputTime(0)
-    setInternalCondType('canny')
+    setInternalCondType(null)
     setInternalCondStrength(1.0)
-    onConditioningTypeChange?.('canny')
+    setInternalAdapterId(null)
+    setMaskPath(null)
+    setIngredientPaths([])
+    setLaplacianBlendGrow(6)
+    onConditioningTypeChange?.(null)
     onConditioningStrengthChange?.(1.0)
     setConditioningPreview(null)
     setExtractError(null)
   }, [resetKey, initialVideoPath]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    const ready = !!inputVideoPath && icLoraReady
+    const selectedEntry = getAdapterEntry(internalAdapterId)
+    const requiredSlotsReady = selectedEntry?.workflow === 'in_outpainting'
+      ? !!maskPath
+      : selectedEntry?.workflow === 'ingredients'
+        ? ingredientPaths.length > 0
+        : true
+    const adapterReady = internalAdapterId !== null && selectedEntry?.workflow !== 'unavailable'
+    const ready = !!inputVideoPath && icLoraReady && requiredSlotsReady && (conditioningType !== null || adapterReady)
+    const images = selectedEntry?.workflow === 'ingredients' ? ingredientPaths.map(p => ({ path: p })) : []
     onChange?.({
       videoPath: inputVideoPath,
       conditioningType,
       conditioningStrength,
+      adapterId: internalAdapterId,
+      maskPath: selectedEntry?.workflow === 'in_outpainting' ? maskPath : null,
+      images,
       ready,
+      maskGrowPx: selectedEntry?.workflow === 'in_outpainting' ? maskGrowPx : 30,
+      laplacianBlendGrow: selectedEntry?.workflow === 'in_outpainting' ? laplacianBlendGrow : 6,
     })
-  }, [inputVideoUrl, inputVideoPath, conditioningType, conditioningStrength, icLoraReady, onChange])
+  }, [inputVideoUrl, inputVideoPath, conditioningType, conditioningStrength, internalAdapterId, icLoraReady, maskPath, maskGrowPx, ingredientPaths, onChange])
 
   const checkIcLoraAvailability = useCallback(async () => {
     setIsCheckingIcLora(true)
-    const result = await ApiClient.getLtxIcLoraRecommendation()
-    if (!result.ok) {
-      logger.warn(`Failed to fetch IC-LoRA model status: ${result.error.message}`)
-      setDownloadError(result.error.message)
+
+    // 1. Generic IC-LoRA base CPs (depth, canny, pose control models)
+    const loraResult = await ApiClient.getLtxIcLoraRecommendation()
+    if (!loraResult.ok) {
+      logger.warn(`Failed to fetch IC-LoRA model status: ${loraResult.error.message}`)
+      setDownloadError(loraResult.error.message)
       setIsCheckingIcLora(false)
       return
     }
 
-    const recommendationPayload = result.data
-    setRequiredIcLoraCpIds(recommendationPayload.cps_to_download)
-    const isReady = recommendationPayload.cps_to_download.length === 0
+    const cpIds: ModelCheckpointID[] = [...loraResult.data.cps_to_download]
+
+    // 2. Adapter-specific CPs from backend recommendation (no frontend adapter→CP map)
+    if (internalAdapterId) {
+      const adapterResult = await ApiClient.getAdapterRecommendation({ pipeline: internalAdapterId as any })
+      if (adapterResult.ok) {
+        for (const cpId of adapterResult.data.cps_to_download) {
+          if (!cpIds.includes(cpId)) {
+            cpIds.push(cpId)
+          }
+        }
+      }
+    }
+
+    setRequiredIcLoraCpIds(cpIds)
+    const isReady = cpIds.length === 0
 
     if (isReady) {
       setIsDownloadingIcLora(false)
@@ -120,7 +210,7 @@ export function ICLoraPanel({
       setDownloadSessionId(null)
     }
     setIsCheckingIcLora(false)
-  }, [])
+  }, [internalAdapterId])
 
   useEffect(() => {
     void checkIcLoraAvailability()
@@ -162,7 +252,7 @@ export function ICLoraPanel({
 
     const result = await ApiClient.startModelDownload({
       type: 'download',
-      cp_ids: [...requiredIcLoraCpIds],
+      cp_ids: [...allRequiredCpIds],
     })
     if (!result.ok) {
       logger.warn(`Failed to start IC-LoRA download: ${result.error.message}`)
@@ -178,14 +268,15 @@ export function ICLoraPanel({
     }
 
     setDownloadError('Unexpected response while starting IC-LoRA download')
-  }, [isDownloadingIcLora, requiredIcLoraCpIds])
+  }, [isDownloadingIcLora, allRequiredCpIds])
 
   const isExtractingRef = useRef(false)
   const extractConditioning = useCallback(async () => {
-    if (!inputVideoPath || isExtractingRef.current || !icLoraReady) return
+    if (!inputVideoPath || isExtractingRef.current || !icLoraReady || !showConditioning) return
     isExtractingRef.current = true
     setIsExtracting(true)
     setExtractError(null)
+    if (conditioningType === null) return
     const result = await ApiClient.extractIcLoraConditioning({
       video_path: inputVideoPath,
       conditioning_type: conditioningType,
@@ -206,7 +297,7 @@ export function ICLoraPanel({
 
   const extractTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
-    if (!inputVideoPath || !icLoraReady) return
+    if (!inputVideoPath || !icLoraReady || !showConditioning) return
     if (extractTimerRef.current) clearTimeout(extractTimerRef.current)
     extractTimerRef.current = setTimeout(() => {
       void extractConditioning()
@@ -214,7 +305,7 @@ export function ICLoraPanel({
     return () => {
       if (extractTimerRef.current) clearTimeout(extractTimerRef.current)
     }
-  }, [inputTime, conditioningType, inputVideoPath, icLoraReady, extractConditioning])
+  }, [inputTime, conditioningType, inputVideoPath, icLoraReady, extractConditioning, showConditioning])
 
   useEffect(() => {
     const video = inputVideoRef.current
@@ -243,9 +334,29 @@ export function ICLoraPanel({
     }
   }, [])
 
+  const handlePickImage = useCallback(async (title: string) => {
+    const paths = await window.electronAPI.showOpenFileDialog({
+      title,
+      filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
+    })
+    return paths?.[0] ?? null
+  }, [])
+
+  const handlePickMaskFile = useCallback(async () => {
+    const paths = await window.electronAPI.showOpenFileDialog({
+      title: 'Select Mask Video or Image',
+      filters: [
+        { name: 'Video', extensions: ['mp4', 'mov', 'avi', 'webm', 'mkv'] },
+        { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] },
+      ],
+    })
+    return paths?.[0] ?? null
+  }, [])
+
   const handleClear = useCallback(() => {
     setInputVideoPath(null)
-
+    setMaskPath(null)
+    setIngredientPaths([])
     setInputTime(0)
     setConditioningPreview(null)
     setExtractError(null)
@@ -285,9 +396,9 @@ export function ICLoraPanel({
   const showDownloadGate = isCheckingIcLora || !icLoraReady
   const runningDownloadProgress =
     downloadProgress?.status === 'downloading' ? downloadProgress : null
-  const gateItemIds = [...new Set([...(requiredIcLoraCpIds ?? []), ...(runningDownloadProgress?.all_files ?? [])])]
+  const gateItemIds = [...new Set([...(allRequiredCpIds ?? []), ...(runningDownloadProgress?.all_files ?? [])])]
   const gateItems = gateItemIds.map((cpId) => {
-    const downloaded = !requiredIcLoraCpIds.includes(cpId)
+    const downloaded = !allRequiredCpIds.includes(cpId)
     const isCompleted = runningDownloadProgress?.completed_files?.includes(cpId) ?? false
     const isCurrentDownload = isDownloadingIcLora && runningDownloadProgress?.current_downloading_file === cpId
     const progress = downloaded ? 100 : (isCompleted ? 100 : (isCurrentDownload ? (runningDownloadProgress?.current_file_progress ?? 0) : 0))
@@ -464,6 +575,7 @@ export function ICLoraPanel({
                   src={inputVideoUrl}
                   className="w-full h-full object-contain"
                   controls
+                  onError={(e) => console.error('[ICLoraPanel] Input video failed to load:', inputVideoUrl, (e.target as HTMLVideoElement)?.error)}
                 />
               ) : (
                 <div className="text-center p-4">
@@ -482,39 +594,173 @@ export function ICLoraPanel({
             </div>
           </div>
 
-          <div className="flex-1 flex flex-col min-w-0">
-            <div className="px-3 py-2 border-b border-zinc-800 flex items-center justify-between gap-2">
-              <span className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">Conditioning</span>
-              <button
-                onClick={() => { void extractConditioning() }}
-                disabled={!inputVideoPath || isExtracting}
-                className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors disabled:opacity-50"
-              >
-                <RefreshCw className={`h-3 w-3 ${isExtracting ? 'animate-spin' : ''}`} />
-              </button>
+          {showConditioning ? (
+            <div className="flex-1 flex flex-col min-w-0">
+              <div className="px-3 py-2 border-b border-zinc-800 flex items-center justify-between gap-2">
+                <span className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">Conditioning</span>
+                <button
+                  onClick={() => { void extractConditioning() }}
+                  disabled={!inputVideoPath || isExtracting}
+                  className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors disabled:opacity-50"
+                >
+                  <RefreshCw className={`h-3 w-3 ${isExtracting ? 'animate-spin' : ''}`} />
+                </button>
+              </div>
+              <div className="flex-1 bg-black flex items-center justify-center min-h-0 relative">
+                {isExtracting && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/50 z-10">
+                    <Loader2 className="h-5 w-5 text-blue-400 animate-spin" />
+                  </div>
+                )}
+                {conditioningPreview ? (
+                  <img src={conditioningPreview} alt="Conditioning preview" className="w-full h-full object-contain" />
+                ) : (
+                  <div className="text-center p-4">
+                    <p className="text-zinc-600 text-xs">
+                      {inputVideoUrl ? 'Scrub the input video to see conditioning preview' : 'Import a video to preview conditioning'}
+                    </p>
+                  </div>
+                )}
+              </div>
             </div>
-            <div className="flex-1 bg-black flex items-center justify-center min-h-0 relative">
-              {isExtracting && (
-                <div className="absolute inset-0 flex items-center justify-center bg-black/50 z-10">
-                  <Loader2 className="h-5 w-5 text-blue-400 animate-spin" />
-                </div>
-              )}
-              {conditioningPreview ? (
-                <img src={conditioningPreview} alt="Conditioning preview" className="w-full h-full object-contain" />
-              ) : (
-                <div className="text-center p-4">
-                  <p className="text-zinc-600 text-xs">
-                    {inputVideoUrl ? 'Scrub the input video to see conditioning preview' : 'Import a video to preview conditioning'}
-                  </p>
-                </div>
-              )}
+          ) : getAdapterEntry(internalAdapterId)?.workflow === 'in_outpainting' ? (
+            <div className="flex-1 flex flex-col min-w-0">
+              <div className="px-3 py-2 border-b border-zinc-800 flex flex-col gap-1">
+                <span className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">Mask video/image</span>
+                <p className="text-[10px] text-zinc-500 leading-relaxed">
+                  White = inpaint, black = keep.&nbsp; Inpaint currently supported; outpaint not yet.
+                </p>
+              </div>
+              <div className="flex-none px-3 py-2 border-b border-zinc-800 space-y-2">
+                <label className="flex items-center gap-2">
+                  <span className="text-[10px] text-zinc-400 shrink-0">Mask grow:</span>
+                  <span className="text-[9px] text-zinc-600 shrink-0">mask dilation</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={128}
+                    value={maskGrowPx}
+                    onChange={(e) => setMaskGrowPx(Number(e.target.value))}
+                    className="w-full h-1.5 accent-blue-500"
+                  />
+                  <span className="text-[10px] text-zinc-400 w-6 text-right tabular-nums">{maskGrowPx}</span>
+                </label>
+                <label className="flex items-center gap-2">
+                  <span className="text-[10px] text-zinc-400 shrink-0">Blend grow:</span>
+                  <span className="text-[9px] text-zinc-600 shrink-0">Laplacian blend</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={15}
+                    value={laplacianBlendGrow}
+                    onChange={(e) => setLaplacianBlendGrow(Number(e.target.value))}
+                    className="w-full h-1.5 accent-blue-500"
+                  />
+                  <span className="text-[10px] text-zinc-400 w-6 text-right tabular-nums">{laplacianBlendGrow}</span>
+                </label>
+              </div>
+              <div className="flex-1 flex items-center justify-center min-h-0 p-4">
+                {maskPath ? (
+                  <div className="text-center">
+                    <img src={pathToFileUrl(maskPath)} alt="Mask" className="max-w-full max-h-40 object-contain mx-auto mb-2" />
+                    <p className="text-zinc-400 text-[10px] truncate max-w-[150px] mx-auto">{maskPath.split(/[\\/]/).pop()}</p>
+                    <button onClick={() => setMaskPath(null)} className="text-[10px] text-red-400 hover:text-red-300 mt-1">Remove</button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => { void handlePickMaskFile().then(setMaskPath) }}
+                    className="flex flex-col items-center gap-1 px-3 py-2 text-[10px] text-blue-400 border border-blue-500/30 rounded-lg hover:bg-blue-600/10 transition-colors"
+                  >
+                    <ImageIcon className="h-5 w-5" />
+                    Select mask video or image
+                  </button>
+                )}
+              </div>
             </div>
-          </div>
+          ) : getAdapterEntry(internalAdapterId)?.workflow === 'ingredients' ? (
+            <div className="flex-1 flex flex-col min-w-0">
+              <div className="px-3 py-2 border-b border-zinc-800 flex items-center justify-between">
+                <span className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">Ingredient Images</span>
+                <button
+                  onClick={() => { void handlePickImage('Add Ingredient Image').then(p => p && setIngredientPaths(prev => [...prev, p])) }}
+                  disabled={isProcessing}
+                  className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] text-blue-400 hover:text-blue-300 hover:bg-blue-600/10 transition-colors disabled:opacity-50"
+                >
+                  + Add
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto min-h-0 p-3 space-y-2">
+                <p className="text-[10px] text-zinc-500 leading-relaxed">
+                  Official workflow expects a single composite reference sheet; multiple assets are passed as separate references.
+                </p>
+                {ingredientPaths.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-6 text-center">
+                    <ImageIcon className="h-8 w-8 text-zinc-700 mb-2" />
+                    <p className="text-zinc-500 text-[10px]">No ingredient images selected</p>
+                    <p className="text-zinc-600 text-[10px] mt-1">Add at least one reference image</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 gap-2">
+                    {ingredientPaths.map((path, idx) => (
+                      <div key={idx} className="relative group rounded-lg border border-zinc-700 bg-zinc-900 overflow-hidden">
+                        <div className="aspect-square bg-black flex items-center justify-center">
+                          <img
+                            src={pathToFileUrl(path)}
+                            alt={`Ingredient ${idx + 1}`}
+                            className="w-full h-full object-contain"
+                          />
+                        </div>
+                        <div className="px-2 py-1.5">
+                          <p className="text-[10px] text-zinc-400 truncate">{path.split(/[\\/]/).pop()}</p>
+                        </div>
+                        <button
+                          onClick={() => setIngredientPaths(prev => prev.filter((_, i) => i !== idx))}
+                          className="absolute top-1 right-1 p-1 rounded bg-black/60 text-red-400 opacity-0 group-hover:opacity-100 hover:text-red-300 transition-opacity"
+                          title="Remove ingredient"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="flex-1 flex flex-col min-w-0">
+              <div className="flex-1 flex items-center justify-center p-4">
+                <p className="text-zinc-600 text-xs text-center">No conditioning needed for this adapter</p>
+              </div>
+            </div>
+          )}
 
           {/* Output column */}
           <div className="flex-1 flex flex-col border-l border-zinc-800 min-w-0">
-            <div className="px-3 py-2 border-b border-zinc-800 flex items-center">
+            <div className="px-3 py-2 border-b border-zinc-800 flex items-center gap-2">
               <span className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">Output</span>
+              <div className="flex-1" />
+              <select
+                value={internalAdapterId ?? ''}
+                onChange={(e) => {
+                  const val = e.target.value
+                  if (val && getAdapterEntry(val)?.workflow === 'unavailable') return // guard against disabled selection
+                  setInternalAdapterId(val || null)
+                  setMaskPath(null)
+                  setIngredientPaths([])
+                }}
+                className="bg-zinc-800 text-[10px] text-zinc-300 border border-zinc-700 rounded px-1.5 py-1 max-w-[140px] cursor-pointer focus:outline-none focus:border-zinc-500"
+              >
+                <option value="">Default</option>
+                {availableAdapters.map((a) => (
+                  <option key={a.value} value={a.value}>{a.label}</option>
+                ))}
+                {unavailableAdapters.length > 0 && (
+                  <option disabled value="">─── Unavailable ───</option>
+                )}
+                {unavailableAdapters.map((a) => (
+                  <option key={a.value} value={a.value} disabled>{a.label} ({a.reason})</option>
+                ))}
+              </select>
             </div>
             <div className="flex-1 bg-black flex items-center justify-center min-h-0 relative">
               {_outputVideoPath ? (
@@ -522,6 +768,7 @@ export function ICLoraPanel({
                   src={pathToFileUrl(_outputVideoPath)}
                   className="w-full h-full object-contain"
                   controls
+                  onError={(e) => console.error('[ICLoraPanel] Output video failed to load:', _outputVideoPath, (e.target as HTMLVideoElement)?.error)}
                 />
               ) : isProcessing ? (
                 <div className="text-center p-4">

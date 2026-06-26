@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from threading import RLock
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from api_types import (
     ConditioningType,
@@ -20,6 +20,7 @@ from api_types import (
     IcLoraGenerateRequest,
     IcLoraGenerateResponse,
     ImageConditioningInput,
+    ModelComponentPaths,
 )
 from _routes._errors import HTTPError
 from handlers.base import StateHandlerBase
@@ -28,8 +29,10 @@ from handlers.pipelines_handler import PipelinesHandler
 from handlers.text_handler import TextHandler
 from runtime_config.model_download_specs import (
     DEPTH_PROCESSOR_CP_ID,
+    OFFICIAL_LTX23_ADAPTERS,
     get_downloaded_ltx_model_id,
     get_existing_cp_path,
+    get_latest_ltx_model_id,
     get_ltx_model_spec,
 )
 from runtime_config.runtime_config import RuntimeConfig
@@ -42,6 +45,60 @@ if TYPE_CHECKING:
     from runtime_config.runtime_config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
+
+# ponytail: workflow types for IC-LoRA adapter dispatch; add to AdapterComponent when migrating to schema
+WorkflowType = Literal[
+    "standard_video",
+    "ingredients",
+    "in_outpainting",
+    "union_control",
+    "motion_track_control",
+    "hdr",
+    "hdr_scene_embeddings",
+    "lipdub",
+]
+
+_ADAPTER_WORKFLOW: dict[str, WorkflowType] = {
+    "water_simulation": "standard_video",
+    "decompression": "standard_video",
+    "deblur": "standard_video",
+    "colorization": "standard_video",
+    "day_to_night": "standard_video",
+    "instant_shave": "standard_video",
+    "cross_eyed": "standard_video",
+    "ingredients": "ingredients",
+    "in_outpainting": "in_outpainting",
+    "union_control": "union_control",
+    "motion_track_control": "motion_track_control",
+    "hdr": "hdr",
+    "lipdub": "lipdub",
+    "hdr_scene_embeddings": "hdr_scene_embeddings",
+}
+
+_UNAVAILABLE_WORKFLOWS: frozenset[str] = frozenset({
+    "motion_track_control",
+    "hdr",
+    "hdr_scene_embeddings",
+    "lipdub",
+})
+
+_UNAVAILABLE_MESSAGES: dict[str, str] = {
+    "motion_track_control": "Motion Track Control requires trajectory/reference video processing which is not wired yet",
+    "hdr": "HDR workflow requires HDR scene embeddings and tone-mapping pipeline which is not wired yet",
+    "hdr_scene_embeddings": "HDR scene embeddings is a support asset for the HDR workflow and cannot be used as a standalone adapter",
+    "lipdub": "LipDub requires audio conditioning and lip-sync pipeline which is not wired yet",
+}
+
+# ponytail: 7 typed IC-LoRA adapter fields on ModelComponentPaths; future adapters use official_adapters dict
+_TYPED_ADAPTER_FIELD: dict[str, str] = {
+    "union_control": "ic_lora_union",
+    "motion_track_control": "ic_lora_motion_track",
+    "ingredients": "ic_lora_ingredients",
+    "hdr": "ic_lora_hdr",
+    "hdr_scene_embeddings": "ic_lora_hdr_scene_embeddings",
+    "lipdub": "ic_lora_lipdub",
+    "in_outpainting": "ic_lora_in_outpainting",
+}
 
 
 class IcLoraHandler(StateHandlerBase):
@@ -71,26 +128,99 @@ class IcLoraHandler(StateHandlerBase):
             case "canny":
                 return self._video_processor.apply_canny(frame)
             case "depth":
-                if ic_state is None:
-                    raise HTTPError(500, "Depth conditioning requires loaded IC-LoRA resources")
+                if ic_state is None or ic_state.depth_pipeline is None:
+                    raise HTTPError(500, "Depth conditioning requires depth processor resources")
                 return self._video_processor.apply_depth(frame, ic_state.depth_pipeline)
             case _:
                 raise HTTPError(400, f"Unsupported conditioning_type: {conditioning_type}")
 
-    def _require_ic_lora_model_paths(self, conditioning_type: ConditioningType) -> tuple[Path, Path]:
+    def _active_profile_components(self) -> ModelComponentPaths | None:
+        profile_id = self.state.active_model_profile_id
+        if profile_id is None:
+            return None
+        profile = next((p for p in self.state.model_profiles if p.id == profile_id), None)
+        return None if profile is None else profile.components
+
+    def _profile_adapter_path(self, adapter_id: str) -> str | None:
+        comps = self._active_profile_components()
+        if comps is None:
+            return None
+        adapter_path = comps.official_adapters.get(adapter_id)
+        if adapter_path:
+            path = Path(adapter_path)
+            if path.is_file():
+                return str(path)
+
+        field_name = _TYPED_ADAPTER_FIELD.get(adapter_id)
+        typed_path = getattr(comps, field_name, None) if field_name is not None else None
+        if typed_path:
+            path = Path(typed_path)
+            if path.is_file():
+                return str(path)
+        return None
+
+    def _resolve_ic_lora_adapter_path(self, adapter_id: str) -> str:
+        if adapter_id not in OFFICIAL_LTX23_ADAPTERS:
+            raise HTTPError(400, f"Unknown adapter: {adapter_id}")
+
+        adapter = OFFICIAL_LTX23_ADAPTERS[adapter_id]
+        if adapter.kind != "ic_lora":
+            raise HTTPError(400, f"Adapter {adapter_id} is not an IC-LoRA adapter (kind={adapter.kind})")
+
+        profile_path = self._profile_adapter_path(adapter_id)
+        if profile_path is not None:
+            return profile_path
+
+        installed = self.models_dir / adapter.filename
+        if installed.is_file():
+            return str(installed)
+
+        raise HTTPError(400, f"Adapter not found: {adapter_id}")
+
+    def _require_ic_lora_model_paths(
+        self,
+        conditioning_type: ConditioningType | None,
+        require_lora: bool = True,
+    ) -> tuple[Path | None, Path | None]:
         model_id = get_downloaded_ltx_model_id(self.models_dir)
         if model_id is None:
-            raise HTTPError(409, "NO_DOWNLOADED_LTX_MODEL")
-        ic_loras_spec = get_ltx_model_spec(model_id).ic_loras_spec
-        match conditioning_type:
-            case "canny":
-                lora_cp_id = ic_loras_spec.canny_cp
-            case "depth":
-                lora_cp_id = ic_loras_spec.depth_cp
-            case _:
-                raise HTTPError(400, f"Unsupported conditioning_type: {conditioning_type}")
-        lora_path = get_existing_cp_path(self.models_dir, lora_cp_id)
-        depth_model_path = get_existing_cp_path(self.models_dir, DEPTH_PROCESSOR_CP_ID)
+            # Active profile with transformer path satisfies model presence
+            # (GGUF/local profile without official download)
+            profile_id = self.state.active_model_profile_id
+            profile = (
+                next((p for p in self.state.model_profiles if p.id == profile_id), None)
+                if profile_id is not None
+                else None
+            )
+            if profile is not None and profile.components.transformer is not None:
+                model_id = get_latest_ltx_model_id()
+            else:
+                raise HTTPError(409, "NO_DOWNLOADED_LTX_MODEL")
+
+        lora_path: Path | None = None
+        if require_lora:
+            ic_loras_spec = get_ltx_model_spec(model_id).ic_loras_spec
+            match conditioning_type:
+                case "canny":
+                    lora_cp_id = ic_loras_spec.canny_cp
+                case "depth":
+                    lora_cp_id = ic_loras_spec.depth_cp
+                case _:
+                    raise HTTPError(400, f"Unsupported conditioning_type: {conditioning_type}")
+            profile_union = self._profile_adapter_path("union_control")
+            lora_path = Path(profile_union) if profile_union else get_existing_cp_path(self.models_dir, lora_cp_id)
+        # ponytail: require_lora=False skips legacy LoRA check; adapter_path in generate() covers it
+        depth_model_path: Path | None = None
+        if conditioning_type == "depth":
+            profile_components = self._active_profile_components()
+            profile_depth = profile_components.depth_processor if profile_components is not None else None
+            if profile_depth:
+                depth_path = Path(profile_depth)
+                depth_model_path = depth_path if depth_path.exists() else None
+            else:
+                depth_model_path = get_existing_cp_path(self.models_dir, DEPTH_PROCESSOR_CP_ID)
+            if depth_model_path is None:
+                raise HTTPError(400, "Depth conditioning requires dpt-hybrid-midas or profile depth_processor")
         return lora_path, depth_model_path
 
     def extract_conditioning(self, req: IcLoraExtractRequest) -> IcLoraExtractResponse:
@@ -111,7 +241,7 @@ class IcLoraHandler(StateHandlerBase):
         if req.conditioning_type == "depth":
             lora_path, depth_model_path = self._require_ic_lora_model_paths(req.conditioning_type)
             ic_state = self._pipelines.load_ic_lora(
-                str(lora_path),
+                [str(lora_path)],
                 str(depth_model_path),
             )
 
@@ -135,6 +265,24 @@ class IcLoraHandler(StateHandlerBase):
             return 1000
         return int(time.time()) % 2147483647
 
+    def _resolve_base_lora_path(
+        self,
+        conditioning_type: ConditioningType,
+    ) -> tuple[str, Path | None]:
+        """Get base LoRA path for conditioning: union_control from profile/adapter, else legacy checkpoint.
+        Returns (base_path, depth_model_path)."""
+        try:
+            base = self._resolve_ic_lora_adapter_path("union_control")
+            _, depth_model_path = self._require_ic_lora_model_paths(
+                conditioning_type, require_lora=False
+            )
+            return base, depth_model_path
+        except HTTPError:
+            legacy_path, depth_model_path = self._require_ic_lora_model_paths(
+                conditioning_type, require_lora=True
+            )
+            return str(legacy_path), depth_model_path
+
     def generate(self, req: IcLoraGenerateRequest) -> IcLoraGenerateResponse:
         if self._generation.is_generation_running():
             raise HTTPError(409, "Generation already in progress")
@@ -142,7 +290,57 @@ class IcLoraHandler(StateHandlerBase):
         video_path = Path(req.video_path)
         if not video_path.exists():
             raise HTTPError(400, f"Video not found: {req.video_path}")
-        lora_path, depth_model_path = self._require_ic_lora_model_paths(req.conditioning_type)
+        if req.mask_path is not None:
+            mask_path = Path(req.mask_path)
+            if not mask_path.exists():
+                raise HTTPError(400, f"Mask not found: {req.mask_path}")
+
+        # ponytail: workflow validation before any LoRA resolution
+        workflow: str | None = _ADAPTER_WORKFLOW.get(req.adapter_id) if req.adapter_id else None
+        if workflow in _UNAVAILABLE_WORKFLOWS:
+            raise HTTPError(400, _UNAVAILABLE_MESSAGES[workflow])
+        if workflow == "union_control" and req.conditioning_type is None:
+            raise HTTPError(400, "Union Control requires conditioning_type (canny or depth)")
+        if workflow == "in_outpainting" and req.mask_path is None:
+            raise HTTPError(400, "In/outpainting requires a mask_path")
+        # ponytail: in_outpainting allows empty prompt; other adapters require non-blank
+        if workflow != "in_outpainting" and not (req.prompt or "").strip():
+            raise HTTPError(400, "Prompt is required for this adapter")
+
+        # ponytail: in_outpainting allows empty prompt (official workflow supports it)
+        resolved_prompt: str = req.prompt or ""
+        if workflow == "ingredients" and not req.images:
+            raise HTTPError(400, "Ingredients adapter requires at least one image in images[]")
+
+        resolved_adapter_path: str | None = None
+        if req.adapter_id is not None:
+            resolved_adapter_path = self._resolve_ic_lora_adapter_path(req.adapter_id)
+
+        # Build lora_paths list and resolve depth model
+        lora_paths: list[str] = []
+        depth_model_path: Path | None = None
+
+        if req.conditioning_type is not None:
+            base_path, depth_model_path = self._resolve_base_lora_path(req.conditioning_type)
+            lora_paths.append(base_path)
+            # Stack adapter on top if it differs from base union path
+            if resolved_adapter_path is not None and resolved_adapter_path != base_path:
+                lora_paths.append(resolved_adapter_path)
+        elif resolved_adapter_path is not None:
+            # No conditioning: load just the adapter
+            lora_paths.append(resolved_adapter_path)
+            # Verify LTX model exists for non-conditioning adapter use
+            model_id = get_downloaded_ltx_model_id(self.models_dir)
+            if model_id is None:
+                profile_id = self.state.active_model_profile_id
+                profile = (
+                    next((p for p in self.state.model_profiles if p.id == profile_id), None)
+                    if profile_id is not None else None
+                )
+                if profile is None or profile.components.transformer is None:
+                    raise HTTPError(409, "NO_DOWNLOADED_LTX_MODEL")
+        else:
+            raise HTTPError(400, "Either conditioning_type or adapter_id must be provided")
 
         generation_id = uuid.uuid4().hex[:8]
         t_total_start = time.perf_counter()
@@ -151,8 +349,9 @@ class IcLoraHandler(StateHandlerBase):
         try:
             t_load_start = time.perf_counter()
             ic_state = self._pipelines.load_ic_lora(
-                str(lora_path),
-                str(depth_model_path),
+                lora_paths,
+                str(depth_model_path) if depth_model_path else None,
+                adapter_path=resolved_adapter_path,
             )
             t_load_end = time.perf_counter()
             logger.info("[ic-lora] Pipeline load: %.2fs", t_load_end - t_load_start)
@@ -174,55 +373,66 @@ class IcLoraHandler(StateHandlerBase):
             info = self._video_processor.get_video_info(cap)
             input_width = int(info["width"])
             input_height = int(info["height"])
+            frame_count = int(info["frame_count"])
+            fps = float(info["fps"])
 
-            cache_key = ConditioningCacheKey(str(video_path), req.conditioning_type)
-            cached = ic_state.conditioning_cache.get(cache_key)
+            t_preprocess_start: float = 0.0
+            t_preprocess_end: float = 0.0
 
-            t_preprocess_start = 0.0
-            t_preprocess_end = 0.0
+            if req.conditioning_type is not None:
+                cache_key = ConditioningCacheKey(str(video_path), req.conditioning_type)
+                cached = ic_state.conditioning_cache.get(cache_key)
 
-            if cached is not None:
-                self._video_processor.release(cap)
-                control_video_path = cached.control_video_path
-                frame_count = cached.frame_count
-                fps = cached.fps
-                logger.info("[ic-lora] Conditioning cache hit for %s/%s", video_path.name, req.conditioning_type)
+                if cached is not None:
+                    self._video_processor.release(cap)
+                    control_video_path = cached.control_video_path
+                    frame_count = cached.frame_count
+                    fps = cached.fps
+                    logger.info(
+                        "[ic-lora] Conditioning cache hit for %s/%s",
+                        video_path.name, req.conditioning_type,
+                    )
+                else:
+                    t_preprocess_start = time.perf_counter()
+
+                    control_video_path = str(
+                        self.config.outputs_dir
+                        / f"_control_{req.conditioning_type}_{uuid.uuid4().hex[:8]}.mp4"
+                    )
+                    writer = self._video_processor.create_writer(
+                        control_video_path,
+                        fourcc="mp4v",
+                        fps=fps,
+                        size=(int(info["width"]), int(info["height"])),
+                    )
+
+                    assert req.conditioning_type is not None
+                    frame_idx = 0
+                    while frame_idx < frame_count:
+                        frame = self._video_processor.read_frame(cap)
+                        if frame is None:
+                            break
+                        control_frame = self._build_conditioning_frame(
+                            frame, req.conditioning_type, ic_state
+                        )
+                        writer.write(control_frame)
+                        frame_idx += 1
+
+                    self._video_processor.release(cap)
+                    self._video_processor.release(writer)
+                    t_preprocess_end = time.perf_counter()
+                    logger.info(
+                        "[ic-lora] Preprocessing (%s, %d frames): %.2fs",
+                        req.conditioning_type, frame_idx, t_preprocess_end - t_preprocess_start,
+                    )
+
+                    ic_state.conditioning_cache.put(
+                        cache_key, ConditioningCacheEntry(control_video_path, frame_count, fps)
+                    )
             else:
-                t_preprocess_start = time.perf_counter()
-
-                frame_count = int(info["frame_count"])
-                fps = float(info["fps"])
-
-                control_video_path = str(
-                    self.config.outputs_dir / f"_control_{req.conditioning_type}_{uuid.uuid4().hex[:8]}.mp4"
-                )
-                writer = self._video_processor.create_writer(
-                    control_video_path,
-                    fourcc="mp4v",
-                    fps=fps,
-                    size=(int(info["width"]), int(info["height"])),
-                )
-
-                frame_idx = 0
-                while frame_idx < frame_count:
-                    frame = self._video_processor.read_frame(cap)
-                    if frame is None:
-                        break
-                    control_frame = self._build_conditioning_frame(frame, req.conditioning_type, ic_state)
-                    writer.write(control_frame)
-                    frame_idx += 1
-
+                # No conditioning: use original video as the control signal
                 self._video_processor.release(cap)
-                self._video_processor.release(writer)
-                t_preprocess_end = time.perf_counter()
-                logger.info(
-                    "[ic-lora] Preprocessing (%s, %d frames): %.2fs",
-                    req.conditioning_type, frame_idx, t_preprocess_end - t_preprocess_start,
-                )
-
-                ic_state.conditioning_cache.put(
-                    cache_key, ConditioningCacheEntry(control_video_path, frame_count, fps)
-                )
+                control_video_path = str(video_path)
 
             images: list[ImageConditioningInput] = [
                 ImageConditioningInput(path=img.path, frame_idx=int(img.frame), strength=float(img.strength))
@@ -240,22 +450,42 @@ class IcLoraHandler(StateHandlerBase):
             )
 
             t_inference_start = time.perf_counter()
-            ic_state.pipeline.generate(
-                prompt=req.prompt,
-                seed=self._resolve_seed(),
-                height=height,
-                width=width,
-                num_frames=frame_count,
-                frame_rate=fps,
-                images=images,
-                video_conditioning=[(control_video_path, req.conditioning_strength)],
-                output_path=str(output_path),
-            )
+            if workflow == "in_outpainting":
+                ic_state.pipeline.generate_inpaint(
+                    prompt=resolved_prompt,
+                    seed=self._resolve_seed(),
+                    height=height,
+                    width=width,
+                    num_frames=frame_count,
+                    frame_rate=fps,
+                    images=images,
+                    video_path=str(video_path),
+                    mask_path=str(req.mask_path),
+                    output_path=str(output_path),
+                    conditioning_strength=req.conditioning_strength,
+                    mask_grow_px=req.mask_grow_px,
+                    laplacian_blend_grow=req.laplacian_blend_grow,
+                )
+            else:
+                ic_state.pipeline.generate(
+                    prompt=req.prompt,
+                    seed=self._resolve_seed(),
+                    height=height,
+                    width=width,
+                    num_frames=frame_count,
+                    frame_rate=fps,
+                    images=images,
+                    video_conditioning=[(control_video_path, req.conditioning_strength)],
+                    output_path=str(output_path),
+                    mask_path=req.mask_path,
+                    conditioning_strength=req.conditioning_strength,
+                    original_video_path=None,
+                )
             t_inference_end = time.perf_counter()
             logger.info("[ic-lora] Inference: %.2fs", t_inference_end - t_inference_start)
 
             t_total_end = time.perf_counter()
-            preprocess_time = (t_preprocess_end - t_preprocess_start) if cached is None else 0.0
+            preprocess_time = (t_preprocess_end - t_preprocess_start) if req.conditioning_type is not None else 0.0
             logger.info(
                 "[ic-lora] Total generation: %.2fs (load=%.2fs, text=%.2fs, preprocess=%.2fs, inference=%.2fs)",
                 t_total_end - t_total_start,

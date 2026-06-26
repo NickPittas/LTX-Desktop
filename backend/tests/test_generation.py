@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from api_types import ModelComponentPaths, ModelProfilePayload
 from services.ltx_api_client.ltx_api_client import LTXAPIClientError
 from state.app_state_types import GpuSlot, VideoPipelineState
 from tests.http_error_assertions import assert_http_error
@@ -172,6 +173,52 @@ class TestGenerate:
         r = client.post("/api/generate", json=_T2V_JSON)
         assert r.status_code == 200
         assert r.json()["status"] == "cancelled"
+
+    def test_t2v_active_profile_local_text_encoder_passes_gate(
+        self, client, test_state, fake_services, tmp_path
+    ):
+        """Active profile with local text encoder passes gate without use_local_text_encoder or API key."""
+        d = tmp_path / "profile"
+        d.mkdir()
+        files = {
+            "transformer.gguf": b"GGUF",
+            "tp.safetensors": b"x",
+            "ec.safetensors": b"x",
+            "vvae.safetensors": b"x",
+            "avae.safetensors": b"x",
+            "gemma.gguf": b"GEMMA",
+        }
+        paths = {}
+        for name, content in files.items():
+            p = d / name
+            p.write_bytes(content)
+            paths[name.rsplit(".", 1)[0]] = str(p)
+
+        profile = ModelProfilePayload(
+            id="gguf-profile",
+            name="GGUF Profile",
+            source="kijai",
+            components=ModelComponentPaths(
+                transformer=paths["transformer"],
+                transformer_format="gguf",
+                text_projection=paths["tp"],
+                embeddings_connector=paths["ec"],
+                video_vae=paths["vvae"],
+                audio_vae=paths["avae"],
+                text_encoder_root=paths["gemma"],
+                text_encoder_format="gguf",
+            ),
+        )
+        test_state.state.model_profiles = [profile]
+        test_state.state.active_model_profile_id = "gguf-profile"
+        test_state.state.app_settings.prompt_enhancer_enabled_t2v = True
+
+        r = client.post("/api/generate", json=_T2V_JSON)
+        # The gate passes — response should be 200, not TEXT_ENCODING_NOT_CONFIGURED
+        assert r.status_code == 200
+        assert r.json()["status"] == "complete"
+        assert fake_services.fast_video_pipeline.last_gemma_root == paths["gemma"]
+        assert fake_services.fast_video_pipeline.generate_calls[-1]["enhance_prompt"] is True
 
 
 class TestA2VGenerate:
@@ -1355,3 +1402,4 @@ class TestEnhancePromptFlag:
         assert r.status_code == 200
 
         assert len(fake_services.text_encoder.encode_calls) == 0
+        assert fake_services.fast_video_pipeline.generate_calls[-1]["enhance_prompt"] is True

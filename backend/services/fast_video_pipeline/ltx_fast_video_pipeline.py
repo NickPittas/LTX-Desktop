@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 import os
-from typing import Final, cast
+from typing import Final
 
 import torch
 
@@ -54,7 +54,7 @@ class LTXFastVideoPipeline:
 
         install_gguf_t2v_conditioning_patch()
 
-        if transformer_format == "gguf":
+        if transformer_format == "gguf" or gemma_root is not None:
             from services.patches.gguf_loader_fix import install_gguf_prompt_encoder_patch
 
             install_gguf_prompt_encoder_patch()
@@ -69,8 +69,17 @@ class LTXFastVideoPipeline:
         self._transformer_format = transformer_format
         # GGUF is already quantized; the FP8 policy's sd_ops/module_ops would
         # downcast and overwrite the lazy QParam/GgufLinear path, so disable it.
+        is_split = (
+            transformer_format == "safetensors"
+            and self._components is not None
+            and self._components.video_vae_path is not None
+        )
         if transformer_format == "gguf":
             self._quantization = None
+        elif is_split and device_supports_fp8(device):
+            from services.patches.gguf_loader_fix import kijai_fp8_quantization_policy
+
+            self._quantization = kijai_fp8_quantization_policy()
         else:
             from ltx_core.quantization import QuantizationPolicy
 
@@ -78,7 +87,7 @@ class LTXFastVideoPipeline:
 
         self.pipeline = DistilledPipeline(
             distilled_checkpoint_path=checkpoint_path,  # type: ignore[arg-type]  # ponytail: ltx_pipelines accepts tuple per M5 spec
-            gemma_root=cast(str, gemma_root),
+            gemma_root=gemma_root or "",
             spatial_upsampler_path=upsampler_path,
             loras=[],
             device=device,
@@ -96,6 +105,21 @@ class LTXFastVideoPipeline:
                 audio_vae_path=c.audio_vae_path if c is not None else None,
             )
 
+        # ponytail: split safetensors also needs VAE path remap with Kijai key filters.
+        # install_gguf_component_paths is format-agnostic.
+        if is_split:
+            from services.patches.gguf_loader_fix import install_gguf_component_paths, install_kijai_transformer_config_patch
+
+            c = self._components
+            assert c is not None  # guarded above
+            install_kijai_transformer_config_patch(self.pipeline, checkpoint_path)
+            install_gguf_component_paths(
+                self.pipeline,
+                checkpoint_path,
+                video_vae_path=c.video_vae_path,
+                audio_vae_path=c.audio_vae_path,
+            )
+
     def _run_inference(
         self,
         prompt: str,
@@ -106,6 +130,7 @@ class LTXFastVideoPipeline:
         frame_rate: float,
         images: list[ImageConditioningInput],
         tiling_config: TilingConfigType,
+        enhance_prompt: bool,
     ) -> tuple[torch.Tensor | Iterator[torch.Tensor], AudioOrNone]:
         from ltx_pipelines.utils.args import ImageConditioningInput as _LtxImageInput
 
@@ -118,6 +143,7 @@ class LTXFastVideoPipeline:
             frame_rate=frame_rate,
             images=[_LtxImageInput(img.path, img.frame_idx, img.strength) for img in images],
             tiling_config=tiling_config,
+            enhance_prompt=enhance_prompt,
             streaming_prefetch_count=self._streaming_prefetch_count,
         )
 
@@ -132,6 +158,7 @@ class LTXFastVideoPipeline:
         frame_rate: float,
         images: list[ImageConditioningInput],
         output_path: str,
+        enhance_prompt: bool = False,
     ) -> None:
         tiling_config = default_tiling_config()
         video, audio = self._run_inference(
@@ -143,6 +170,7 @@ class LTXFastVideoPipeline:
             frame_rate=frame_rate,
             images=images,
             tiling_config=tiling_config,
+            enhance_prompt=enhance_prompt,
         )
         chunks = video_chunks_number(num_frames, tiling_config)
         encode_video_output(video=video, audio=audio, fps=int(frame_rate), output_path=output_path, video_chunks_number_value=chunks)
@@ -162,6 +190,7 @@ class LTXFastVideoPipeline:
                 frame_rate=8,
                 images=[],
                 tiling_config=tiling_config,
+                enhance_prompt=False,
             )
             chunks = video_chunks_number(warmup_frames, tiling_config)
             encode_video_output(video=video, audio=audio, fps=8, output_path=output_path, video_chunks_number_value=chunks)
@@ -181,7 +210,7 @@ class LTXFastVideoPipeline:
 
         self.pipeline = DistilledPipeline(
             distilled_checkpoint_path=self._checkpoint_path,  # type: ignore[arg-type]  # ponytail: ltx_pipelines accepts tuple per M5 spec
-            gemma_root=cast(str, self._gemma_root),
+            gemma_root=self._gemma_root or "",
             spatial_upsampler_path=self._upsampler_path,
             loras=[],
             device=self._device,
@@ -198,4 +227,21 @@ class LTXFastVideoPipeline:
                 self._checkpoint_path,
                 video_vae_path=c.video_vae_path if c is not None else None,
                 audio_vae_path=c.audio_vae_path if c is not None else None,
+            )
+
+        if (
+            self._transformer_format == "safetensors"
+            and self._components is not None
+            and self._components.video_vae_path is not None
+        ):
+            from services.patches.gguf_loader_fix import install_gguf_component_paths, install_kijai_transformer_config_patch
+
+            c = self._components
+            assert c is not None  # guarded above
+            install_kijai_transformer_config_patch(self.pipeline, self._checkpoint_path)
+            install_gguf_component_paths(
+                self.pipeline,
+                self._checkpoint_path,
+                video_vae_path=c.video_vae_path,
+                audio_vae_path=c.audio_vae_path,
             )

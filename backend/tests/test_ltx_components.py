@@ -23,6 +23,32 @@ def _profile(
     )
 
 
+def test_gemma_root_from_gguf_format():
+    profile = _profile(
+        components={
+            "transformer": "/models/ltx.gguf",
+            "transformer_format": "gguf",
+            "text_encoder_root": "/models/gemma-gguf",
+            "text_encoder_format": "gguf",
+        }
+    )
+    resolved = resolve_components(profile)
+    assert resolved.gemma_root == "/models/gemma-gguf"
+
+
+def test_gemma_root_from_safetensors_format():
+    profile = _profile(
+        components={
+            "transformer": "/models/ltx.safetensors",
+            "transformer_format": "official_safetensors",
+            "text_encoder_root": "/models/gemma-st",
+            "text_encoder_format": "safetensors",
+        }
+    )
+    resolved = resolve_components(profile)
+    assert resolved.gemma_root == "/models/gemma-st"
+
+
 class TestResolveComponents:
     def test_official_monolith_single_checkpoint_path(self):
         profile = _profile(

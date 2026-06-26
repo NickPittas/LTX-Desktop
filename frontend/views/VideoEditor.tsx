@@ -92,7 +92,9 @@ interface VideoEditorWithStoreProps {
 
 export function VideoEditor(props: VideoEditorProps) {
   const { currentProject, pendingRetakeUpdate, pendingIcLoraUpdate } = props
+  const { setPendingRetakeUpdate, setPendingIcLoraUpdate } = useProjects()
   const editorStoreRef = useRef<EditorStoreApi | null>(null)
+  const initialApplyDone = useRef(false)
 
   if (!editorStoreRef.current) {
     const initialEditorModel = getEditorModel(currentProject)
@@ -100,6 +102,36 @@ export function VideoEditor(props: VideoEditorProps) {
     const editorModel = applyPendingClipTakeUpdate(retakeApplied, pendingIcLoraUpdate)
     editorStoreRef.current = createEditorStore(createInitialEditorState(editorModel, loadLayout()))
   }
+
+  // Re-apply pending updates to running store when they change after mount (Bug B fix)
+  useEffect(() => {
+    if (!pendingRetakeUpdate && !pendingIcLoraUpdate) return
+    if (!editorStoreRef.current) return
+
+    if (!initialApplyDone.current) {
+      // Initial mount - already consumed in render-phase init guard above
+      initialApplyDone.current = true
+      if (pendingRetakeUpdate) setPendingRetakeUpdate(null)
+      if (pendingIcLoraUpdate) setPendingIcLoraUpdate(null)
+      return
+    }
+
+    // Runtime update: apply to already-initialized store
+    const store = editorStoreRef.current
+    store.getState().setStateWithoutHistory(prev => {
+      let model = prev.editorModel
+      if (pendingRetakeUpdate) {
+        model = applyPendingClipTakeUpdate(model, pendingRetakeUpdate)
+      }
+      if (pendingIcLoraUpdate) {
+        model = applyPendingClipTakeUpdate(model, pendingIcLoraUpdate)
+      }
+      return { ...prev, editorModel: model }
+    })
+
+    if (pendingRetakeUpdate) setPendingRetakeUpdate(null)
+    if (pendingIcLoraUpdate) setPendingIcLoraUpdate(null)
+  }, [pendingRetakeUpdate, pendingIcLoraUpdate, setPendingRetakeUpdate, setPendingIcLoraUpdate])
 
   const editorStore = editorStoreRef.current
   if (!editorStore) throw new Error('Editor store failed to initialize')

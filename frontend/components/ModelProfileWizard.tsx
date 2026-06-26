@@ -46,6 +46,60 @@ const COMPONENT_FIELDS: ComponentFieldDef[] = [
   { key: 'transformer_quantization', label: 'Transformer Quantization' },
 ]
 
+// ── prefill candidates ──────────────────────────────────────────
+// ponytail: known QuantStack/Kijai layout under a single root.
+const PREFILL_CANDIDATES: Record<string, string> = {
+  transformer: 'gguf/QuantStack/LTX-2.3-GGUF/LTX-2.3-distilled-1.1/LTX-2.3-22B-distilled-1.1-Q4_K_M.gguf',
+  text_encoder_root: 'text_encoders/unsloth/gemma-3-12b-it-qat-GGUF/gemma-3-12b-it-qat-UD-Q4_K_XL.gguf',
+  text_projection: 'text_encoders/ltx-2.3_text_projection_bf16.safetensors',
+  video_vae: 'vae/LTX23_video_vae_bf16.safetensors',
+  audio_vae: 'vae/LTX23_audio_vae_bf16.safetensors',
+  upsampler: 'ltx-2.3-spatial-upscaler-x2-1.0.safetensors',
+  ic_lora_union: 'adapters/ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors',
+  ic_lora_motion_track: 'adapters/ltx-2.3-22b-ic-lora-motion-track-control-ref0.5.safetensors',
+  ic_lora_ingredients: 'adapters/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors',
+  ic_lora_hdr: 'adapters/ltx-2.3-22b-ic-lora-hdr-0.9.safetensors',
+  ic_lora_hdr_scene_embeddings: 'adapters/ltx-2.3-22b-ic-lora-hdr-scene-emb.safetensors',
+  ic_lora_lipdub: 'adapters/ltx-2.3-22b-ic-lora-lipdub-0.9.safetensors',
+  ic_lora_in_outpainting: 'adapters/ltx-2.3-22b-ic-lora-in-outpainting-0.9.safetensors',
+}
+
+// ── official IC-LoRA adapter names (from OFFICIAL_LTX23_ADAPTERS) ──
+// ponytail: all 13 IC-LoRA adapters; excludes distilled_lora_384, distilled_lora_384_1_1, hdr_scene_embeddings (non-ic_lora kind).
+const OFFICIAL_ADAPTER_FILENAMES: Record<string, string> = {
+  union_control: 'adapters/ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors',
+  motion_track_control: 'adapters/ltx-2.3-22b-ic-lora-motion-track-control-ref0.5.safetensors',
+  ingredients: 'adapters/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors',
+  water_simulation: 'adapters/ltx-2.3-22b-ic-lora-water-simulation-0.9.safetensors',
+  decompression: 'adapters/ltx-2.3-22b-ic-lora-decompression-0.9.safetensors',
+  deblur: 'adapters/ltx-2.3-22b-ic-lora-deblur-0.9.safetensors',
+  colorization: 'adapters/ltx-2.3-22b-ic-lora-colorization-0.9.safetensors',
+  day_to_night: 'adapters/ltx-2.3-22b-ic-lora-day-to-night-0.9.safetensors',
+  in_outpainting: 'adapters/ltx-2.3-22b-ic-lora-in-outpainting-0.9.safetensors',
+  instant_shave: 'adapters/ltx-2.3-22b-ic-lora-instant-shave-0.9.safetensors',
+  cross_eyed: 'adapters/ltx-2.3-22b-ic-lora-cross-eyed-0.9.safetensors',
+  hdr: 'adapters/ltx-2.3-22b-ic-lora-hdr-0.9.safetensors',
+  lipdub: 'adapters/ltx-2.3-22b-ic-lora-lipdub-0.9.safetensors',
+}
+
+const OFFICIAL_ADAPTER_LABELS: Record<string, string> = {
+  union_control: 'Union Control',
+  motion_track_control: 'Motion Track',
+  ingredients: 'Ingredients',
+  water_simulation: 'Water Simulation',
+  decompression: 'Decompression',
+  deblur: 'Deblur',
+  colorization: 'Colorization',
+  day_to_night: 'Day→Night',
+  in_outpainting: 'In/Outpainting',
+  instant_shave: 'Instant Shave',
+  cross_eyed: 'Cross Eyed',
+  hdr: 'HDR',
+  lipdub: 'LipDub',
+}
+
+const OFFICIAL_ADAPTER_IDS = Object.keys(OFFICIAL_ADAPTER_FILENAMES)
+
 // ponytail: best-effort capability guess. Backend validation is source of truth.
 function deriveCapabilities(
   components: Partial<ModelComponentPaths>,
@@ -59,7 +113,10 @@ function deriveCapabilities(
     if (components.video_vae) caps.push('i2v')
     if (components.upsampler) caps.push('retake')
   }
-  if (Object.entries(components).some(([k, v]) => k.startsWith('ic_lora_') && v)) {
+  if (
+    Object.entries(components).some(([k, v]) => k.startsWith('ic_lora_') && v) ||
+    Object.keys(components.official_adapters ?? {}).length > 0
+  ) {
     caps.push('ic_lora')
   }
   if (transformerFormat === 'gguf') caps.push('gguf')
@@ -124,6 +181,7 @@ export function ModelProfileWizard({ isOpen, onClose, onCreated }: ModelProfileW
   const [isCreating, setIsCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
   const [createdProfileId, setCreatedProfileId] = useState<string | null>(null)
+  const [prefillStatus, setPrefillStatus] = useState<string | null>(null)
   const [isValidating, setIsValidating] = useState(false)
   const [validationResult, setValidationResult] = useState<ModelProfileValidationResponse | null>(null)
   const [isActivating, setIsActivating] = useState(false)
@@ -148,6 +206,7 @@ export function ModelProfileWizard({ isOpen, onClose, onCreated }: ModelProfileW
     setValidationResult(null)
     setIsActivating(false)
     setActivateError(null)
+    setPrefillStatus(null)
   }, [isOpen])
 
   // Derive format defaults from source
@@ -170,6 +229,60 @@ export function ModelProfileWizard({ isOpen, onClose, onCreated }: ModelProfileW
 
   const updateComponent = useCallback((key: keyof ModelComponentPaths, value: string) => {
     setComponents(prev => ({ ...prev, [key]: value || null }))
+  }, [])
+
+  const handlePrefill = useCallback(async () => {
+    const dir = await window.electronAPI.showOpenDirectoryDialog({ title: 'Select models folder' })
+    if (!dir) return
+
+    setPrefillStatus('Scanning...')
+
+    // Check standard component files
+    const stdPairs = Object.entries(PREFILL_CANDIDATES).map(([k, rel]) => [k, `${dir}/${rel}`] as const)
+    let exists: Record<string, boolean>
+    try {
+      const allPaths: string[] = stdPairs.map(([, p]) => p)
+      OFFICIAL_ADAPTER_IDS.forEach(id => allPaths.push(`${dir}/${OFFICIAL_ADAPTER_FILENAMES[id]}`))
+      exists = await window.electronAPI.checkFilesExist({
+        filePaths: allPaths,
+      })
+    } catch {
+      setPrefillStatus('Failed to check files')
+      return
+    }
+
+    // Collect standard component paths
+    const updates: Record<string, string> = {}
+    for (const [key, absPath] of stdPairs) {
+      if (exists[absPath]) updates[key] = absPath
+    }
+
+    // Collect official adapter paths
+    const adapterDict: Record<string, string> = {}
+    for (const id of OFFICIAL_ADAPTER_IDS) {
+      const absPath = `${dir}/${OFFICIAL_ADAPTER_FILENAMES[id]}`
+      if (exists[absPath]) adapterDict[id] = absPath
+    }
+    if (Object.keys(adapterDict).length > 0) {
+      updates['official_adapters'] = adapterDict as unknown as string
+    }
+
+    const n = Object.keys(updates).length
+    if (n === 0) {
+      setPrefillStatus('No known files found')
+      return
+    }
+
+    setComponents(prev => ({ ...prev, ...(updates as Partial<ModelComponentPaths>) }))
+
+    // Set derived formats for GGUF files
+    if (updates['transformer']) setTransformerFormat('gguf')
+    if (updates['transformer']) setSource('quantstack')
+    if (updates['text_encoder_root']) setTextEncoderFormat('gguf')
+
+    const stdCount = Object.keys(updates).filter(k => k !== 'official_adapters').length
+    const adapterCount = Object.keys(adapterDict).length
+    setPrefillStatus(`Prefilled ${stdCount} paths + ${adapterCount} adapters from ${dir}`)
   }, [])
 
   // Step navigation
@@ -199,7 +312,13 @@ export function ModelProfileWizard({ isOpen, onClose, onCreated }: ModelProfileW
       transformer_format: transformerFormat as ModelComponentPaths['transformer_format'],
       text_encoder_format: textEncoderFormat as ModelComponentPaths['text_encoder_format'],
       ...Object.fromEntries(
-        Object.entries(components).filter(([, v]) => v),
+        Object.entries(components).filter(([k, v]) => {
+          if (k === 'official_adapters') {
+            const d = v as Record<string, string> | undefined
+            return d !== undefined && Object.keys(d).length > 0
+          }
+          return v
+        }),
       ),
     } as ModelComponentPaths
 
@@ -389,6 +508,27 @@ export function ModelProfileWizard({ isOpen, onClose, onCreated }: ModelProfileW
                 </div>
               </div>
 
+              {/* Prefill from known models folder layout */}
+              <div className="flex items-center gap-2 pt-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handlePrefill}
+                  disabled={prefillStatus === 'Scanning...'}
+                >
+                  {prefillStatus === 'Scanning...' ? (
+                    <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Scanning...</>
+                  ) : (
+                    'Prefill from models folder'
+                  )}
+                </Button>
+                {prefillStatus && prefillStatus !== 'Scanning...' && (
+                  <span className="text-xs text-muted-foreground truncate max-w-80" title={prefillStatus}>
+                    {prefillStatus}
+                  </span>
+                )}
+              </div>
+
               {/* Dynamic component fields */}
               {COMPONENT_FIELDS.filter(f => visibleKeys.includes(f.key)).map(field => {
                 const pickDir = field.pickDirectory ?? fieldPickDirectory(field.key, transformerFormat, textEncoderFormat)
@@ -411,6 +551,42 @@ export function ModelProfileWizard({ isOpen, onClose, onCreated }: ModelProfileW
                 <p className="text-sm text-muted-foreground py-2">
                   No component paths needed for this source.
                 </p>
+              )}
+
+              {/* Official IC-LoRA Adapters (local/non-official profiles) */}
+              {source !== 'official' && (
+                <details className="mt-4 group" open={Object.keys(components.official_adapters ?? {}).length > 0}>
+                  <summary className="cursor-pointer text-sm font-medium text-foreground hover:text-primary transition-colors">
+                    Official IC-LoRA Adapters
+                    {Object.keys(components.official_adapters ?? {}).length > 0 && (
+                      <span className="ml-2 text-xs text-muted-foreground">
+                        ({Object.keys(components.official_adapters!).length} set)
+                      </span>
+                    )}
+                  </summary>
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-2 mt-2">
+                    {OFFICIAL_ADAPTER_IDS.map(id => (
+                      <div key={id} className="flex flex-col gap-0.5">
+                        <label className="text-xs text-muted-foreground truncate">{OFFICIAL_ADAPTER_LABELS[id]}</label>
+                        <input
+                          type="text"
+                          value={components.official_adapters?.[id] ?? ''}
+                          onChange={e => {
+                            const val = e.target.value
+                            setComponents(prev => {
+                              const current = { ...(prev.official_adapters ?? {}) }
+                              if (val) current[id] = val
+                              else delete current[id]
+                              return { ...prev, official_adapters: current }
+                            })
+                          }}
+                          placeholder={`Path to ${OFFICIAL_ADAPTER_LABELS[id]}...`}
+                          className="h-7 rounded border border-border bg-background px-2 text-xs text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </details>
               )}
             </>
           )}
@@ -439,6 +615,16 @@ export function ModelProfileWizard({ isOpen, onClose, onCreated }: ModelProfileW
                         .map(([k, v]) => (
                           <li key={k} className="truncate">{k}: {v as string}</li>
                         ))}
+                      {Object.keys(components.official_adapters ?? {}).length > 0 && (
+                        <li className="mt-1">
+                          <strong>Official Adapters:</strong>
+                          <ul className="list-disc list-inside ml-3 text-muted-foreground">
+                            {Object.entries(components.official_adapters!).map(([id, p]) => (
+                              <li key={id} className="truncate text-xs">{id}: {p}</li>
+                            ))}
+                          </ul>
+                        </li>
+                      )}
                     </ul>
                   </div>
                 )}

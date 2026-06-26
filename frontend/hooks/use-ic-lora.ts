@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { ApiClient, type ApiRequestBodyOf } from '../lib/api-client'
 import { logger } from '../lib/logger'
 
@@ -6,9 +6,14 @@ export type IcLoraConditioningType = 'canny' | 'depth'
 
 export interface IcLoraSubmitParams {
   videoPath: string
-  conditioningType: IcLoraConditioningType
+  conditioningType: IcLoraConditioningType | null
   conditioningStrength: number
   prompt: string
+  adapterId?: string | null
+  maskPath?: string | null
+  maskGrowPx?: number
+  laplacianBlendGrow?: number
+  images?: { path: string; frame?: number; strength?: number }[]
 }
 
 export interface IcLoraResult {
@@ -32,8 +37,12 @@ export function useIcLora() {
     result: null,
   })
 
-  const submitIcLora = useCallback(async (params: IcLoraSubmitParams) => {
-    if (!params.videoPath || !params.prompt.trim()) return
+  const onCompleteRef = useRef<((result: IcLoraResult) => void) | undefined>()
+
+  const submitIcLora = useCallback(async (params: IcLoraSubmitParams, onComplete?: (result: IcLoraResult) => void) => {
+    if (!params.videoPath) return
+
+    onCompleteRef.current = onComplete
 
     setState({
       isGenerating: true,
@@ -42,12 +51,30 @@ export function useIcLora() {
       result: null,
     })
 
-    const result = await ApiClient.generateIcLora({
+    const body: Record<string, unknown> = {
       video_path: params.videoPath,
-      conditioning_type: params.conditioningType,
       conditioning_strength: params.conditioningStrength,
       prompt: params.prompt,
-    } as GenerateIcLoraBody)
+    }
+    if (params.conditioningType !== null) {
+      body.conditioning_type = params.conditioningType
+    }
+    if (params.adapterId) {
+      body.adapter_id = params.adapterId
+    }
+    if (params.maskPath) {
+      body.mask_path = params.maskPath
+    }
+    if (params.maskGrowPx !== undefined) {
+      body.mask_grow_px = params.maskGrowPx
+    }
+    if (params.laplacianBlendGrow !== undefined) {
+      body.laplacian_blend_grow = params.laplacianBlendGrow
+    }
+    if (params.images && params.images.length > 0) {
+      body.images = params.images
+    }
+    const result = await ApiClient.generateIcLora(body as GenerateIcLoraBody)
     if (!result.ok) {
       logger.error(`IC-LoRA error: ${result.error.message}`)
       setState({
@@ -71,13 +98,18 @@ export function useIcLora() {
     }
 
     if (payload.status === 'complete') {
+      const res: IcLoraResult = {
+        videoPath: payload.video_path,
+      }
+      // Fire onComplete before local setState — runs ProjectContext mutations
+      // even if GenSpace has unmounted (Bug A fix)
+      onCompleteRef.current?.(res)
+      onCompleteRef.current = undefined
       setState({
         isGenerating: false,
         status: 'Generation complete!',
         error: null,
-        result: {
-          videoPath: payload.video_path,
-        },
+        result: res,
       })
       return
     }

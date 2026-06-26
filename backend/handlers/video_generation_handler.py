@@ -211,14 +211,13 @@ class VideoGenerationHandler(StateHandlerBase):
         try:
             settings = self.state.app_settings
             use_api_encoding = not self._text.should_use_local_encoding()
-            if image is not None:
-                enhance = use_api_encoding and settings.prompt_enhancer_enabled_i2v
-            else:
-                enhance = use_api_encoding and settings.prompt_enhancer_enabled_t2v
+            enhance_setting = settings.prompt_enhancer_enabled_i2v if image is not None else settings.prompt_enhancer_enabled_t2v
+            api_enhance = use_api_encoding and enhance_setting
+            pipeline_enhance = (not use_api_encoding) and enhance_setting
 
             encoding_method = "api" if use_api_encoding else "local"
             t_text_start = time.perf_counter()
-            self._text.prepare_text_encoding(enhanced_prompt, enhance_prompt=enhance)
+            self._text.prepare_text_encoding(enhanced_prompt, enhance_prompt=api_enhance)
             t_text_end = time.perf_counter()
             logger.info("[%s] Text encoding (%s): %.2fs", gen_mode, encoding_method, t_text_end - t_text_start)
 
@@ -237,6 +236,7 @@ class VideoGenerationHandler(StateHandlerBase):
                 frame_rate=fps,
                 images=images,
                 output_path=str(output_path),
+                enhance_prompt=pipeline_enhance,
             )
             t_inference_end = time.perf_counter()
             logger.info("[%s] Inference: %.2fs", gen_mode, t_inference_end - t_inference_start)

@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from api_types import ModelComponentPaths, ModelProfilePayload
 from _routes._errors import HTTPError
 import handlers.models_handler as models_handler_module
 from runtime_config.model_download_specs import (
-    DEPTH_PROCESSOR_CP_ID,
     IMG_GEN_MODEL_CP_ID,
     LTXLocalModelDeprecated,
     get_ic_loras_cp_ids,
@@ -20,7 +20,7 @@ from runtime_config.model_download_specs import (
     resolve_model_path,
 )
 from state.app_state_types import DownloadSessionComplete, DownloadSessionError, DownloadingSession, FileDownloadRunning
-from tests.conftest import TEST_ADMIN_TOKEN
+from tests.conftest import TEST_ADMIN_TOKEN, _test_model_path
 from tests.http_error_assertions import assert_http_error
 
 _ADMIN_HEADERS = {"X-Admin-Token": TEST_ADMIN_TOKEN}
@@ -109,6 +109,24 @@ class TestRecommendations:
         assert adapters["lipdub"]["status"] == "missing"
         assert adapters["lipdub"]["path"] is None
 
+    def test_adapter_status_uses_active_profile_paths(self, client, test_state, tmp_path):
+        adapter_path = tmp_path / "ingredients.safetensors"
+        adapter_path.write_bytes(b"fake")
+        profile = ModelProfilePayload(
+            id="profile-with-adapters",
+            name="Profile With Adapters",
+            source="official",
+            components=ModelComponentPaths(official_adapters={"ingredients": str(adapter_path)}),
+        )
+        test_state.state.model_profiles = [profile]
+        test_state.state.active_model_profile_id = profile.id
+
+        response = client.get("/api/models/adapters/status", headers=_ADMIN_HEADERS)
+        assert response.status_code == 200
+        adapters = {item["id"]: item for item in response.json()["adapters"]}
+        assert adapters["ingredients"]["status"] == "available"
+        assert adapters["ingredients"]["path"] == str(adapter_path)
+
     def test_adapter_recommendation_reports_pipeline_missing_items(self, client):
         response = client.get(
             "/api/models/adapters/recommendation",
@@ -120,6 +138,35 @@ class TestRecommendations:
         assert payload["pipeline"] == "hdr"
         assert payload["missing"] == ["hdr", "hdr_scene_embeddings"]
         assert [item["adapter_id"] for item in payload["required"]] == ["hdr", "hdr_scene_embeddings"]
+        assert payload["cps_to_download"] == ["ltx-2.3-22b-ic-lora-hdr-0.9", "ltx-2.3-22b-ic-lora-hdr-scene-emb"]
+
+    def test_adapter_recommendation_returns_cps_for_missing_adapters(self, client):
+        response = client.get(
+            "/api/models/adapters/recommendation",
+            params={"pipeline": "ingredients"},
+            headers=_ADMIN_HEADERS,
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["missing"] == ["ingredients"]
+        _CP_ID = "ltx-2.3-22b-ic-lora-ingredients-0.9"
+        assert payload["cps_to_download"] == [_CP_ID]
+
+    def test_adapter_recommendation_cps_empty_when_all_available(self, client, create_fake_model_files, test_state):
+        create_fake_model_files()
+        _CP_ID = "ltx-2.3-22b-ic-lora-ingredients-0.9"
+        cp_path = _test_model_path(test_state, _CP_ID)
+        cp_path.parent.mkdir(parents=True, exist_ok=True)
+        cp_path.write_bytes(b"\x00" * 1024)
+        response = client.get(
+            "/api/models/adapters/recommendation",
+            params={"pipeline": "ingredients"},
+            headers=_ADMIN_HEADERS,
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["missing"] == []
+        assert payload["cps_to_download"] == []
 
     def test_adapter_status_requires_admin(self, client):
         response = client.get("/api/models/adapters/status")
@@ -130,7 +177,7 @@ class TestRecommendations:
         response = client.get("/api/models/ltx-ic-lora-recommendation")
         assert response.status_code == 200
         assert response.json() == {
-            "cps_to_download": ["ltx-2.3-22b-ic-lora-union-control-ref0.5", DEPTH_PROCESSOR_CP_ID]
+            "cps_to_download": ["ltx-2.3-22b-ic-lora-union-control-ref0.5"]
         }
 
     def test_text_encoder_recommendation(self, client, create_fake_model_files, test_state):
@@ -151,7 +198,6 @@ class TestRecommendations:
         assert response.status_code == 200
         assert response.json()["cps_to_download"] == [
             *get_ic_loras_cp_ids(_current_ltx_spec().ic_loras_spec),
-            DEPTH_PROCESSOR_CP_ID,
         ]
 
         create_fake_ic_lora_files()

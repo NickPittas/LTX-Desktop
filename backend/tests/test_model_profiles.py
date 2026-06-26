@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
+import pytest
+
 from tests.conftest import TEST_ADMIN_TOKEN
 from tests.http_error_assertions import assert_http_error
 
@@ -195,6 +200,21 @@ class TestModelProfiles:
         assert data["name"] == "Patched Name"
         assert data["notes"] == "Updated"
 
+    def test_patch_profile_validates_nested_components(self, client):
+        client.post("/api/model-profiles", json=_make_official_payload(profile_id="patchable-nested"), headers=_ADMIN_HEADERS)
+
+        response = client.request(
+            "PATCH",
+            "/api/model-profiles/patchable-nested",
+            json={"components": {"official_adapters": {"ingredients": "/tmp/ingredients.safetensors"}}},
+            headers=_ADMIN_HEADERS,
+        )
+        assert response.status_code == 200
+
+        response = client.get("/api/model-profiles", headers=_ADMIN_HEADERS)
+        profile = next(p for p in response.json()["profiles"] if p["id"] == "patchable-nested")
+        assert profile["components"]["official_adapters"]["ingredients"] == "/tmp/ingredients.safetensors"
+
     def test_delete_profile(self, client):
         client.post("/api/model-profiles", json=_make_official_payload(profile_id="deletable"), headers=_ADMIN_HEADERS)
 
@@ -230,6 +250,127 @@ class TestModelProfiles:
     def test_delete_nonexistent_returns_404(self, client):
         response = client.delete("/api/model-profiles/nope", headers=_ADMIN_HEADERS)
         assert response.status_code == 404
+
+
+class TestCreateEmptyId:
+    """Regression: creating a profile with empty/blank ID gets an assigned ID."""
+
+    def test_empty_id_gets_assigned_and_usable(self, client, tmp_path):
+        model_file = tmp_path / "model.safetensors"
+        upscaler_file = tmp_path / "upsampler.safetensors"
+        model_file.write_bytes(b"model")
+        upscaler_file.write_bytes(b"upscaler")
+
+        payload = _make_official_payload(
+            profile_id="",
+            components={
+                "transformer": str(model_file),
+                "upsampler": str(upscaler_file),
+                "text_encoder_format": "api",
+            },
+        )
+        response = client.post("/api/model-profiles", json=payload, headers=_ADMIN_HEADERS)
+        assert response.status_code == 200
+        assigned_id = response.json()["id"]
+        assert assigned_id and assigned_id.strip()
+
+        # validate works by assigned id
+        validate_r = client.post(f"/api/model-profiles/{assigned_id}/validate", headers=_ADMIN_HEADERS)
+        assert validate_r.status_code == 200
+
+        # activate works by assigned id (profile valid → 200, invalid → 409, both fine)
+        activate_r = client.post(f"/api/model-profiles/{assigned_id}/activate", headers=_ADMIN_HEADERS)
+        assert activate_r.status_code == 200
+
+        # delete works by assigned id
+        delete_r = client.delete(f"/api/model-profiles/{assigned_id}", headers=_ADMIN_HEADERS)
+        assert delete_r.status_code == 200
+
+    def test_blank_id_gets_assigned(self, client):
+        payload = _make_official_payload(profile_id="  ")
+        response = client.post("/api/model-profiles", json=payload, headers=_ADMIN_HEADERS)
+        assert response.status_code == 200
+        assert response.json()["id"] and response.json()["id"].strip()
+
+    def test_explicit_id_still_works(self, client):
+        payload = _make_official_payload(profile_id="my-profile")
+        response = client.post("/api/model-profiles", json=payload, headers=_ADMIN_HEADERS)
+        assert response.status_code == 200
+        assert response.json()["id"] == "my-profile"
+
+
+class TestLoadRepair:
+    """Regression: load_profiles repairs bad persisted data."""
+
+    def _write_profiles(self, handler, data: dict) -> Path:
+        path: Path = handler._profiles_path
+        path.write_text(json.dumps(data), encoding="utf-8")
+        return path
+
+    def test_blank_ids_repaired_on_load(self, test_state):
+        self._write_profiles(
+            test_state.model_profiles,
+            {
+                "active_model_profile_id": "",
+                "profiles": [
+                    {
+                        "id": "",
+                        "name": "Bad Profile",
+                        "family": "ltx-2.3",
+                        "source": "official",
+                        "components": {"text_encoder_format": "api"},
+                        "capabilities": ["t2v"],
+                        "notes": "",
+                        "created_at": "",
+                        "updated_at": "",
+                    },
+                    {
+                        "id": "good-profile",
+                        "name": "Good Profile",
+                        "family": "ltx-2.3",
+                        "source": "official",
+                        "components": {"text_encoder_format": "api"},
+                        "capabilities": ["t2v"],
+                        "notes": "",
+                        "created_at": "",
+                        "updated_at": "",
+                    },
+                ],
+            },
+        )
+        test_state.model_profiles.load_profiles()
+
+        assert len(test_state.state.model_profiles) == 2
+        bad = [p for p in test_state.state.model_profiles if p.name == "Bad Profile"][0]
+        assert bad.id and bad.id.strip()
+        good = [p for p in test_state.state.model_profiles if p.name == "Good Profile"][0]
+        assert good.id == "good-profile"
+
+        # Repaired file was saved back
+        raw = json.loads(test_state.model_profiles._profiles_path.read_text())
+        assert raw["active_model_profile_id"] is None
+
+    def test_blank_active_id_cleared_on_load(self, test_state):
+        self._write_profiles(
+            test_state.model_profiles,
+            {
+                "active_model_profile_id": "",
+                "profiles": [],
+            },
+        )
+        test_state.model_profiles.load_profiles()
+        assert test_state.state.active_model_profile_id is None
+
+    def test_missing_active_profile_cleared_on_load(self, test_state):
+        self._write_profiles(
+            test_state.model_profiles,
+            {
+                "active_model_profile_id": "ghost",
+                "profiles": [],
+            },
+        )
+        test_state.model_profiles.load_profiles()
+        assert test_state.state.active_model_profile_id is None
 
 
 class TestRecommendationWithProfile:

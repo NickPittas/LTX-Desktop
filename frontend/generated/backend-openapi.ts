@@ -572,6 +572,8 @@ export interface components {
     schemas: {
         /** AdapterRecommendationResponse */
         AdapterRecommendationResponse: {
+            /** Cps To Download */
+            cps_to_download: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5" | "ltx-2.3-22b-ic-lora-ingredients-0.9" | "ltx-2.3-22b-ic-lora-water-simulation-0.9" | "ltx-2.3-22b-ic-lora-decompression-0.9" | "ltx-2.3-22b-ic-lora-deblur-0.9" | "ltx-2.3-22b-ic-lora-colorization-0.9" | "ltx-2.3-22b-ic-lora-day-to-night-0.9" | "ltx-2.3-22b-ic-lora-in-outpainting-0.9" | "ltx-2.3-22b-ic-lora-instant-shave-0.9" | "ltx-2.3-22b-ic-lora-cross-eyed-0.9" | "ltx-2.3-22b-ic-lora-hdr-0.9" | "ltx-2.3-22b-ic-lora-hdr-scene-emb" | "ltx-2.3-22b-ic-lora-lipdub-0.9" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo")[];
             /** Missing */
             missing: ("distilled_lora_384" | "distilled_lora_384_1_1" | "union_control" | "motion_track_control" | "ingredients" | "water_simulation" | "decompression" | "deblur" | "colorization" | "day_to_night" | "in_outpainting" | "instant_shave" | "cross_eyed" | "hdr" | "hdr_scene_embeddings" | "lipdub")[];
             /**
@@ -700,7 +702,7 @@ export interface components {
         /** CheckModelAccessRequest */
         CheckModelAccessRequest: {
             /** Cp Ids */
-            cp_ids?: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo")[];
+            cp_ids?: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5" | "ltx-2.3-22b-ic-lora-ingredients-0.9" | "ltx-2.3-22b-ic-lora-water-simulation-0.9" | "ltx-2.3-22b-ic-lora-decompression-0.9" | "ltx-2.3-22b-ic-lora-deblur-0.9" | "ltx-2.3-22b-ic-lora-colorization-0.9" | "ltx-2.3-22b-ic-lora-day-to-night-0.9" | "ltx-2.3-22b-ic-lora-in-outpainting-0.9" | "ltx-2.3-22b-ic-lora-instant-shave-0.9" | "ltx-2.3-22b-ic-lora-cross-eyed-0.9" | "ltx-2.3-22b-ic-lora-hdr-0.9" | "ltx-2.3-22b-ic-lora-hdr-scene-emb" | "ltx-2.3-22b-ic-lora-lipdub-0.9" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo")[];
         };
         /** CheckModelAccessResponse */
         CheckModelAccessResponse: {
@@ -730,11 +732,11 @@ export interface components {
         /** DownloadProgressRunningResponse */
         DownloadProgressRunningResponse: {
             /** All Files */
-            all_files: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo")[];
+            all_files: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5" | "ltx-2.3-22b-ic-lora-ingredients-0.9" | "ltx-2.3-22b-ic-lora-water-simulation-0.9" | "ltx-2.3-22b-ic-lora-decompression-0.9" | "ltx-2.3-22b-ic-lora-deblur-0.9" | "ltx-2.3-22b-ic-lora-colorization-0.9" | "ltx-2.3-22b-ic-lora-day-to-night-0.9" | "ltx-2.3-22b-ic-lora-in-outpainting-0.9" | "ltx-2.3-22b-ic-lora-instant-shave-0.9" | "ltx-2.3-22b-ic-lora-cross-eyed-0.9" | "ltx-2.3-22b-ic-lora-hdr-0.9" | "ltx-2.3-22b-ic-lora-hdr-scene-emb" | "ltx-2.3-22b-ic-lora-lipdub-0.9" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo")[];
             /** Completed Files */
-            completed_files: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo")[];
+            completed_files: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5" | "ltx-2.3-22b-ic-lora-ingredients-0.9" | "ltx-2.3-22b-ic-lora-water-simulation-0.9" | "ltx-2.3-22b-ic-lora-decompression-0.9" | "ltx-2.3-22b-ic-lora-deblur-0.9" | "ltx-2.3-22b-ic-lora-colorization-0.9" | "ltx-2.3-22b-ic-lora-day-to-night-0.9" | "ltx-2.3-22b-ic-lora-in-outpainting-0.9" | "ltx-2.3-22b-ic-lora-instant-shave-0.9" | "ltx-2.3-22b-ic-lora-cross-eyed-0.9" | "ltx-2.3-22b-ic-lora-hdr-0.9" | "ltx-2.3-22b-ic-lora-hdr-scene-emb" | "ltx-2.3-22b-ic-lora-lipdub-0.9" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo")[];
             /** Current Downloading File */
-            current_downloading_file: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo") | null;
+            current_downloading_file: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5" | "ltx-2.3-22b-ic-lora-ingredients-0.9" | "ltx-2.3-22b-ic-lora-water-simulation-0.9" | "ltx-2.3-22b-ic-lora-decompression-0.9" | "ltx-2.3-22b-ic-lora-deblur-0.9" | "ltx-2.3-22b-ic-lora-colorization-0.9" | "ltx-2.3-22b-ic-lora-day-to-night-0.9" | "ltx-2.3-22b-ic-lora-in-outpainting-0.9" | "ltx-2.3-22b-ic-lora-instant-shave-0.9" | "ltx-2.3-22b-ic-lora-cross-eyed-0.9" | "ltx-2.3-22b-ic-lora-hdr-0.9" | "ltx-2.3-22b-ic-lora-hdr-scene-emb" | "ltx-2.3-22b-ic-lora-lipdub-0.9" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo") | null;
             /** Current File Progress */
             current_file_progress: number;
             /** Error */
@@ -1026,6 +1028,8 @@ export interface components {
         };
         /** IcLoraGenerateRequest */
         IcLoraGenerateRequest: {
+            /** Adapter Id */
+            adapter_id?: ("distilled_lora_384" | "distilled_lora_384_1_1" | "union_control" | "motion_track_control" | "ingredients" | "water_simulation" | "decompression" | "deblur" | "colorization" | "day_to_night" | "in_outpainting" | "instant_shave" | "cross_eyed" | "hdr" | "hdr_scene_embeddings" | "lipdub") | null;
             /**
              * Cfg Guidance Scale
              * @default 1
@@ -1036,13 +1040,24 @@ export interface components {
              * @default 1
              */
             conditioning_strength: number;
-            /**
-             * Conditioning Type
-             * @enum {string}
-             */
-            conditioning_type: "canny" | "depth";
+            /** Conditioning Type */
+            conditioning_type?: ("canny" | "depth") | null;
             /** Images */
             images?: components["schemas"]["IcLoraImageInput"][];
+            /**
+             * Laplacian Blend Grow
+             * @description Controls final LTXVLaplacianPyramidBlend.mask_low_res_dilation for inpainting Laplacian pyramid blend. 0=no low-res dilation, default=6 matches official final blend node 5226. Separate from mask_grow_px which controls LTXVDilateVideoMask radii.
+             * @default 6
+             */
+            laplacian_blend_grow: number;
+            /**
+             * Mask Grow Px
+             * @description Mask dilation radius in pixels. Controls LTXVDilateVideoMask radii. 0=no dilation, default=30 matches official full-res (stage2) radius
+             * @default 30
+             */
+            mask_grow_px: number;
+            /** Mask Path */
+            mask_path?: string | null;
             /**
              * Negative Prompt
              * @default
@@ -1053,7 +1068,10 @@ export interface components {
              * @default 30
              */
             num_inference_steps: number;
-            /** Prompt */
+            /**
+             * Prompt
+             * @default
+             */
             prompt: string;
             /** Video Path */
             video_path: string;
@@ -1076,7 +1094,7 @@ export interface components {
         /** ImageGenRecommendationResponse */
         ImageGenRecommendationResponse: {
             /** Cp To Download */
-            cp_to_download: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo") | null;
+            cp_to_download: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5" | "ltx-2.3-22b-ic-lora-ingredients-0.9" | "ltx-2.3-22b-ic-lora-water-simulation-0.9" | "ltx-2.3-22b-ic-lora-decompression-0.9" | "ltx-2.3-22b-ic-lora-deblur-0.9" | "ltx-2.3-22b-ic-lora-colorization-0.9" | "ltx-2.3-22b-ic-lora-day-to-night-0.9" | "ltx-2.3-22b-ic-lora-in-outpainting-0.9" | "ltx-2.3-22b-ic-lora-instant-shave-0.9" | "ltx-2.3-22b-ic-lora-cross-eyed-0.9" | "ltx-2.3-22b-ic-lora-hdr-0.9" | "ltx-2.3-22b-ic-lora-hdr-scene-emb" | "ltx-2.3-22b-ic-lora-lipdub-0.9" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo") | null;
         };
         /** LTXVideoGenerationModelSpecItem */
         LTXVideoGenerationModelSpecItem: {
@@ -1110,7 +1128,7 @@ export interface components {
         /** LtxDownloadRecommendationResponse */
         LtxDownloadRecommendationResponse: {
             /** Cps To Download */
-            cps_to_download: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo")[];
+            cps_to_download: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5" | "ltx-2.3-22b-ic-lora-ingredients-0.9" | "ltx-2.3-22b-ic-lora-water-simulation-0.9" | "ltx-2.3-22b-ic-lora-decompression-0.9" | "ltx-2.3-22b-ic-lora-deblur-0.9" | "ltx-2.3-22b-ic-lora-colorization-0.9" | "ltx-2.3-22b-ic-lora-day-to-night-0.9" | "ltx-2.3-22b-ic-lora-in-outpainting-0.9" | "ltx-2.3-22b-ic-lora-instant-shave-0.9" | "ltx-2.3-22b-ic-lora-cross-eyed-0.9" | "ltx-2.3-22b-ic-lora-hdr-0.9" | "ltx-2.3-22b-ic-lora-hdr-scene-emb" | "ltx-2.3-22b-ic-lora-lipdub-0.9" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo")[];
             /**
              * Status
              * @constant
@@ -1120,7 +1138,7 @@ export interface components {
         /** LtxIcLoraRecommendationResponse */
         LtxIcLoraRecommendationResponse: {
             /** Cps To Download */
-            cps_to_download: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo")[];
+            cps_to_download: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5" | "ltx-2.3-22b-ic-lora-ingredients-0.9" | "ltx-2.3-22b-ic-lora-water-simulation-0.9" | "ltx-2.3-22b-ic-lora-decompression-0.9" | "ltx-2.3-22b-ic-lora-deblur-0.9" | "ltx-2.3-22b-ic-lora-colorization-0.9" | "ltx-2.3-22b-ic-lora-day-to-night-0.9" | "ltx-2.3-22b-ic-lora-in-outpainting-0.9" | "ltx-2.3-22b-ic-lora-instant-shave-0.9" | "ltx-2.3-22b-ic-lora-cross-eyed-0.9" | "ltx-2.3-22b-ic-lora-hdr-0.9" | "ltx-2.3-22b-ic-lora-hdr-scene-emb" | "ltx-2.3-22b-ic-lora-lipdub-0.9" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo")[];
         };
         /** LtxInsufficientFundsErrorResponse */
         LtxInsufficientFundsErrorResponse: {
@@ -1143,9 +1161,9 @@ export interface components {
         /** LtxUpgradeRecommendationResponse */
         LtxUpgradeRecommendationResponse: {
             /** Cps To Delete */
-            cps_to_delete: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo")[];
+            cps_to_delete: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5" | "ltx-2.3-22b-ic-lora-ingredients-0.9" | "ltx-2.3-22b-ic-lora-water-simulation-0.9" | "ltx-2.3-22b-ic-lora-decompression-0.9" | "ltx-2.3-22b-ic-lora-deblur-0.9" | "ltx-2.3-22b-ic-lora-colorization-0.9" | "ltx-2.3-22b-ic-lora-day-to-night-0.9" | "ltx-2.3-22b-ic-lora-in-outpainting-0.9" | "ltx-2.3-22b-ic-lora-instant-shave-0.9" | "ltx-2.3-22b-ic-lora-cross-eyed-0.9" | "ltx-2.3-22b-ic-lora-hdr-0.9" | "ltx-2.3-22b-ic-lora-hdr-scene-emb" | "ltx-2.3-22b-ic-lora-lipdub-0.9" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo")[];
             /** Cps To Download */
-            cps_to_download: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo")[];
+            cps_to_download: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5" | "ltx-2.3-22b-ic-lora-ingredients-0.9" | "ltx-2.3-22b-ic-lora-water-simulation-0.9" | "ltx-2.3-22b-ic-lora-decompression-0.9" | "ltx-2.3-22b-ic-lora-deblur-0.9" | "ltx-2.3-22b-ic-lora-colorization-0.9" | "ltx-2.3-22b-ic-lora-day-to-night-0.9" | "ltx-2.3-22b-ic-lora-in-outpainting-0.9" | "ltx-2.3-22b-ic-lora-instant-shave-0.9" | "ltx-2.3-22b-ic-lora-cross-eyed-0.9" | "ltx-2.3-22b-ic-lora-hdr-0.9" | "ltx-2.3-22b-ic-lora-hdr-scene-emb" | "ltx-2.3-22b-ic-lora-lipdub-0.9" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo")[];
             /**
              * Ltx Model Id
              * @constant
@@ -1219,12 +1237,12 @@ export interface components {
         /** ModelDeleteRequest */
         ModelDeleteRequest: {
             /** Cp Ids */
-            cp_ids?: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo")[];
+            cp_ids?: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5" | "ltx-2.3-22b-ic-lora-ingredients-0.9" | "ltx-2.3-22b-ic-lora-water-simulation-0.9" | "ltx-2.3-22b-ic-lora-decompression-0.9" | "ltx-2.3-22b-ic-lora-deblur-0.9" | "ltx-2.3-22b-ic-lora-colorization-0.9" | "ltx-2.3-22b-ic-lora-day-to-night-0.9" | "ltx-2.3-22b-ic-lora-in-outpainting-0.9" | "ltx-2.3-22b-ic-lora-instant-shave-0.9" | "ltx-2.3-22b-ic-lora-cross-eyed-0.9" | "ltx-2.3-22b-ic-lora-hdr-0.9" | "ltx-2.3-22b-ic-lora-hdr-scene-emb" | "ltx-2.3-22b-ic-lora-lipdub-0.9" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo")[];
         };
         /** ModelDownloadRequest */
         ModelDownloadRequest: {
             /** Cp Ids */
-            cp_ids?: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo")[];
+            cp_ids?: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5" | "ltx-2.3-22b-ic-lora-ingredients-0.9" | "ltx-2.3-22b-ic-lora-water-simulation-0.9" | "ltx-2.3-22b-ic-lora-decompression-0.9" | "ltx-2.3-22b-ic-lora-deblur-0.9" | "ltx-2.3-22b-ic-lora-colorization-0.9" | "ltx-2.3-22b-ic-lora-day-to-night-0.9" | "ltx-2.3-22b-ic-lora-in-outpainting-0.9" | "ltx-2.3-22b-ic-lora-instant-shave-0.9" | "ltx-2.3-22b-ic-lora-cross-eyed-0.9" | "ltx-2.3-22b-ic-lora-hdr-0.9" | "ltx-2.3-22b-ic-lora-hdr-scene-emb" | "ltx-2.3-22b-ic-lora-lipdub-0.9" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo")[];
             /**
              * Type
              * @default download
@@ -1507,7 +1525,7 @@ export interface components {
         /** TextEncoderRecommendationResponse */
         TextEncoderRecommendationResponse: {
             /** Cp To Download */
-            cp_to_download: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo") | null;
+            cp_to_download: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5" | "ltx-2.3-22b-ic-lora-ingredients-0.9" | "ltx-2.3-22b-ic-lora-water-simulation-0.9" | "ltx-2.3-22b-ic-lora-decompression-0.9" | "ltx-2.3-22b-ic-lora-deblur-0.9" | "ltx-2.3-22b-ic-lora-colorization-0.9" | "ltx-2.3-22b-ic-lora-day-to-night-0.9" | "ltx-2.3-22b-ic-lora-in-outpainting-0.9" | "ltx-2.3-22b-ic-lora-instant-shave-0.9" | "ltx-2.3-22b-ic-lora-cross-eyed-0.9" | "ltx-2.3-22b-ic-lora-hdr-0.9" | "ltx-2.3-22b-ic-lora-hdr-scene-emb" | "ltx-2.3-22b-ic-lora-lipdub-0.9" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo") | null;
             /** Expected Size Bytes */
             expected_size_bytes: number;
             /** Expected Size Gb */

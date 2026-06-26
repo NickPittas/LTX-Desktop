@@ -291,6 +291,7 @@ export async function startPythonBackend(): Promise<void> {
         ...process.env,
         PYTHONUNBUFFERED: '1',
         PYTHONNOUSERSITE: '1',
+        PYDEVD_DISABLE_FILE_VALIDATION: '1',
         // Only pass LTX_PORT when the developer explicitly set it
         ...(process.env.LTX_PORT ? { LTX_PORT: process.env.LTX_PORT } : {}),
         LTX_AUTH_TOKEN: authToken,

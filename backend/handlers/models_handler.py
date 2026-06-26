@@ -28,8 +28,8 @@ from api_types import (
 )
 from handlers.base import StateHandlerBase
 from runtime_config.model_download_specs import (
+    ADAPTER_TO_CP_ID,
     ALL_MODEL_CP_IDS,
-    DEPTH_PROCESSOR_CP_ID,
     IMG_GEN_MODEL_CP_ID,
     LTXLocalModelRelevant,
     OFFICIAL_LTX23_ADAPTERS,
@@ -57,6 +57,18 @@ class ResolvedUpgradeDownload:
     current_model_id: LTXLocalModelId
     target_model_id: LTXLocalModelId
     cp_ids: tuple[ModelCheckpointID, ...]
+
+
+# ponytail: mirror ModelComponentPaths typed adapter fields until all callers use official_adapters.
+_TYPED_ADAPTER_FIELD: dict[str, str] = {
+    "union_control": "ic_lora_union",
+    "motion_track_control": "ic_lora_motion_track",
+    "ingredients": "ic_lora_ingredients",
+    "hdr": "ic_lora_hdr",
+    "hdr_scene_embeddings": "ic_lora_hdr_scene_embeddings",
+    "lipdub": "ic_lora_lipdub",
+    "in_outpainting": "ic_lora_in_outpainting",
+}
 
 
 class ModelsHandler(StateHandlerBase):
@@ -111,6 +123,26 @@ class ModelsHandler(StateHandlerBase):
             return True
         return pipeline in adapter.required_for or pipeline in adapter.optional_for
 
+    def _active_profile_adapter_path(self, adapter_id: AdapterID) -> Path | None:
+        profile_id = self.state.active_model_profile_id
+        profile = next((p for p in self.state.model_profiles if p.id == profile_id), None) if profile_id else None
+        if profile is None:
+            return None
+
+        adapter_path = profile.components.official_adapters.get(adapter_id)
+        if adapter_path:
+            path = Path(adapter_path)
+            if path.is_file():
+                return path
+
+        field_name = _TYPED_ADAPTER_FIELD.get(adapter_id)
+        typed_path = getattr(profile.components, field_name, None) if field_name else None
+        if typed_path:
+            path = Path(typed_path)
+            if path.is_file():
+                return path
+        return None
+
     def resolve_adapter_path(self, adapter_id: AdapterID) -> Path | None:
         adapter = OFFICIAL_LTX23_ADAPTERS[adapter_id]
         configured_path = self.state.app_settings.adapter_paths.get(adapter_id)
@@ -118,6 +150,9 @@ class ModelsHandler(StateHandlerBase):
             path = Path(configured_path)
             if path.is_file():
                 return path
+        profile_path = self._active_profile_adapter_path(adapter_id)
+        if profile_path is not None:
+            return profile_path
         models_dir_path = self.models_dir / adapter.filename
         return models_dir_path if models_dir_path.is_file() else None
 
@@ -156,7 +191,10 @@ class ModelsHandler(StateHandlerBase):
                     filename=adapter.filename,
                 )
             )
-        return AdapterRecommendationResponse(pipeline=pipeline, required=required, missing=missing)
+        cps_to_download: list[ModelCheckpointID] = [ADAPTER_TO_CP_ID[aid] for aid in missing if aid in ADAPTER_TO_CP_ID]
+        return AdapterRecommendationResponse(
+            pipeline=pipeline, required=required, missing=missing, cps_to_download=cps_to_download
+        )
 
     def _get_required_ltx_cp_ids(self, model_id: LTXLocalModelId) -> set[ModelCheckpointID]:
         spec = get_ltx_model_spec(model_id)
@@ -281,7 +319,6 @@ class ModelsHandler(StateHandlerBase):
         model_id = self._require_downloaded_ltx_model_id()
         spec = get_ltx_model_spec(model_id)
         required_cp_ids: set[ModelCheckpointID] = set(get_ic_loras_cp_ids(spec.ic_loras_spec))
-        required_cp_ids.add(DEPTH_PROCESSOR_CP_ID)
         cp_ids = self._get_missing_cp_ids(required_cp_ids)
         return LtxIcLoraRecommendationResponse(cps_to_download=self._ordered_cp_ids(cp_ids))
 

@@ -73,8 +73,13 @@ class LTXRetakePipeline:
         )
 
         is_gguf = components is not None and components.transformer_format == "gguf"
+        is_split = (
+            components is not None
+            and components.transformer_format == "safetensors"
+            and components.video_vae_path is not None
+        )
 
-        if is_gguf:
+        if components is not None and components.gemma_root is not None:
             from services.patches.gguf_loader_fix import install_gguf_prompt_encoder_patch
 
             install_gguf_prompt_encoder_patch()
@@ -99,12 +104,21 @@ class LTXRetakePipeline:
             dtype=self.dtype,
             device=device,
         )
+        if is_gguf:
+            stage_quantization = None
+        elif is_split and quantization is not None:
+            from services.patches.gguf_loader_fix import kijai_fp8_quantization_policy
+
+            stage_quantization = kijai_fp8_quantization_policy()
+        else:
+            stage_quantization = quantization
+
         self.stage = DiffusionStage(
             checkpoint_path=checkpoint_path,  # type: ignore[arg-type]
             dtype=self.dtype,
             device=device,
             loras=tuple(loras),
-            quantization=None if is_gguf else quantization,
+            quantization=stage_quantization,
         )
         self.video_decoder = VideoDecoder(
             checkpoint_path=checkpoint_path,  # type: ignore[arg-type]
@@ -127,6 +141,19 @@ class LTXRetakePipeline:
                 checkpoint_path,
                 video_vae_path=c.video_vae_path if c else None,
                 audio_vae_path=c.audio_vae_path if c else None,
+            )
+
+        if is_split:
+            from services.patches.gguf_loader_fix import install_gguf_component_paths, install_kijai_transformer_config_patch
+
+            c = self._components
+            assert c is not None  # is_split guarantees this
+            install_kijai_transformer_config_patch(self, checkpoint_path)
+            install_gguf_component_paths(
+                self,
+                checkpoint_path,
+                video_vae_path=c.video_vae_path,
+                audio_vae_path=c.audio_vae_path,
             )
 
     @torch.no_grad()

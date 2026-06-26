@@ -459,6 +459,7 @@ class _FakeVideoPipelineBase:
         self.compile_calls = 0
         self.raise_on_generate: Exception | None = None
         self.last_checkpoint_path: CheckpointPath | None = None
+        self.last_gemma_root: str | None = None
         self.last_transformer_format: str | None = None
 
     def _record_generate(self, payload: dict[str, Any]) -> None:
@@ -504,6 +505,7 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
         if pipeline is None:
             raise RuntimeError("FakeFastVideoPipeline singleton is not bound")
         pipeline.last_checkpoint_path = checkpoint_path
+        pipeline.last_gemma_root = gemma_root
         pipeline.last_components = components
         pipeline.last_transformer_format = transformer_format
         return pipeline
@@ -518,6 +520,7 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
         frame_rate: float,
         images: list[ImageConditioningInput],
         output_path: str,
+        enhance_prompt: bool = False,
     ) -> None:
         self._record_generate(
             {
@@ -529,6 +532,7 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
                 "frame_rate": frame_rate,
                 "images": images,
                 "output_path": output_path,
+                "enhance_prompt": enhance_prompt,
             }
         )
 
@@ -585,7 +589,7 @@ class FakeIcLoraPipeline:
         checkpoint_path: CheckpointPath,
         gemma_root: str | None,
         upsampler_path: str,
-        lora_path: str,
+        lora_paths: list[str],
         device: str | object,
         streaming_prefetch_count: int | None,
         components: ResolvedLtxComponents | None = None,
@@ -595,6 +599,8 @@ class FakeIcLoraPipeline:
             raise RuntimeError("FakeIcLoraPipeline singleton is not bound")
         pipeline.last_checkpoint_path = checkpoint_path
         pipeline.last_components = components
+        pipeline.last_lora_paths = lora_paths
+        pipeline.last_lora_path = lora_paths[-1] if lora_paths else None
         return pipeline
 
     def __init__(self) -> None:
@@ -602,6 +608,8 @@ class FakeIcLoraPipeline:
         self.raise_on_generate: Exception | None = None
         self.last_checkpoint_path: CheckpointPath | None = None
         self.last_components: ResolvedLtxComponents | None = None
+        self.last_lora_paths: list[str] | None = None
+        self.last_lora_path: str | None = None
 
     def generate(self, **kwargs: Any) -> None:
         self.generate_calls.append(kwargs)
@@ -611,6 +619,17 @@ class FakeIcLoraPipeline:
         output_path = Path(kwargs["output_path"])
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"fake-ic-lora-video")
+
+    def generate_inpaint(self, **kwargs: Any) -> None:
+        self.generate_calls.append(kwargs)
+        if self.raise_on_generate is not None:
+            raise self.raise_on_generate
+
+        output_path = Path(kwargs["output_path"])
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"fake-ic-lora-inpaint-video")
+
+    # ponytail: generate_inpaint accepts **kwargs, mask_grow_px captured in generate_calls
 
 
 class FakeDepthProcessorPipeline:

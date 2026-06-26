@@ -124,6 +124,7 @@ function AssetCard({
               playsInline
               preload="metadata"
               onTimeUpdate={handleTimeUpdate}
+              onError={(e) => console.error('[GenSpace] Asset card hover video failed:', asset.path, (e.target as HTMLVideoElement)?.error)}
             />
           )}
         </div>
@@ -591,7 +592,7 @@ function PromptBar({
             placeholder={mode === 'retake'
               ? "Describe what should happen in the selected section..."
               : mode === 'ic-lora'
-                ? "Describe the style or transformation to apply..."
+                ? "Describe the style or transformation to apply... (Prompt is optional. Official workflow supports empty prompt.)"
               : mode === 'image'
                 ? "A close-up of a woman talking on the phone..."
                 : "The woman sips from a cup of coffee..."
@@ -632,12 +633,12 @@ function PromptBar({
           <>
             <SettingsDropdown
               title="CONDITIONING TYPE"
-              value={icLoraCondType || 'canny'}
-              onChange={(v) => onIcLoraCondTypeChange?.(v as ICLoraConditioningType)}
-              options={CONDITIONING_TYPES.map(ct => ({ value: ct.value, label: ct.label }))}
+              value={icLoraCondType ?? ''}
+              onChange={(v) => onIcLoraCondTypeChange?.(v === '' ? null : v as ICLoraConditioningType)}
+              options={CONDITIONING_TYPES.map(ct => ({ value: ct.value ?? '', label: ct.label }))}
               trigger={
                 <>
-                  <span className="text-zinc-300 font-medium">{CONDITIONING_TYPES.find(ct => ct.value === icLoraCondType)?.label || 'Canny Edges'}</span>
+                  <span className="text-zinc-300 font-medium">{CONDITIONING_TYPES.find(ct => ct.value === icLoraCondType)?.label || 'None'}</span>
                   <ChevronUp className="h-3 w-3 text-zinc-500" />
                 </>
               }
@@ -921,23 +922,6 @@ export function GenSpace() {
   const [showSizeMenu, setShowSizeMenu] = useState(false)
   const sizeMenuRef = useRef<HTMLDivElement>(null)
   const persistedVideoKeyRef = useRef<string | null>(null)
-  const retakeSubmissionRef = useRef<{
-    prompt: string
-    input: {
-      videoPath: string | null
-      startTime: number
-      duration: number
-      videoDuration: number
-    }
-  } | null>(null)
-  const icLoraSubmissionRef = useRef<{
-    prompt: string
-    input: {
-      videoPath: string
-      conditioningType: ICLoraConditioningType
-      conditioningStrength: number
-    }
-  } | null>(null)
   const [settings, setSettings] = useState(() => ({ ...DEFAULT_VIDEO_SETTINGS }))
   const videoModelSpecs = getVideoGenerationModelSpecs(videoGenerationModelSpecsResponse, {
     useApiSpecs: shouldVideoGenerateWithLtxApi,
@@ -975,7 +959,6 @@ export function GenSpace() {
     isRetaking,
     retakeStatus,
     retakeError,
-    retakeResult,
   } = useRetake()
 
   const [retakeInput, setRetakeInput] = useState({
@@ -997,12 +980,17 @@ export function GenSpace() {
   } | null>(null)
   const [icLoraInput, setIcLoraInput] = useState({
     videoPath: null as string | null,
-    conditioningType: 'canny' as ICLoraConditioningType,
+    conditioningType: null as unknown as ICLoraConditioningType,
     conditioningStrength: 1.0,
+    adapterId: null as string | null,
+    maskPath: null as string | null,
+    images: [] as { path: string; frame?: number; strength?: number }[],
     ready: false,
+    maskGrowPx: 30,
+    laplacianBlendGrow: 6,
   })
   const [icLoraPanelKey, setIcLoraPanelKey] = useState(0)
-  const [icLoraCondType, setIcLoraCondType] = useState<ICLoraConditioningType>('canny')
+  const [icLoraCondType, setIcLoraCondType] = useState<ICLoraConditioningType>(null)
   const [icLoraStrength, setIcLoraStrength] = useState(1.0)
   const [icLoraInitial, setIcLoraInitial] = useState<{
     videoPath: string | null
@@ -1159,163 +1147,6 @@ export function GenSpace() {
     })()
   }, [videoPath, currentProjectId, isGenerating, sanitizeVideoSettings, settings, inputImage, inputAudio, lastPrompt, addAsset, reset])
 
-  // When retake completes, add as take or new asset
-  useEffect(() => {
-    if (!retakeResult || !currentProjectId || isRetaking) return
-    const submission = retakeSubmissionRef.current
-    if (!submission) return
-    retakeSubmissionRef.current = null
-
-    ;(async () => {
-      const usedPrompt = submission.prompt
-      const usedInput = submission.input
-      const copied = await addVisualAssetToProject(retakeResult.videoPath, currentProjectId, 'video')
-      if (!copied) {
-        logger.error('Could not persist retake result to project storage')
-        setLocalError(createLocalGenerationError('Failed to save retake output to project storage.'))
-        setActiveRetakeSource(null)
-        resetRetake()
-        return
-      }
-
-      if (activeRetakeSource?.assetId) {
-        const sourceAsset = activeProject?.assets?.find(a => a.id === activeRetakeSource.assetId)
-        if (sourceAsset) {
-          const newTakeIndex = sourceAsset.takes ? sourceAsset.takes.length : 1
-          addTakeToAsset(currentProjectId, sourceAsset.id, {
-            path: copied.path,
-            bigThumbnailPath: copied.bigThumbnailPath,
-            smallThumbnailPath: copied.smallThumbnailPath,
-            width: copied.width,
-            height: copied.height,
-            createdAt: Date.now(),
-          })
-          if (activeRetakeSource.linkedClipIds?.length) {
-            setPendingRetakeUpdate({
-              assetId: sourceAsset.id,
-              clipIds: activeRetakeSource.linkedClipIds,
-              newTakeIndex,
-            })
-          }
-        }
-      } else {
-        addAsset(currentProjectId, {
-          type: 'video',
-          path: copied.path,
-          bigThumbnailPath: copied.bigThumbnailPath,
-          smallThumbnailPath: copied.smallThumbnailPath,
-          width: copied.width,
-          height: copied.height,
-          prompt: usedPrompt,
-          resolution: '',
-          duration: usedInput.duration,
-          generationParams: {
-            mode: 'retake',
-            prompt: usedPrompt,
-            model: 'pro',
-            duration: usedInput.duration,
-            resolution: '',
-            fps: 24,
-            audio: true,
-            cameraMotion: 'none',
-            retakeVideoPath: copied.path,
-            retakeStartTime: usedInput.startTime,
-            retakeDuration: usedInput.duration,
-            retakeMode: 'replace_audio_and_video',
-          },
-          takes: [{
-            path: copied.path,
-            bigThumbnailPath: copied.bigThumbnailPath,
-            smallThumbnailPath: copied.smallThumbnailPath,
-            width: copied.width,
-            height: copied.height,
-            createdAt: Date.now(),
-          }],
-          activeTakeIndex: 0,
-        })
-        setMode('video')
-      }
-
-      setActiveRetakeSource(null)
-      resetRetake()
-    })()
-  }, [retakeResult, isRetaking, currentProjectId, activeProject?.assets, activeRetakeSource, addAsset, addTakeToAsset, setPendingRetakeUpdate, resetRetake])
-
-  useEffect(() => {
-    if (!icLoraResult || !currentProjectId || isIcLoraGenerating) return
-    const submission = icLoraSubmissionRef.current
-    if (!submission) return
-    icLoraSubmissionRef.current = null
-
-    ;(async () => {
-      const copied = await addVisualAssetToProject(icLoraResult.videoPath, currentProjectId, 'video')
-      if (!copied) {
-        logger.error('Could not persist IC-LoRA result to project storage')
-        setLocalError(createLocalGenerationError('Failed to save IC-LoRA output to project storage.'))
-        setActiveIcLoraSource(null)
-        resetIcLora()
-        return
-      }
-
-      if (activeIcLoraSource?.assetId) {
-        const sourceAsset = activeProject?.assets?.find(a => a.id === activeIcLoraSource.assetId)
-        if (sourceAsset) {
-          const newTakeIndex = sourceAsset.takes ? sourceAsset.takes.length : 1
-          addTakeToAsset(currentProjectId, sourceAsset.id, {
-            path: copied.path,
-            bigThumbnailPath: copied.bigThumbnailPath,
-            smallThumbnailPath: copied.smallThumbnailPath,
-            width: copied.width,
-            height: copied.height,
-            createdAt: Date.now(),
-          })
-          if (activeIcLoraSource.linkedClipIds?.length) {
-            setPendingIcLoraUpdate({
-              assetId: sourceAsset.id,
-              clipIds: activeIcLoraSource.linkedClipIds,
-              newTakeIndex,
-            })
-          }
-        }
-      } else {
-        addAsset(currentProjectId, {
-          type: 'video',
-          path: copied.path,
-          bigThumbnailPath: copied.bigThumbnailPath,
-          smallThumbnailPath: copied.smallThumbnailPath,
-          width: copied.width,
-          height: copied.height,
-          prompt: submission.prompt,
-          resolution: '',
-          generationParams: {
-            mode: 'ic-lora',
-            prompt: submission.prompt,
-            model: 'fast',
-            duration: 0,
-            resolution: '',
-            fps: 24,
-            audio: false,
-            cameraMotion: 'none',
-            icLoraVideoPath: submission.input.videoPath,
-            icLoraConditioningType: submission.input.conditioningType,
-            icLoraConditioningStrength: submission.input.conditioningStrength,
-          },
-          takes: [{
-            path: copied.path,
-            bigThumbnailPath: copied.bigThumbnailPath,
-            smallThumbnailPath: copied.smallThumbnailPath,
-            width: copied.width,
-            height: copied.height,
-            createdAt: Date.now(),
-          }],
-          activeTakeIndex: 0,
-        })
-      }
-
-      setActiveIcLoraSource(null)
-    })()
-  }, [icLoraResult, isIcLoraGenerating, currentProjectId, activeProject?.assets, activeIcLoraSource, addAsset, addTakeToAsset, setPendingIcLoraUpdate])
-  
   // When image generation/editing completes, add all images to project assets
   useEffect(() => {
     if (imagePaths.length > 0 && currentProjectId && !isGenerating) {
@@ -1369,41 +1200,177 @@ export function GenSpace() {
   
   const handleGenerate = async () => {
     if (mode === 'ic-lora') {
-      if (!prompt.trim() || !icLoraInput.videoPath || !icLoraInput.ready) return
-      icLoraSubmissionRef.current = {
-        prompt,
-        input: {
-          videoPath: icLoraInput.videoPath,
-          conditioningType: icLoraCondType,
-          conditioningStrength: icLoraStrength,
-        },
-      }
+      if (!icLoraInput.videoPath || !icLoraInput.ready) return
+      if (!prompt.trim() && icLoraInput.adapterId !== 'in_outpainting') return
+
+      const resolvedPrompt = prompt
       await submitIcLora({
         videoPath: icLoraInput.videoPath,
         conditioningType: icLoraCondType,
         conditioningStrength: icLoraStrength,
-        prompt,
+        adapterId: icLoraInput.adapterId,
+        maskPath: icLoraInput.maskPath,
+        images: icLoraInput.images,
+        prompt: resolvedPrompt,
+        maskGrowPx: icLoraInput.maskGrowPx,
+        laplacianBlendGrow: icLoraInput.laplacianBlendGrow,
+      }, async (result) => {
+        // ponytail: runs async in the hook's closure, survives GenSpace unmount (Bug A)
+        const copied = await addVisualAssetToProject(result.videoPath, currentProjectId!, 'video')
+        if (!copied) {
+          logger.error('Could not persist IC-LoRA result to project storage')
+          setLocalError(createLocalGenerationError('Failed to save IC-LoRA output to project storage.'))
+          setActiveIcLoraSource(null)
+          resetIcLora()
+          return
+        }
+
+        if (activeIcLoraSource?.assetId) {
+          const sourceAsset = activeProject?.assets?.find(a => a.id === activeIcLoraSource.assetId)
+          if (sourceAsset) {
+            const newTakeIndex = sourceAsset.takes ? sourceAsset.takes.length : 1
+            addTakeToAsset(currentProjectId!, sourceAsset.id, {
+              path: copied.path,
+              bigThumbnailPath: copied.bigThumbnailPath,
+              smallThumbnailPath: copied.smallThumbnailPath,
+              width: copied.width,
+              height: copied.height,
+              createdAt: Date.now(),
+            })
+            if (activeIcLoraSource.linkedClipIds?.length) {
+              setPendingIcLoraUpdate({
+                assetId: sourceAsset.id,
+                clipIds: activeIcLoraSource.linkedClipIds,
+                newTakeIndex,
+              })
+            }
+          }
+        } else {
+          addAsset(currentProjectId!, {
+            type: 'video',
+            path: copied.path,
+            bigThumbnailPath: copied.bigThumbnailPath,
+            smallThumbnailPath: copied.smallThumbnailPath,
+            width: copied.width,
+            height: copied.height,
+            prompt: resolvedPrompt,
+            resolution: '',
+            generationParams: {
+              mode: 'ic-lora',
+              prompt: resolvedPrompt,
+              model: 'fast',
+              duration: 0,
+              resolution: '',
+              fps: 24,
+              audio: false,
+              cameraMotion: 'none',
+              icLoraVideoPath: icLoraInput.videoPath ?? undefined,
+              icLoraConditioningType: icLoraCondType ? icLoraCondType : undefined,
+              icLoraConditioningStrength: icLoraStrength,
+            },
+            takes: [{
+              path: copied.path,
+              bigThumbnailPath: copied.bigThumbnailPath,
+              smallThumbnailPath: copied.smallThumbnailPath,
+              width: copied.width,
+              height: copied.height,
+              createdAt: Date.now(),
+            }],
+            activeTakeIndex: 0,
+          })
+        }
+
+        setActiveIcLoraSource(null)
       })
       return
     }
 
     if (mode === 'retake') {
       if (!retakeInput.videoPath || retakeInput.duration < 2) return
-      retakeSubmissionRef.current = {
-        prompt,
-        input: {
-          videoPath: retakeInput.videoPath,
-          startTime: retakeInput.startTime,
-          duration: retakeInput.duration,
-          videoDuration: retakeInput.videoDuration,
-        },
-      }
       await submitRetake({
         videoPath: retakeInput.videoPath,
         startTime: retakeInput.startTime,
         duration: retakeInput.duration,
         prompt,
         mode: 'replace_audio_and_video',
+      }, async (result) => {
+        // ponytail: runs async in the hook's closure, survives GenSpace unmount (Bug A)
+        const usedPrompt = prompt
+        const usedInput = {
+          videoPath: retakeInput.videoPath,
+          startTime: retakeInput.startTime,
+          duration: retakeInput.duration,
+          videoDuration: retakeInput.videoDuration,
+        }
+        const copied = await addVisualAssetToProject(result.videoPath, currentProjectId!, 'video')
+        if (!copied) {
+          logger.error('Could not persist retake result to project storage')
+          setLocalError(createLocalGenerationError('Failed to save retake output to project storage.'))
+          setActiveRetakeSource(null)
+          resetRetake()
+          return
+        }
+
+        if (activeRetakeSource?.assetId) {
+          const sourceAsset = activeProject?.assets?.find(a => a.id === activeRetakeSource.assetId)
+          if (sourceAsset) {
+            const newTakeIndex = sourceAsset.takes ? sourceAsset.takes.length : 1
+            addTakeToAsset(currentProjectId!, sourceAsset.id, {
+              path: copied.path,
+              bigThumbnailPath: copied.bigThumbnailPath,
+              smallThumbnailPath: copied.smallThumbnailPath,
+              width: copied.width,
+              height: copied.height,
+              createdAt: Date.now(),
+            })
+            if (activeRetakeSource.linkedClipIds?.length) {
+              setPendingRetakeUpdate({
+                assetId: sourceAsset.id,
+                clipIds: activeRetakeSource.linkedClipIds,
+                newTakeIndex,
+              })
+            }
+          }
+        } else {
+          addAsset(currentProjectId!, {
+            type: 'video',
+            path: copied.path,
+            bigThumbnailPath: copied.bigThumbnailPath,
+            smallThumbnailPath: copied.smallThumbnailPath,
+            width: copied.width,
+            height: copied.height,
+            prompt: usedPrompt,
+            resolution: '',
+            duration: usedInput.duration,
+            generationParams: {
+              mode: 'retake',
+              prompt: usedPrompt,
+              model: 'pro',
+              duration: usedInput.duration,
+              resolution: '',
+              fps: 24,
+              audio: true,
+              cameraMotion: 'none',
+              retakeVideoPath: copied.path,
+              retakeStartTime: usedInput.startTime,
+              retakeDuration: usedInput.duration,
+              retakeMode: 'replace_audio_and_video',
+            },
+            takes: [{
+              path: copied.path,
+              bigThumbnailPath: copied.bigThumbnailPath,
+              smallThumbnailPath: copied.smallThumbnailPath,
+              width: copied.width,
+              height: copied.height,
+              createdAt: Date.now(),
+            }],
+            activeTakeIndex: 0,
+          })
+          setMode('video')
+        }
+
+        setActiveRetakeSource(null)
+        resetRetake()
       })
       return
     }
@@ -1504,10 +1471,11 @@ export function GenSpace() {
       hasAudio: Boolean(inputAudio),
     }).hasCompatibleOptions
   )
+  const isInOutpainting = isIcLoraMode && icLoraInput.adapterId === 'in_outpainting'
   const canSubmit = isRetakeMode
     ? retakeInput.ready && !!retakeInput.videoPath && !isRetaking
     : isIcLoraMode
-      ? !!prompt.trim() && icLoraInput.ready && !!icLoraInput.videoPath && !isIcLoraGenerating
+      ? (isInOutpainting || !!prompt.trim()) && icLoraInput.ready && !!icLoraInput.videoPath && !isIcLoraGenerating
       : !!prompt.trim() && hasCompatibleVideoSettings
   const promptButtonLabel = isRetakeMode ? 'Retake' : isIcLoraMode ? 'Generate' : 'Generate'
   const promptButtonIcon = isRetakeMode
@@ -1815,6 +1783,7 @@ export function GenSpace() {
                 controls
                 autoPlay
                 className="w-full rounded-xl object-contain max-h-[75vh]"
+                onError={(e) => console.error('[GenSpace] Detail video failed:', selectedAsset.path, (e.target as HTMLVideoElement)?.error)}
               />
             ) : (
               <img

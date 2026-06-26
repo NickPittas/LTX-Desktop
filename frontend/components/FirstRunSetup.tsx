@@ -11,6 +11,7 @@ interface LaunchGateProps {
   showLicenseStep?: boolean
   onComplete: () => Promise<void>
   onAcceptLicense?: () => Promise<void>
+  onLocalModelsComplete?: () => void
 }
 
 type Step = 'license' | 'source' | 'location' | 'installing' | 'complete'
@@ -77,6 +78,7 @@ export function LaunchGate({
   showLicenseStep = true,
   onComplete,
   onAcceptLicense,
+  onLocalModelsComplete,
 }: LaunchGateProps) {
   const [currentStep, setCurrentStep] = useState<Step>(showLicenseStep ? 'license' : 'source')
   const [installPath, setInstallPath] = useState('')
@@ -97,6 +99,7 @@ export function LaunchGate({
   const { accessMap, allAuthorized } = useHfModelAccess(requiredCheckpointIds, hfAuthStatus)
   const { saveLtxApiKey } = useAppSettings()
   const modelAccessRef = useRef<HTMLDivElement>(null)
+  const choseLocalModelsRef = useRef(false)
   const downloadQueueRef = useRef<DownloadStepSpec[]>([])
   const runningDownloadProgress = downloadProgress?.status === 'downloading' ? downloadProgress : null
   const totalProgress = runningDownloadProgress?.total_progress ?? (downloadProgress?.status === 'complete' ? 100 : 0)
@@ -343,6 +346,9 @@ export function LaunchGate({
     setIsActionPending(true)
     try {
       await onComplete()
+      if (choseLocalModelsRef.current) {
+        onLocalModelsComplete?.()
+      }
     } catch (e) {
       setActionError(e instanceof Error ? e.message : 'Failed to complete setup.')
     } finally {
@@ -560,7 +566,10 @@ export function LaunchGate({
                   <div style={{ color: '#a0a0a0', fontSize: 12 }}>Download and install recommended LTX models automatically.</div>
                 </div>
                 <div
-                  onClick={() => setCurrentStep('complete')}
+                  onClick={() => {
+                      choseLocalModelsRef.current = true
+                      setCurrentStep('complete')
+                    }}
                   style={{ background: '#2e3445', borderRadius: 12, padding: '14px 18px', cursor: 'pointer' }}
                 >
                   <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 2 }}>Use Local Model Files</div>

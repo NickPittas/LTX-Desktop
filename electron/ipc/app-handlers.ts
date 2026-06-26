@@ -8,6 +8,16 @@ import { getMainWindow } from '../window'
 import { getAnalyticsState, setAnalyticsEnabled, sendAnalyticsEvent } from '../analytics'
 import { handle } from './typed-handle'
 
+function writeSettingsFile(settingsPath: string, settings: Record<string, unknown>): void {
+  // ponytail: ensure parent dir exists before write
+  // upgrade path: shared setup-state service if this grows
+  const dir = path.dirname(settingsPath)
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true })
+  }
+  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2))
+}
+
 function getModelsPath(): string {
   const modelsPath = path.join(app.getPath('userData'), 'models')
   if (!fs.existsSync(modelsPath)) {
@@ -18,6 +28,22 @@ function getModelsPath(): string {
 
 function getSetupStatus(settingsPath: string): { needsSetup: boolean; needsLicense: boolean } {
   if (!fs.existsSync(settingsPath)) {
+    // ponytail: if user has active local model profile but no app_state,
+    // consider setup done. upgrade path: shared setup-state service.
+    const profilesPath = path.join(path.dirname(settingsPath), 'model_profiles.json')
+    if (fs.existsSync(profilesPath)) {
+      try {
+        const raw = JSON.parse(fs.readFileSync(profilesPath, 'utf-8'))
+        const activeId = raw.active_model_profile_id
+        const hasActiveProfile = activeId && Array.isArray(raw.profiles) &&
+          raw.profiles.some((p: Record<string, unknown>) => p.id === activeId && p.isActive)
+        if (hasActiveProfile) {
+          return { needsSetup: false, needsLicense: true }
+        }
+      } catch {
+        // Corrupt profiles file — proceed with full setup
+      }
+    }
     return { needsSetup: true, needsLicense: true }
   }
   try {
@@ -47,7 +73,7 @@ function markSetupComplete(settingsPath: string): void {
   settings.licenseAcceptedDate = new Date().toISOString()
   settings.setupDate = new Date().toISOString()
 
-  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2))
+  writeSettingsFile(settingsPath, settings)
 }
 
 function markLicenseAccepted(settingsPath: string): void {
@@ -62,9 +88,11 @@ function markLicenseAccepted(settingsPath: string): void {
   }
 
   settings.licenseAccepted = true
+  settings.setupComplete = true
   settings.licenseAcceptedDate = new Date().toISOString()
+  settings.setupDate = new Date().toISOString()
 
-  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2))
+  writeSettingsFile(settingsPath, settings)
 }
 
 export function registerAppHandlers(): void {

@@ -10,6 +10,23 @@ LTX Desktop is an Electron app for AI video generation using LTX models. Three-l
 - **Electron** (`electron/`): Main process managing app lifecycle, IPC, Python backend process, ffmpeg export
 - **Backend** (`backend/`): Python FastAPI server (port 8000) handling ML model orchestration and generation
 
+## Session Workflow Rules
+
+- **Read AGENTS.md** at the start of every turn before acting.
+- **Orchestrator delegates, never codes.** Orchestrator/parent reads, plans, delegates, reviews, verifies, runs commands, and reverts accidental direct edits only. No direct implementation.
+- **Subagents get narrow prompts** with exact file paths, symbols, and line ranges. No broad repo search unless explicitly assigned a locator phase.
+- **No parallel self-coding while subagents run.** Do not continue broad implementation while locator/worker subagents are active.
+- **Reviews target exact files/ranges/changes** — specific, not open-ended.
+- **Reviewers are static review only.** Orchestrator owns validation execution.
+- **Targeted tests per slice** until product path is ready. No full test suite runs prematurely.
+- **Never re-download existing models.** First scan/status files under the user-set models folder before any download.
+- **One models folder is source of truth** for downloads, profile scanning, status, Gemma/text projection, IC-LoRAs, VAE/upscaler/audio models. Missing model UI must show source link and exact required placement path.
+- **Local profile Gemma/text encoder must suppress API-key prompting** for prompt enhancement when local GGUF Gemma is configured.
+- **Canny/depth disabled by default.** Runs only when Union Control is explicitly enabled. Other LoRAs never get canny/depth preprocessing.
+- **Union Control first, then LoRA.** If canny/depth + another adapter enabled: load/apply Union Control first, selected LoRA second. If disabled, LoRA runs without edge/depth conditioning.
+- **Honest workflow gating.** Never fake unsupported workflow support; mark unavailable/gated features clearly.
+- **No push without explicit confirmation.**
+
 ## Common Commands
 
 | Command | Purpose |

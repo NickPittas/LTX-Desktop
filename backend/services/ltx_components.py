@@ -64,7 +64,7 @@ def resolve_components(profile: ModelProfilePayload) -> ResolvedLtxComponents:
         c.text_encoder_root or "",
     )
 
-    gemma_root = c.text_encoder_root if c.text_encoder_format in ("hf_folder",) else None
+    gemma_root = c.text_encoder_root if c.text_encoder_format in ("hf_folder", "gguf", "safetensors") else None
 
     return ResolvedLtxComponents(
         profile_id=profile.id,

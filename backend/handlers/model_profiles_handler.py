@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 from threading import RLock
 from typing import TYPE_CHECKING
@@ -78,9 +79,27 @@ class ModelProfilesHandler(StateHandlerBase):
             profiles = []
             active_id = None
 
-        profile_ids = {profile.id for profile in profiles}
+        # Repair blank-ID profiles by assigning generated IDs
+        repaired = False
+        existing_ids = {p.id for p in profiles}
+        for profile in profiles:
+            if not profile.id.strip():
+                profile.id = uuid.uuid4().hex
+                while profile.id in existing_ids:
+                    profile.id = uuid.uuid4().hex
+                existing_ids.add(profile.id)
+                repaired = True
+
         self.state.model_profiles = profiles
-        self.state.active_model_profile_id = active_id if active_id in profile_ids else None
+        if active_id and active_id.strip() and active_id in existing_ids:
+            self.state.active_model_profile_id = active_id
+        else:
+            self.state.active_model_profile_id = None
+            if active_id is not None:
+                repaired = True
+
+        if repaired:
+            self.save_profiles()
 
     def save_profiles(self) -> None:
         """Persist current model profiles to disk."""
@@ -100,7 +119,11 @@ class ModelProfilesHandler(StateHandlerBase):
 
     @with_state_lock
     def create_profile(self, payload: ModelProfilePayload) -> ModelProfilePayload:
-        if any(profile.id == payload.id for profile in self.state.model_profiles):
+        if not payload.id.strip():
+            payload.id = uuid.uuid4().hex
+            while any(profile.id == payload.id for profile in self.state.model_profiles):
+                payload.id = uuid.uuid4().hex
+        elif any(profile.id == payload.id for profile in self.state.model_profiles):
             raise HTTPError(409, "PROFILE_ID_ALREADY_EXISTS")
         self.state.model_profiles.append(payload)
         self.save_profiles()
@@ -110,7 +133,9 @@ class ModelProfilesHandler(StateHandlerBase):
     def patch_profile(self, profile_id: str, patch: ModelProfilePatchPayload) -> ModelProfilePayload:
         for index, profile in enumerate(self.state.model_profiles):
             if profile.id == profile_id:
-                updated = profile.model_copy(update=patch.model_dump(exclude_unset=True))
+                updated_payload = profile.model_dump()
+                updated_payload.update(patch.model_dump(exclude_unset=True))
+                updated = ModelProfilePayload(**updated_payload)
                 self.state.model_profiles[index] = updated
                 self.save_profiles()
                 return updated

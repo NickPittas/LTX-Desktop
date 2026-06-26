@@ -60,6 +60,7 @@ export function VideoThumbnailCard({ videoUrl, thumbnailUrl }: { videoUrl: strin
     video.playsInline = true
     video.preload = 'auto'
     video.src = videoUrl
+    video.onerror = () => console.error('[VideoThumbnailCard] hover video error', video.error?.message || video.error)
     videoRef.current = video
 
     const onLoaded = () => {

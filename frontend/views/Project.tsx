@@ -20,9 +20,7 @@ export function Project() {
     setCurrentTab,
     updateAsset,
     pendingRetakeUpdate,
-    setPendingRetakeUpdate,
     pendingIcLoraUpdate,
-    setPendingIcLoraUpdate,
   } = useProjects()
   const { goHome } = useView()
   const [assetMetadataMigrationProgress, setAssetMetadataMigrationProgress] = useState({ running: false, total: 0, completed: 0 })
@@ -67,18 +65,6 @@ export function Project() {
       cancelled = true
     }
   }, [activeProjectAssets, activeProjectId, needsAssetMetadataMigration, updateAsset])
-
-  useEffect(() => {
-    if (currentTab !== 'video-editor') return
-    if (pendingRetakeUpdate) setPendingRetakeUpdate(null)
-    if (pendingIcLoraUpdate) setPendingIcLoraUpdate(null)
-  }, [
-    currentTab,
-    pendingRetakeUpdate,
-    setPendingRetakeUpdate,
-    pendingIcLoraUpdate,
-    setPendingIcLoraUpdate,
-  ])
   
   if (!activeProject) {
     return (

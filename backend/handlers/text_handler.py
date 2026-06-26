@@ -23,6 +23,20 @@ class TextHandler(StateHandlerBase):
     def __init__(self, state: AppState, lock: RLock, config: RuntimeConfig) -> None:
         super().__init__(state, lock, config)
 
+    def _active_profile_provides_local_encoder(self) -> bool:
+        """Check if the active model profile has its own local text encoder."""
+        profile_id = self.state.active_model_profile_id
+        if profile_id is None:
+            return False
+        profile = next(
+            (p for p in self.state.model_profiles if p.id == profile_id),
+            None,
+        )
+        if profile is None:
+            return False
+        c = profile.components
+        return bool(c.text_encoder_root) and c.text_encoder_format in ("hf_folder", "gguf", "safetensors")
+
     @with_state_lock
     def _get_cached_prompt(self, prompt: str, enhance_prompt: bool) -> TextEncodingResult | None:
         te = self.state.text_encoder
@@ -57,23 +71,21 @@ class TextHandler(StateHandlerBase):
         self._set_api_embeddings(None)
 
     def should_use_local_encoding(self) -> bool:
-        """Decide whether to use local text encoding based on availability.
+        """Decide whether to use local text encoding based on availability."""
+        if self._active_profile_provides_local_encoder():
+            return True
 
-        The user's ``use_local_text_encoder`` setting acts as a tiebreaker only
-        when **both** the API key and the local encoder are available.  When only
-        one option exists, that option is used regardless of the setting.
-        """
         settings = self.state.app_settings.model_copy(deep=True)
         api_available = bool(settings.ltx_api_key)
         model_id = get_downloaded_ltx_model_id(self.models_dir)
         local_available = (
-            False
-            if model_id is None
-            else is_cp_downloaded(self.models_dir, get_ltx_model_spec(model_id).text_encoder_cp)
+            is_cp_downloaded(self.models_dir, get_ltx_model_spec(model_id).text_encoder_cp)
+            if model_id is not None
+            else False
         )
 
         if api_available and local_available:
-            return settings.use_local_text_encoder  # setting is tiebreaker
+            return settings.use_local_text_encoder  # setting is tiebreaker for legacy official models only
         return local_available  # use whichever is available
 
     def prepare_text_encoding(self, prompt: str, enhance_prompt: bool) -> None:
@@ -85,11 +97,12 @@ class TextHandler(StateHandlerBase):
         """
         settings = self.state.app_settings.model_copy(deep=True)
         api_available = bool(settings.ltx_api_key)
+        profile_local_available = self._active_profile_provides_local_encoder()
         model_id = get_downloaded_ltx_model_id(self.models_dir)
-        local_available = (
-            False
-            if model_id is None
-            else is_cp_downloaded(self.models_dir, get_ltx_model_spec(model_id).text_encoder_cp)
+        local_available = profile_local_available or (
+            is_cp_downloaded(self.models_dir, get_ltx_model_spec(model_id).text_encoder_cp)
+            if model_id is not None
+            else False
         )
 
         if not api_available and not local_available:
@@ -111,6 +124,11 @@ class TextHandler(StateHandlerBase):
     def resolve_gemma_root(self) -> str | None:
         if not self.should_use_local_encoding():
             return None
+        profile_id = self.state.active_model_profile_id
+        if profile_id is not None:
+            profile = next((p for p in self.state.model_profiles if p.id == profile_id), None)
+            if profile is not None and profile.components.text_encoder_root:
+                return profile.components.text_encoder_root
         model_id = get_downloaded_ltx_model_id(self.models_dir)
         if model_id is None:
             return None
