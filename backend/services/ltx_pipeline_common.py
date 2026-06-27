@@ -7,11 +7,12 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from api_types import ImageConditioningInput
+from api_types import ImageConditioningInput, OutputFormat
 from services.services_utils import AudioOrNone, TilingConfigType, device_supports_fp8
 
 if TYPE_CHECKING:
     from ltx_core.components.guiders import MultiModalGuiderParams
+    from services.media_encoder.media_encoder import MediaEncoder
 
 
 def default_tiling_config() -> TilingConfigType:
@@ -33,21 +34,56 @@ def video_chunks_number(num_frames: int, tiling_config: TilingConfigType | None)
 
 
 def encode_video_output(
+    *,
     video: torch.Tensor | Iterator[torch.Tensor],
     audio: AudioOrNone,
     fps: int,
     output_path: str,
     video_chunks_number_value: int,
+    output_format: OutputFormat = OutputFormat.MP4,
+    proxy_path: str | None = None,
+    encoder: "MediaEncoder | None" = None,
 ) -> None:
-    from ltx_pipelines.utils.media_io import encode_video
+    """Dispatch decoded VAE frames to the media encoder.
 
-    encode_video(
+    ``output_path`` keeps its name (not ``primary_path``) so the 3 other pipeline
+    call sites are unchanged. For the default ``OutputFormat.MP4`` path the call is
+    byte-identical to the previous direct ``encode_video`` delegation (the encoder
+    delegates to the external, validated ``encode_video`` with no color tags) —
+    this guards the visually-validated default output (§7 non-goal).
+
+    If ``encoder is None`` (legacy callers / the retake bypass), a
+    ``MediaEncoderImpl`` singleton is lazily constructed. Non-MP4 formats require
+    ``proxy_path`` to be set by the caller (handlers, Phase 2).
+    """
+    if encoder is None:
+        encoder = _get_default_encoder()
+    encoder.encode(
         video=video,
-        fps=fps,
         audio=audio,
-        output_path=output_path,
+        fps=fps,
+        primary_path=output_path,
+        output_format=output_format,
+        proxy_path=proxy_path,
         video_chunks_number=video_chunks_number_value,
     )
+
+
+_default_encoder_instance: MediaEncoder | None = None
+
+
+def _get_default_encoder() -> "MediaEncoder":
+    """Lazily build a singleton ``MediaEncoderImpl`` for callers that don't inject.
+
+    Heavy import (ffmpeg binary resolution, OpenEXR) stays out of module import
+    time — consistent with the repo's lazy-import pattern.
+    """
+    global _default_encoder_instance
+    if _default_encoder_instance is None:
+        from services.media_encoder.media_encoder_impl import MediaEncoderImpl
+
+        _default_encoder_instance = MediaEncoderImpl()
+    return _default_encoder_instance
 
 
 class DistilledNativePipeline:

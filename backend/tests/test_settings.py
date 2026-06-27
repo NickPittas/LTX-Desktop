@@ -186,6 +186,7 @@ class TestModelsDirAdminGuard:
             pose_processor_pipeline_class=type(fake_services.pose_processor_pipeline),
             a2v_pipeline_class=type(fake_services.a2v_pipeline),
             retake_pipeline_class=type(fake_services.retake_pipeline),
+            media_encoder=fake_services.media_encoder,
         )
         loaded = build_initial_state(test_state.config, default_app_settings.model_copy(deep=True), service_bundle=bundle)
         assert loaded.state.app_settings.models_dir == "/tmp/persisted-models"
@@ -212,6 +213,7 @@ class TestSettingsPersistence:
             pose_processor_pipeline_class=type(fake_services.pose_processor_pipeline),
             a2v_pipeline_class=type(fake_services.a2v_pipeline),
             retake_pipeline_class=type(fake_services.retake_pipeline),
+            media_encoder=fake_services.media_encoder,
         )
         return build_initial_state(test_state.config, default_app_settings.model_copy(deep=True), service_bundle=bundle)
 

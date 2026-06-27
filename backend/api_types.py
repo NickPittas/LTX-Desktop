@@ -2,10 +2,32 @@
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Annotated
 from typing import Literal, NamedTuple, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+
+
+class OutputFormat(str, Enum):
+    """Primary output container/codec produced by the media encoder.
+
+    Lives in ``api_types`` (not ``services.media_encoder``) per §0A.F — services
+    import ``api_types`` so this keeps the DTO/service layering clean and avoids a
+    circular import. ``str`` enum so pydantic/OpenAPI serialize it as a plain
+    string.
+    """
+
+    MP4 = "mp4"
+    PRORES_PROXY = "prores_proxy"
+    PRORES_LT = "prores_lt"
+    PRORES_422 = "prores_422"
+    PRORES_422_HQ = "prores_422_hq"
+    PRORES_4444 = "prores_4444"
+    PRORES_4444_XQ = "prores_4444_xq"
+    EXR_ZIP_HALF = "exr_zip_half"
+    EXR_ZIP_FLOAT = "exr_zip_float"
+
 
 NonEmptyPrompt = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 ModelCheckpointID = Literal[

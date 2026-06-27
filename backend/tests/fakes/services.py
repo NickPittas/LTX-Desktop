@@ -8,10 +8,11 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from PIL import Image
-from api_types import ImageConditioningInput, VideoCameraMotion
+from api_types import ImageConditioningInput, OutputFormat, VideoCameraMotion
 from services.ltx_components import CheckpointPath, ResolvedLtxComponents
 from services.interfaces import VideoInfoPayload
 from services.ltx_api_client.ltx_api_client import LTXRetakeResult
+from services.media_encoder.media_encoder import EncoderResult
 from tests.fakes.fake_gpu_info import FakeGpuInfo
 
 
@@ -830,6 +831,65 @@ class FakeTextEncoder:
         return None
 
 
+class FakeMediaEncoder:
+    """Test double for :class:`MediaEncoder`.
+
+    Records each ``encode()`` call. Writes a placeholder primary file at
+    ``primary_path`` (and proxy at ``proxy_path``) so downstream path-existence
+    assertions in handler tests behave like the real encoder. No pixels are
+    encoded — handler tests only assert plumbing (format forwarded, paths built).
+    Color/byte correctness is covered by ``test_media_encoder.py`` against the
+    real ``MediaEncoderImpl``.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.last_format: OutputFormat | None = None
+        self.last_primary_path: str | None = None
+        self.last_proxy_path: str | None = None
+
+    def encode(
+        self,
+        *,
+        video: Any,
+        audio: Any,
+        fps: int,
+        primary_path: str,
+        output_format: OutputFormat,
+        proxy_path: str | None,
+        video_chunks_number: int,  # noqa: ARG002
+        on_progress: Any = None,  # noqa: ARG002
+    ) -> EncoderResult:
+        self.calls.append(
+            {
+                "video": video,
+                "audio": audio,
+                "fps": fps,
+                "primary_path": primary_path,
+                "output_format": output_format,
+                "proxy_path": proxy_path,
+            }
+        )
+        self.last_format = output_format
+        self.last_primary_path = primary_path
+        self.last_proxy_path = proxy_path
+
+        # Materialize placeholder outputs so path-existence assertions pass.
+        primary = Path(primary_path)
+        if output_format in (OutputFormat.EXR_ZIP_HALF, OutputFormat.EXR_ZIP_FLOAT):
+            primary.mkdir(parents=True, exist_ok=True)
+            (primary / "frame_00000.exr").write_bytes(b"fake-exr")
+        else:
+            primary.parent.mkdir(parents=True, exist_ok=True)
+            primary.write_bytes(b"fake-primary")
+        if proxy_path is not None:
+            proxy = Path(proxy_path)
+            proxy.parent.mkdir(parents=True, exist_ok=True)
+            proxy.write_bytes(b"fake-proxy")
+
+        return EncoderResult(primary_path=primary_path, proxy_path=proxy_path)
+
+
 @dataclass
 class FakeServices:
     http: FakeHTTPClient = field(default_factory=FakeHTTPClient)
@@ -848,6 +908,7 @@ class FakeServices:
     pose_processor_pipeline: FakePoseProcessorPipeline = field(default_factory=FakePoseProcessorPipeline)
     a2v_pipeline: FakeA2VPipeline = field(default_factory=FakeA2VPipeline)
     retake_pipeline: FakeRetakePipeline = field(default_factory=FakeRetakePipeline)
+    media_encoder: FakeMediaEncoder = field(default_factory=FakeMediaEncoder)
 
     def __post_init__(self) -> None:
         FakeFastVideoPipeline.bind_singleton(self.fast_video_pipeline)

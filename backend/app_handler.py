@@ -35,6 +35,7 @@ from services.interfaces import (
     HTTPClient,
     IcLoraPipeline,
     LTXAPIClient,
+    MediaEncoder,
     ModelDownloader,
     PoseProcessorPipeline,
     RetakePipeline,
@@ -68,6 +69,7 @@ class AppHandler:
         pose_processor_pipeline_class: type[PoseProcessorPipeline],
         a2v_pipeline_class: type[A2VPipeline],
         retake_pipeline_class: type[RetakePipeline],
+        media_encoder: MediaEncoder,
     ) -> None:
         self.config = config
 
@@ -87,6 +89,10 @@ class AppHandler:
         self.pose_processor_pipeline_class = pose_processor_pipeline_class
         self.a2v_pipeline_class = a2v_pipeline_class
         self.retake_pipeline_class = retake_pipeline_class
+        # Exposed so Phase 2 handlers can inject the encoder into pipelines via
+        # encode_video_output(encoder=self.media_encoder). The lazy-singleton
+        # fallback in encode_video_output covers the untouched-pipeline MP4 path.
+        self.media_encoder = media_encoder
 
         self._lock = threading.RLock()
 
@@ -245,6 +251,7 @@ class ServiceBundle:
     pose_processor_pipeline_class: type[PoseProcessorPipeline]
     a2v_pipeline_class: type[A2VPipeline]
     retake_pipeline_class: type[RetakePipeline]
+    media_encoder: MediaEncoder
 
 
 def build_default_service_bundle(config: RuntimeConfig) -> ServiceBundle:
@@ -259,6 +266,7 @@ def build_default_service_bundle(config: RuntimeConfig) -> ServiceBundle:
     from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
     from services.image_generation_pipeline.zit_image_generation_pipeline import ZitImageGenerationPipeline
     from services.ltx_api_client.ltx_api_client_impl import LTXAPIClientImpl
+    from services.media_encoder.media_encoder_impl import MediaEncoderImpl
     from services.model_downloader.hugging_face_downloader import HuggingFaceDownloader
     from services.retake_pipeline.ltx_retake_pipeline import LTXRetakePipeline
     from services.pose_processor_pipeline.dw_pose_pipeline import DWPosePipeline
@@ -289,6 +297,7 @@ def build_default_service_bundle(config: RuntimeConfig) -> ServiceBundle:
         pose_processor_pipeline_class=DWPosePipeline,
         a2v_pipeline_class=LTXa2vPipeline,
         retake_pipeline_class=LTXRetakePipeline,
+        media_encoder=MediaEncoderImpl(),
     )
 
 
@@ -318,4 +327,5 @@ def build_initial_state(
         pose_processor_pipeline_class=bundle.pose_processor_pipeline_class,
         a2v_pipeline_class=bundle.a2v_pipeline_class,
         retake_pipeline_class=bundle.retake_pipeline_class,
+        media_encoder=bundle.media_encoder,
     )
