@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import tempfile
 import time
 import uuid
@@ -21,6 +22,7 @@ from api_types import (
     GenerateVideoRequest,
     GenerateVideoResponse,
     ImageConditioningInput,
+    OutputFormat,
     VideoCameraMotion,
 )
 from _routes._errors import HTTPError
@@ -39,6 +41,8 @@ from server_utils.media_validation import (
 )
 from services.interfaces import LTXAPIClient
 from services.ltx_api_client.ltx_api_client import LTXAPIClientError
+from services.ltx_pipeline_common import make_primary_output_path, make_proxy_output_path
+from services.media_encoder.media_encoder import MediaEncoder
 from state.app_state_types import AppState
 from state.app_settings import should_video_generate_with_ltx_api
 
@@ -60,6 +64,15 @@ FORCED_API_ALLOWED_ASPECT_RATIOS = {"16:9", "9:16"}
 _LTX_INSUFFICIENT_FUNDS_MESSAGE = "Your LTX API credits are insufficient for this generation. Buy more credits and try again."
 
 
+def _cleanup_output(output_path: str) -> None:
+    """Remove a partial primary output (file or EXR directory) — cancel/failure."""
+    p = Path(output_path)
+    if p.is_dir():
+        shutil.rmtree(p, ignore_errors=True)
+    else:
+        p.unlink(missing_ok=True)
+
+
 class VideoGenerationHandler(StateHandlerBase):
     def __init__(
         self,
@@ -69,6 +82,7 @@ class VideoGenerationHandler(StateHandlerBase):
         pipelines_handler: PipelinesHandler,
         text_handler: TextHandler,
         ltx_api_client: LTXAPIClient,
+        media_encoder: MediaEncoder,
         config: RuntimeConfig,
     ) -> None:
         super().__init__(state, lock, config)
@@ -76,6 +90,7 @@ class VideoGenerationHandler(StateHandlerBase):
         self._pipelines = pipelines_handler
         self._text = text_handler
         self._ltx_api_client = ltx_api_client
+        self.media_encoder = media_encoder
 
     def get_model_specs(self) -> GenerateVideoModelsSpecsResponse:
         return build_generate_video_model_specs_response()
@@ -152,10 +167,14 @@ class VideoGenerationHandler(StateHandlerBase):
                 seed=seed,
                 camera_motion=req.cameraMotion,
                 negative_prompt=req.negativePrompt,
+                output_format=req.output_format or OutputFormat.MP4,
             )
+            proxy_path = make_proxy_output_path(output_path, req.output_format or OutputFormat.MP4)
 
             self._generation.complete_generation(output_path)
-            return GenerateVideoCompleteResponse(status="complete", video_path=output_path)
+            return GenerateVideoCompleteResponse(
+                status="complete", video_path=output_path, proxy_path=proxy_path
+            )
 
         except HTTPError as e:
             self._generation.fail_generation(e.detail)
@@ -179,6 +198,7 @@ class VideoGenerationHandler(StateHandlerBase):
         seed: int,
         camera_motion: VideoCameraMotion,
         negative_prompt: str,
+        output_format: OutputFormat = OutputFormat.MP4,
     ) -> str:
         t_total_start = time.perf_counter()
         gen_mode = "i2v" if image is not None else "t2v"
@@ -206,7 +226,10 @@ class VideoGenerationHandler(StateHandlerBase):
             image.save(temp_image_path)
             images = [ImageConditioningInput(path=temp_image_path, frame_idx=0, strength=1.0)]
 
-        output_path = self._make_output_path()
+        output_path = make_primary_output_path(
+            str(self.config.outputs_dir), "ltx2_video", output_format, self._make_generation_id()
+        )
+        proxy_path = make_proxy_output_path(output_path, output_format)
 
         try:
             settings = self.state.app_settings
@@ -235,15 +258,17 @@ class VideoGenerationHandler(StateHandlerBase):
                 num_frames=num_frames,
                 frame_rate=fps,
                 images=images,
-                output_path=str(output_path),
+                output_path=output_path,
                 enhance_prompt=pipeline_enhance,
+                output_format=output_format,
+                encoder=self.media_encoder,
+                proxy_path=proxy_path,
             )
             t_inference_end = time.perf_counter()
             logger.info("[%s] Inference: %.2fs", gen_mode, t_inference_end - t_inference_start)
 
             if self._generation.is_generation_cancelled():
-                if output_path.exists():
-                    output_path.unlink()
+                _cleanup_output(output_path)
                 raise RuntimeError("Generation was cancelled")
 
             t_total_end = time.perf_counter()
@@ -301,7 +326,10 @@ class VideoGenerationHandler(StateHandlerBase):
                 image.save(temp_image_path)
                 images = [ImageConditioningInput(path=temp_image_path, frame_idx=0, strength=1.0)]
 
-            output_path = self._make_output_path()
+            output_path = make_primary_output_path(
+                str(self.config.outputs_dir), "ltx2_video", req.output_format or OutputFormat.MP4, self._make_generation_id()
+            )
+            proxy_path = make_proxy_output_path(output_path, req.output_format or OutputFormat.MP4)
 
             total_steps = 11  # distilled: 8 steps (stage 1) + 3 steps (stage 2)
 
@@ -330,17 +358,21 @@ class VideoGenerationHandler(StateHandlerBase):
                 audio_path=audio_path_str,
                 audio_start_time=0.0,
                 audio_max_duration=None,
-                output_path=str(output_path),
+                output_path=output_path,
+                output_format=req.output_format or OutputFormat.MP4,
+                encoder=self.media_encoder,
+                proxy_path=proxy_path,
             )
 
             if self._generation.is_generation_cancelled():
-                if output_path.exists():
-                    output_path.unlink()
+                _cleanup_output(output_path)
                 raise RuntimeError("Generation was cancelled")
 
             self._generation.update_progress("complete", 100, total_steps, total_steps)
-            self._generation.complete_generation(str(output_path))
-            return GenerateVideoCompleteResponse(status="complete", video_path=str(output_path))
+            self._generation.complete_generation(output_path)
+            return GenerateVideoCompleteResponse(
+                status="complete", video_path=output_path, proxy_path=proxy_path
+            )
 
         except HTTPError as e:
             self._generation.fail_generation(e.detail)
@@ -399,6 +431,15 @@ class VideoGenerationHandler(StateHandlerBase):
         return self.config.outputs_dir / f"ltx2_video_{timestamp}_{self._make_generation_id()}.mp4"
 
     def _generate_forced_api(self, req: GenerateVideoRequest) -> GenerateVideoResponse:
+        # Honest-workflow gate (§0A.D): API mode cannot produce ProRes/EXR — there
+        # are no decoded VAE tensors to encode, only provider MP4 bytes.
+        if req.output_format != OutputFormat.MP4:
+            raise HTTPError(
+                400,
+                "ProRes/EXR output requires local generation; API mode cannot "
+                "produce primary ProRes/EXR",
+            )
+
         if self._generation.is_generation_running():
             raise HTTPError(409, "Generation already in progress")
 

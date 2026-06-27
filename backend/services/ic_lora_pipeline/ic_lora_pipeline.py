@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol
 
-from api_types import ImageConditioningInput
+from api_types import ImageConditioningInput, OutputFormat
 
 if TYPE_CHECKING:
     from services.ltx_components import CheckpointPath, ResolvedLtxComponents
+    from services.media_encoder.media_encoder import MediaEncoder
     import torch
 
 
@@ -39,6 +40,9 @@ class IcLoraPipeline(Protocol):
         mask_path: str | None = None,
         conditioning_strength: float = 1.0,
         original_video_path: str | None = None,
+        output_format: OutputFormat = OutputFormat.MP4,
+        encoder: MediaEncoder | None = None,
+        proxy_path: str | None = None,
     ) -> None:
         ...
 
@@ -58,5 +62,8 @@ class IcLoraPipeline(Protocol):
         mask_grow_px: int = 30,
         laplacian_blend_grow: int = 12,
         final_mask_blur_px: int = 6,
+        output_format: OutputFormat = OutputFormat.MP4,
+        encoder: MediaEncoder | None = None,
+        proxy_path: str | None = None,
     ) -> None:
         ...

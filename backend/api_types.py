@@ -6,7 +6,7 @@ from enum import Enum
 from typing import Annotated
 from typing import Literal, NamedTuple, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
 
 class OutputFormat(str, Enum):
@@ -161,6 +161,7 @@ class SuggestGapPromptResponse(BaseModel):
 class GenerateVideoCompleteResponse(BaseModel):
     status: Literal["complete"]
     video_path: str
+    proxy_path: str | None = None
 
 
 class GenerateVideoCancelledResponse(BaseModel):
@@ -197,6 +198,7 @@ CancelResponse: TypeAlias = CancelCancellingResponse | CancelNoActiveGenerationR
 class RetakeVideoResponse(BaseModel):
     status: Literal["complete"]
     video_path: str
+    proxy_path: str | None = None
 
 
 class RetakePayloadResponse(BaseModel):
@@ -221,6 +223,7 @@ class IcLoraExtractResponse(BaseModel):
 class IcLoraGenerateCompleteResponse(BaseModel):
     status: Literal["complete"]
     video_path: str
+    proxy_path: str | None = None
 
 
 class IcLoraGenerateCancelledResponse(BaseModel):
@@ -532,6 +535,24 @@ class GenerateVideoRequest(BaseModel):
     imagePath: str | None = None
     audioPath: str | None = None
     aspectRatio: Literal["16:9", "9:16"] = "16:9"
+    output_format: OutputFormat | None = Field(default=None, validate_default=True)
+
+    @field_validator("output_format", mode="before")
+    @classmethod
+    def _parse_output_format(cls, v: object) -> OutputFormat | None:
+        """Accept the enum value string or null under strict mode; normalize None→MP4.
+
+        The field type is ``OutputFormat | None`` with a ``None`` default so the
+        OpenAPI/TS schema marks it OPTIONAL (clients may omit it; ``?:`` in TS).
+        ``validate_default=True`` routes the omitted-default None through this
+        validator, normalizing it to MP4 — so downstream handlers always receive a
+        concrete ``OutputFormat`` (never None). Invalid strings still 422.
+        """
+        if v is None:
+            return OutputFormat.MP4
+        if isinstance(v, str) and not isinstance(v, OutputFormat):
+            return OutputFormat(v)
+        return v  # type: ignore[return-value]
 
 
 class GenerateImageRequest(BaseModel):
@@ -600,6 +621,16 @@ class RetakeRequest(BaseModel):
     duration: float
     prompt: str = ""
     mode: RetakeMode = "replace_audio_and_video"
+    output_format: OutputFormat | None = Field(default=None, validate_default=True)
+
+    @field_validator("output_format", mode="before")
+    @classmethod
+    def _parse_output_format(cls, v: object) -> OutputFormat | None:
+        if v is None:
+            return OutputFormat.MP4
+        if isinstance(v, str) and not isinstance(v, OutputFormat):
+            return OutputFormat(v)
+        return v  # type: ignore[return-value]
 
 
 ConditioningType: TypeAlias = Literal["canny", "depth"]
@@ -630,6 +661,16 @@ class IcLoraGenerateRequest(BaseModel):
     video_path: str | None = None
     conditioning_type: ConditioningType | None = None
     prompt: str = ""
+    output_format: OutputFormat | None = Field(default=None, validate_default=True)
+
+    @field_validator("output_format", mode="before")
+    @classmethod
+    def _parse_output_format(cls, v: object) -> OutputFormat | None:
+        if v is None:
+            return OutputFormat.MP4
+        if isinstance(v, str) and not isinstance(v, OutputFormat):
+            return OutputFormat(v)
+        return v  # type: ignore[return-value]
     conditioning_strength: float = 1.0
     num_inference_steps: int = 30
     cfg_guidance_scale: float = 1.0

@@ -9,6 +9,7 @@ from threading import RLock
 import time
 
 from api_types import (
+    OutputFormat,
     RetakeCancelledResponse,
     RetakeMode,
     RetakePayloadResponse,
@@ -24,6 +25,8 @@ from handlers.text_handler import TextHandler
 from runtime_config.runtime_config import RuntimeConfig
 from services.ltx_api_client.ltx_api_client import LTXAPIClientError
 from services.interfaces import LTXAPIClient
+from services.ltx_pipeline_common import make_primary_output_path, make_proxy_output_path
+from services.media_encoder.media_encoder import MediaEncoder
 from state.app_state_types import AppState
 from state.app_settings import should_video_generate_with_ltx_api
 
@@ -38,12 +41,14 @@ class RetakeHandler(StateHandlerBase):
         generation_handler: GenerationHandler,
         pipelines_handler: PipelinesHandler,
         text_handler: TextHandler,
+        media_encoder: MediaEncoder,
     ) -> None:
         super().__init__(state, lock, config)
         self._ltx_api_client = ltx_api_client
         self._generation = generation_handler
         self._pipelines = pipelines_handler
         self._text = text_handler
+        self.media_encoder = media_encoder
 
     def run(self, req: RetakeRequest) -> RetakeResponse:
         video_path = req.video_path
@@ -75,6 +80,7 @@ class RetakeHandler(StateHandlerBase):
                 duration=duration,
                 prompt=prompt,
                 mode=mode,
+                output_format=req.output_format or OutputFormat.MP4,
             )
 
         return self._run_local_retake(
@@ -83,6 +89,7 @@ class RetakeHandler(StateHandlerBase):
             duration=duration,
             prompt=prompt,
             mode=mode,
+            output_format=req.output_format or OutputFormat.MP4,
         )
 
     def _run_api_retake(
@@ -93,7 +100,17 @@ class RetakeHandler(StateHandlerBase):
         duration: float,
         prompt: str,
         mode: RetakeMode,
+        output_format: OutputFormat = OutputFormat.MP4,
     ) -> RetakeResponse:
+        # Honest-workflow gate (§0A.D): API retake returns provider MP4 bytes —
+        # no decoded VAE tensors to encode to ProRes/EXR.
+        if output_format != OutputFormat.MP4:
+            raise HTTPError(
+                400,
+                "ProRes/EXR output requires local generation; API mode cannot "
+                "produce primary ProRes/EXR",
+            )
+
         api_key = self.state.app_settings.ltx_api_key
         if not api_key:
             raise HTTPError(400, "LTX API key not configured. Set it in Settings.")
@@ -129,6 +146,7 @@ class RetakeHandler(StateHandlerBase):
         duration: float,
         prompt: str,
         mode: RetakeMode,
+        output_format: OutputFormat = OutputFormat.MP4,
     ) -> RetakeResponse:
         if self._generation.is_generation_running():
             raise HTTPError(409, "Generation already in progress")
@@ -146,7 +164,10 @@ class RetakeHandler(StateHandlerBase):
 
         generation_id = uuid.uuid4().hex[:8]
         seed = self._resolve_seed()
-        output_path = self.config.outputs_dir / f"retake_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{generation_id}.mp4"
+        output_path = make_primary_output_path(
+            str(self.config.outputs_dir), "retake", output_format, generation_id
+        )
+        proxy_path = make_proxy_output_path(output_path, output_format)
         regenerate_video, regenerate_audio = self._resolve_retake_mode(mode)
 
         try:
@@ -161,7 +182,7 @@ class RetakeHandler(StateHandlerBase):
                 start_time=start_time,
                 end_time=end_time,
                 seed=seed,
-                output_path=str(output_path),
+                output_path=output_path,
                 negative_prompt=self.config.default_negative_prompt,
                 num_inference_steps=40,
                 video_guider_params=None,
@@ -170,15 +191,26 @@ class RetakeHandler(StateHandlerBase):
                 regenerate_audio=regenerate_audio,
                 enhance_prompt=False,
                 distilled=True,
+                output_format=output_format,
+                encoder=self.media_encoder,
+                proxy_path=proxy_path,
             )
 
             if self._generation.is_generation_cancelled():
-                output_path.unlink(missing_ok=True)
+                # Remove partial primary (file or EXR dir) on cancel.
+                _p = Path(output_path)
+                if _p.is_dir():
+                    import shutil as _shutil
+                    _shutil.rmtree(_p, ignore_errors=True)
+                else:
+                    _p.unlink(missing_ok=True)
                 raise RuntimeError("Generation was cancelled")
 
             self._generation.update_progress("complete", 100, 1, 1)
-            self._generation.complete_generation(str(output_path))
-            return RetakeVideoResponse(status="complete", video_path=str(output_path))
+            self._generation.complete_generation(output_path)
+            return RetakeVideoResponse(
+                status="complete", video_path=output_path, proxy_path=proxy_path
+            )
         except HTTPError:
             self._generation.fail_generation("Retake generation failed")
             raise

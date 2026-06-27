@@ -532,6 +532,9 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
         images: list[ImageConditioningInput],
         output_path: str,
         enhance_prompt: bool = False,
+        output_format: Any = None,
+        encoder: Any = None,
+        proxy_path: Any = None,
     ) -> None:
         self._record_generate(
             {
@@ -544,6 +547,9 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
                 "images": images,
                 "output_path": output_path,
                 "enhance_prompt": enhance_prompt,
+                "output_format": output_format,
+                "encoder": encoder,
+                "proxy_path": proxy_path,
             }
         )
 

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol
 
+from api_types import OutputFormat
+
 if TYPE_CHECKING:
     from services.ltx_components import CheckpointPath, ResolvedLtxComponents
+    from services.media_encoder.media_encoder import MediaEncoder
     import torch
     from ltx_core.components.guiders import MultiModalGuiderParams
     from ltx_core.loader import LoraPathStrengthAndSDOps
@@ -42,4 +45,7 @@ class RetakePipeline(Protocol):
         regenerate_audio: bool = True,
         enhance_prompt: bool = False,
         distilled: bool = True,
+        output_format: OutputFormat = OutputFormat.MP4,
+        encoder: MediaEncoder | None = None,
+        proxy_path: str | None = None,
     ) -> None: ...

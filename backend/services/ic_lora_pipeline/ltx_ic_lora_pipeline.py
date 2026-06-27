@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 import torch.nn.functional as F
 
-from api_types import ImageConditioningInput
+from api_types import ImageConditioningInput, OutputFormat
 from services.exr_input import is_exr_input, iter_exr_frames_as_video_tensors
 from services.ltx_components import CheckpointPath, ResolvedLtxComponents
 from services.ltx_pipeline_common import default_tiling_config, encode_video_output, video_chunks_number
 from services.services_utils import AudioOrNone, TilingConfigType, device_supports_fp8
+
+if TYPE_CHECKING:
+    from services.media_encoder.media_encoder import MediaEncoder
 
 _fp8_lora_fuse_patched = False
 
@@ -402,6 +405,9 @@ class LTXIcLoraPipeline:
         mask_path: str | None = None,
         conditioning_strength: float = 1.0,
         original_video_path: str | None = None,
+        output_format: OutputFormat = OutputFormat.MP4,
+        encoder: MediaEncoder | None = None,
+        proxy_path: str | None = None,
     ) -> None:
         tiling_config = default_tiling_config()
         result = self._run_inference(
@@ -434,7 +440,11 @@ class LTXIcLoraPipeline:
             )
 
         chunks = video_chunks_number(num_frames, tiling_config)
-        encode_video_output(video=video, audio=audio, fps=int(frame_rate), output_path=output_path, video_chunks_number_value=chunks)
+        encode_video_output(
+            video=video, audio=audio, fps=int(frame_rate), output_path=output_path,
+            video_chunks_number_value=chunks, output_format=output_format,
+            encoder=encoder, proxy_path=proxy_path,
+        )
 
     # ------------------------------------------------------------------ #
     # Official two-stage IC-LoRA inpaint (LTX-2.3_ICLoRA_Inpaint_Two_Stage)
@@ -457,6 +467,9 @@ class LTXIcLoraPipeline:
         mask_grow_px: int = 30,
         laplacian_blend_grow: int = 12,
         final_mask_blur_px: int = 6,
+        output_format: OutputFormat = OutputFormat.MP4,
+        encoder: MediaEncoder | None = None,
+        proxy_path: str | None = None,
     ) -> None:
         """Official two-stage IC-LoRA inpaint pipeline.
 
@@ -841,6 +854,9 @@ class LTXIcLoraPipeline:
             fps=int(frame_rate),
             output_path=output_path,
             video_chunks_number_value=chunks,
+            output_format=output_format,
+            encoder=encoder,
+            proxy_path=proxy_path,
         )
         logger.info("[inpaint] Done — %s", output_path)
 

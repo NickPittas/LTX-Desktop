@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import TYPE_CHECKING
 
 import torch
 
-from api_types import ImageConditioningInput
+from api_types import ImageConditioningInput, OutputFormat
 from services.ltx_components import CheckpointPath, ResolvedLtxComponents
 from services.ltx_pipeline_common import default_tiling_config, encode_video_output, video_chunks_number
 from services.services_utils import AudioOrNone, TilingConfigType, device_supports_fp8
+
+if TYPE_CHECKING:
+    from services.media_encoder.media_encoder import MediaEncoder
 
 
 class LTXa2vPipeline:
@@ -151,6 +155,9 @@ class LTXa2vPipeline:
         audio_start_time: float,
         audio_max_duration: float | None,
         output_path: str,
+        output_format: OutputFormat = OutputFormat.MP4,
+        encoder: MediaEncoder | None = None,
+        proxy_path: str | None = None,
     ) -> None:
         tiling_config = default_tiling_config()
         video, audio = self._run_inference(
@@ -169,4 +176,8 @@ class LTXa2vPipeline:
             tiling_config=tiling_config,
         )
         chunks = video_chunks_number(num_frames, tiling_config)
-        encode_video_output(video=video, audio=audio, fps=int(frame_rate), output_path=output_path, video_chunks_number_value=chunks)
+        encode_video_output(
+            video=video, audio=audio, fps=int(frame_rate), output_path=output_path,
+            video_chunks_number_value=chunks, output_format=output_format,
+            encoder=encoder, proxy_path=proxy_path,
+        )

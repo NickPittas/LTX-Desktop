@@ -16,8 +16,10 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 import torch
 
+from api_types import OutputFormat
 from ltx_core.components.guiders import MultiModalGuiderParams
 from ltx_core.loader import LoraPathStrengthAndSDOps
 from ltx_core.model.video_vae import TilingConfig, get_video_chunks_number
@@ -29,6 +31,9 @@ from services.exr_input import resolve_video_input_path
 from services.ltx_components import CheckpointPath, ResolvedLtxComponents
 from services.ltx_pipeline_common import encode_video_output
 from services.retake_pipeline.retake_pipeline import RetakePipeline
+
+if TYPE_CHECKING:
+    from services.media_encoder.media_encoder import MediaEncoder
 
 
 
@@ -344,6 +349,9 @@ class LTXRetakePipeline:
         regenerate_audio: bool = True,
         enhance_prompt: bool = False,
         distilled: bool = True,
+        output_format: OutputFormat = OutputFormat.MP4,
+        encoder: MediaEncoder | None = None,
+        proxy_path: str | None = None,
     ) -> None:
         # CM-1b: resolve EXR source → temp MP4 BEFORE the metadata read (an EXR
         # dir/file would crash get_videostream_metadata). Non-EXR returns the
@@ -382,6 +390,9 @@ class LTXRetakePipeline:
                 fps=int(fps),
                 output_path=output_path,
                 video_chunks_number_value=video_chunks,
+                output_format=output_format,
+                encoder=encoder,
+                proxy_path=proxy_path,
             )
         finally:
             # Clean up the temp MP4 produced for an EXR source (if any).

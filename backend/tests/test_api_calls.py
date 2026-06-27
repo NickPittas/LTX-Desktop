@@ -269,6 +269,57 @@ class TestRetake:
         assert retake_call["regenerate_video"] is True
         assert retake_call["regenerate_audio"] is False
 
+    def test_local_retake_prores_output_format(self, client, test_state, fake_services, create_fake_model_files):
+        """Phase 2a: local retake threads output_format/proxy_path/encoder."""
+        create_fake_model_files(include_zit=False)
+        test_state.state.app_settings.use_local_text_encoder = True
+        test_state.config.local_generations_mode = "full_models_loading"
+
+        video_path = self._make_valid_video(test_state)
+        r = client.post(
+            "/api/retake",
+            json={**self._base_payload(video_path), "output_format": "prores_422_hq"},
+        )
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert data["video_path"].endswith(".mov")
+        assert data["proxy_path"] is not None
+        assert data["proxy_path"].endswith("_proxy.mp4")
+
+        call = fake_services.retake_pipeline.generate_calls[-1]
+        assert str(call["output_format"]) == "OutputFormat.PRORES_422_HQ"
+        assert call["proxy_path"] == data["proxy_path"]
+        assert call["encoder"] is fake_services.media_encoder
+
+    def test_local_retake_exr_output_format(self, client, test_state, create_fake_model_files):
+        create_fake_model_files(include_zit=False)
+        test_state.state.app_settings.use_local_text_encoder = True
+        test_state.config.local_generations_mode = "full_models_loading"
+
+        video_path = self._make_valid_video(test_state)
+        r = client.post(
+            "/api/retake",
+            json={**self._base_payload(video_path), "output_format": "exr_zip_half"},
+        )
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert data["video_path"].endswith("_exr")
+        assert data["proxy_path"] is not None
+
+    def test_api_retake_gate_rejects_prores(self, client, test_state):
+        """API retake + non-MP4 → 400 (honest-workflow gate)."""
+        test_state.config.local_generations_mode = "full_models_loading"
+        test_state.state.app_settings.user_prefers_ltx_api_video_generations = True
+        test_state.state.app_settings.ltx_api_key = "test-key"
+
+        video_path = self._make_video(test_state)
+        r = client.post(
+            "/api/retake",
+            json={**self._base_payload(video_path), "output_format": "prores_422_hq"},
+        )
+        assert r.status_code == 400
+        assert "API mode cannot produce primary ProRes/EXR" in r.json()["message"]
+
     def test_prefers_api_video_routes_retake_to_api(self, client, test_state, fake_services):
         test_state.config.local_generations_mode = "full_models_loading"
         test_state.state.app_settings.user_prefers_ltx_api_video_generations = True

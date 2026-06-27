@@ -75,6 +75,37 @@ class TestIcLoraGenerate:
         assert response.json()["status"] == "complete"
         assert Path(response.json()["video_path"]).exists()
 
+    def test_generate_prores_output_format(self, client, test_state, fake_services, create_fake_model_files, create_fake_ic_lora_files):
+        """Phase 2a: IC-LoRA generate threads output_format/proxy_path/encoder."""
+        create_fake_model_files()
+        create_fake_ic_lora_files()
+        test_state.state.app_settings.use_local_text_encoder = True
+
+        video_path = test_state.config.outputs_dir / "test_video.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(str(video_path), FakeCapture(frames=["frame-a", "frame-b"]))
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "conditioning_type": "canny",
+                "prompt": "test prompt",
+                "images": [{"path": "/fake/img.png", "frame": 0, "strength": 1.0}],
+                "output_format": "prores_422_hq",
+            },
+        )
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["video_path"].endswith(".mov")
+        assert data["proxy_path"] is not None
+        assert data["proxy_path"].endswith("_proxy.mp4")
+
+        call = fake_services.ic_lora_pipeline.generate_calls[-1]
+        assert str(call["output_format"]) == "OutputFormat.PRORES_422_HQ"
+        assert call["proxy_path"] == data["proxy_path"]
+        assert call["encoder"] is fake_services.media_encoder
+
     def test_adapter_id_from_active_profile(self, client, test_state, fake_services, create_fake_model_files, create_fake_ic_lora_files):
         create_fake_model_files()
         create_fake_ic_lora_files()

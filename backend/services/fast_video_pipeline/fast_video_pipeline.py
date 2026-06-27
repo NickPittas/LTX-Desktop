@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar, Literal, Protocol
 
-from api_types import ImageConditioningInput
+from api_types import ImageConditioningInput, OutputFormat
 
 if TYPE_CHECKING:
     from services.ltx_components import CheckpointPath, ResolvedLtxComponents
+    from services.media_encoder.media_encoder import MediaEncoder
     import torch
 
 
@@ -38,6 +39,9 @@ class FastVideoPipeline(Protocol):
         images: list[ImageConditioningInput],
         output_path: str,
         enhance_prompt: bool = False,
+        output_format: OutputFormat = OutputFormat.MP4,
+        encoder: MediaEncoder | None = None,
+        proxy_path: str | None = None,
     ) -> None:
         ...
 

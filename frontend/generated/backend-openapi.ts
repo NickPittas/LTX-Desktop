@@ -808,6 +808,8 @@ export interface components {
         };
         /** GenerateVideoCompleteResponse */
         GenerateVideoCompleteResponse: {
+            /** Proxy Path */
+            proxy_path?: string | null;
             /**
              * Status
              * @constant
@@ -869,6 +871,7 @@ export interface components {
              * @default
              */
             negativePrompt: string;
+            output_format?: components["schemas"]["OutputFormat"] | null;
             /** Prompt */
             prompt: string;
             /**
@@ -1018,6 +1021,8 @@ export interface components {
         };
         /** IcLoraGenerateCompleteResponse */
         IcLoraGenerateCompleteResponse: {
+            /** Proxy Path */
+            proxy_path?: string | null;
             /**
              * Status
              * @constant
@@ -1097,6 +1102,7 @@ export interface components {
              * @default 30
              */
             num_inference_steps: number;
+            output_format?: components["schemas"]["OutputFormat"] | null;
             /**
              * Prompt
              * @default
@@ -1393,6 +1399,17 @@ export interface components {
             /** Name */
             name: string;
         };
+        /**
+         * OutputFormat
+         * @description Primary output container/codec produced by the media encoder.
+         *
+         *     Lives in ``api_types`` (not ``services.media_encoder``) per §0A.F — services
+         *     import ``api_types`` so this keeps the DTO/service layering clean and avoids a
+         *     circular import. ``str`` enum so pydantic/OpenAPI serialize it as a plain
+         *     string.
+         * @enum {string}
+         */
+        OutputFormat: "mp4" | "prores_proxy" | "prores_lt" | "prores_422" | "prores_422_hq" | "prores_4444" | "prores_4444_xq" | "exr_zip_half" | "exr_zip_float";
         /** RetakeCancelledResponse */
         RetakeCancelledResponse: {
             /**
@@ -1423,6 +1440,7 @@ export interface components {
              * @enum {string}
              */
             mode: "replace_audio_and_video" | "replace_video" | "replace_audio";
+            output_format?: components["schemas"]["OutputFormat"] | null;
             /**
              * Prompt
              * @default
@@ -1435,6 +1453,8 @@ export interface components {
         };
         /** RetakeVideoResponse */
         RetakeVideoResponse: {
+            /** Proxy Path */
+            proxy_path?: string | null;
             /**
              * Status
              * @constant

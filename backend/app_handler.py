@@ -173,6 +173,7 @@ class AppHandler:
             pipelines_handler=self.pipelines,
             text_handler=self.text,
             ltx_api_client=ltx_api_client,
+            media_encoder=media_encoder,
             config=config,
         )
 
@@ -210,6 +211,7 @@ class AppHandler:
             generation_handler=self.generation,
             pipelines_handler=self.pipelines,
             text_handler=self.text,
+            media_encoder=media_encoder,
         )
 
         self.ic_lora = IcLoraHandler(
@@ -219,6 +221,7 @@ class AppHandler:
             pipelines_handler=self.pipelines,
             text_handler=self.text,
             video_processor=video_processor,
+            media_encoder=media_encoder,
             config=config,
         )
 

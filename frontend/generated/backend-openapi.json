@@ -824,6 +824,17 @@
       },
       "GenerateVideoCompleteResponse": {
         "properties": {
+          "proxy_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proxy Path"
+          },
           "status": {
             "const": "complete",
             "title": "Status",
@@ -959,6 +970,16 @@
             "default": "",
             "title": "Negativeprompt",
             "type": "string"
+          },
+          "output_format": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OutputFormat"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "prompt": {
             "minLength": 1,
@@ -1323,6 +1344,17 @@
       },
       "IcLoraGenerateCompleteResponse": {
         "properties": {
+          "proxy_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proxy Path"
+          },
           "status": {
             "const": "complete",
             "title": "Status",
@@ -1475,6 +1507,16 @@
             "default": 30,
             "title": "Num Inference Steps",
             "type": "integer"
+          },
+          "output_format": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OutputFormat"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "prompt": {
             "default": "",
@@ -2514,6 +2556,22 @@
         "title": "ModelStatusItem",
         "type": "object"
       },
+      "OutputFormat": {
+        "description": "Primary output container/codec produced by the media encoder.\n\nLives in ``api_types`` (not ``services.media_encoder``) per §0A.F — services\nimport ``api_types`` so this keeps the DTO/service layering clean and avoids a\ncircular import. ``str`` enum so pydantic/OpenAPI serialize it as a plain\nstring.",
+        "enum": [
+          "mp4",
+          "prores_proxy",
+          "prores_lt",
+          "prores_422",
+          "prores_422_hq",
+          "prores_4444",
+          "prores_4444_xq",
+          "exr_zip_half",
+          "exr_zip_float"
+        ],
+        "title": "OutputFormat",
+        "type": "string"
+      },
       "RetakeCancelledResponse": {
         "properties": {
           "status": {
@@ -2564,6 +2622,16 @@
             "title": "Mode",
             "type": "string"
           },
+          "output_format": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OutputFormat"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "prompt": {
             "default": "",
             "title": "Prompt",
@@ -2588,6 +2656,17 @@
       },
       "RetakeVideoResponse": {
         "properties": {
+          "proxy_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proxy Path"
+          },
           "status": {
             "const": "complete",
             "title": "Status",

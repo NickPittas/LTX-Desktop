@@ -504,6 +504,75 @@ class TestA2VGenerate:
         assert r.json()["status"] == "cancelled"
 
 
+class TestOutputFormat:
+    """Phase 2a: output_format / proxy_path plumbing through video generation."""
+
+    def test_t2v_prores_422_hq_output(self, client, test_state, fake_services, create_fake_model_files):
+        create_fake_model_files()
+        _enable_local_text_encoding(test_state)
+
+        r = client.post(
+            "/api/generate",
+            json={**_T2V_JSON, "output_format": "prores_422_hq"},
+        )
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert data["video_path"].endswith(".mov")
+        assert data["proxy_path"] is not None
+        assert data["proxy_path"].endswith("_proxy.mp4")
+
+        call = fake_services.fast_video_pipeline.generate_calls[-1]
+        assert str(call["output_format"]) == "OutputFormat.PRORES_422_HQ"
+        assert call["proxy_path"] == data["proxy_path"]
+        # Handler passes the (fake) encoder explicitly — exercises the DI wiring.
+        assert call["encoder"] is fake_services.media_encoder
+
+    def test_t2v_exr_half_output(self, client, test_state, fake_services, create_fake_model_files):
+        create_fake_model_files()
+        _enable_local_text_encoding(test_state)
+
+        r = client.post(
+            "/api/generate",
+            json={**_T2V_JSON, "output_format": "exr_zip_half"},
+        )
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert data["video_path"].endswith("_exr")
+        assert data["proxy_path"] is not None
+        assert data["proxy_path"].endswith("_proxy.mp4")
+
+    def test_t2v_mp4_default_no_proxy(self, client, test_state, fake_services, create_fake_model_files):
+        create_fake_model_files()
+        _enable_local_text_encoding(test_state)
+
+        r = client.post("/api/generate", json=_T2V_JSON)
+        assert r.status_code == 200, r.text
+        data = r.json()
+        # MP4 default: no proxy, primary is .mp4 (byte-identical path/behavior).
+        assert data["video_path"].endswith(".mp4")
+        assert data["proxy_path"] is None
+
+    def test_api_gate_rejects_prores(self, client, test_state, fake_services):
+        test_state.config.local_generations_mode = "full_models_loading"
+        test_state.state.app_settings.user_prefers_ltx_api_video_generations = True
+        test_state.state.app_settings.ltx_api_key = "api-key"
+
+        r = client.post(
+            "/api/generate",
+            json={
+                "prompt": "A mountain lake",
+                "resolution": "1080p",
+                "model": "fast",
+                "duration": 6,
+                "fps": 50,
+                "cameraMotion": "dolly_in",
+                "output_format": "prores_422_hq",
+            },
+        )
+        assert r.status_code == 400
+        assert "API mode cannot produce primary ProRes/EXR" in r.json()["message"]
+
+
 class TestForcedApiGenerate:
     def test_prefers_api_video_routes_to_ltx_api(self, client, test_state, fake_services):
         test_state.config.local_generations_mode = "full_models_loading"

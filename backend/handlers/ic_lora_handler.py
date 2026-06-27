@@ -6,7 +6,6 @@ import base64
 import logging
 import time
 import uuid
-from datetime import datetime
 from pathlib import Path
 from threading import RLock
 from typing import TYPE_CHECKING, Literal
@@ -21,6 +20,7 @@ from api_types import (
     IcLoraGenerateResponse,
     ImageConditioningInput,
     ModelComponentPaths,
+    OutputFormat,
 )
 from _routes._errors import HTTPError
 from handlers.base import StateHandlerBase
@@ -38,6 +38,8 @@ from runtime_config.model_download_specs import (
 from runtime_config.runtime_config import RuntimeConfig
 from state.conditioning_cache import ConditioningCacheEntry, ConditioningCacheKey
 from services.interfaces import VideoProcessor
+from services.ltx_pipeline_common import make_primary_output_path, make_proxy_output_path
+from services.media_encoder.media_encoder import MediaEncoder
 from services.services_utils import FrameArray
 from state.app_state_types import AppState, ICLoraState
 
@@ -128,6 +130,7 @@ class IcLoraHandler(StateHandlerBase):
         pipelines_handler: PipelinesHandler,
         text_handler: TextHandler,
         video_processor: VideoProcessor,
+        media_encoder: MediaEncoder,
         config: RuntimeConfig,
     ) -> None:
         super().__init__(state, lock, config)
@@ -135,6 +138,7 @@ class IcLoraHandler(StateHandlerBase):
         self._pipelines = pipelines_handler
         self._text = text_handler
         self._video_processor = video_processor
+        self.media_encoder = media_encoder
 
     def _build_conditioning_frame(
         self,
@@ -358,10 +362,11 @@ class IcLoraHandler(StateHandlerBase):
 
             self._generation.update_progress("inference", 15, 0, 1)
 
-            output_path = (
-                self.config.outputs_dir
-                / f"ic_lora_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.mp4"
+            output_format = req.output_format or OutputFormat.MP4
+            output_path = make_primary_output_path(
+                str(self.config.outputs_dir), "ic_lora", output_format, uuid.uuid4().hex[:8]
             )
+            proxy_path = make_proxy_output_path(output_path, output_format)
 
             t_inference_start = time.perf_counter()
             ic_state.pipeline.generate(
@@ -373,10 +378,13 @@ class IcLoraHandler(StateHandlerBase):
                 frame_rate=frame_rate,
                 images=images,
                 video_conditioning=[],
-                output_path=str(output_path),
+                output_path=output_path,
                 mask_path=None,
                 conditioning_strength=req.conditioning_strength,
                 original_video_path=None,
+                output_format=output_format,
+                encoder=self.media_encoder,
+                proxy_path=proxy_path,
             )
             t_inference_end = time.perf_counter()
             logger.info("[ic-lora] Inference: %.2fs", t_inference_end - t_inference_start)
@@ -391,8 +399,10 @@ class IcLoraHandler(StateHandlerBase):
             )
 
             self._generation.update_progress("complete", 100, 1, 1)
-            self._generation.complete_generation(str(output_path))
-            return IcLoraGenerateCompleteResponse(status="complete", video_path=str(output_path))
+            self._generation.complete_generation(output_path)
+            return IcLoraGenerateCompleteResponse(
+                status="complete", video_path=output_path, proxy_path=proxy_path
+            )
 
         except HTTPError:
             self._generation.fail_generation("IC-LoRA generation failed")
@@ -581,9 +591,11 @@ class IcLoraHandler(StateHandlerBase):
             width = _align_up(input_width, align_to)
             height = _align_up(input_height, align_to)
 
-            output_path = (
-                self.config.outputs_dir / f"ic_lora_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.mp4"
+            output_format = req.output_format or OutputFormat.MP4
+            output_path = make_primary_output_path(
+                str(self.config.outputs_dir), "ic_lora", output_format, uuid.uuid4().hex[:8]
             )
+            proxy_path = make_proxy_output_path(output_path, output_format)
 
             t_inference_start = time.perf_counter()
             if workflow == "in_outpainting":
@@ -597,11 +609,14 @@ class IcLoraHandler(StateHandlerBase):
                     images=images,
                     video_path=str(video_path),
                     mask_path=str(req.mask_path),
-                    output_path=str(output_path),
+                    output_path=output_path,
                     conditioning_strength=req.conditioning_strength,
                     mask_grow_px=req.mask_grow_px,
                     laplacian_blend_grow=req.laplacian_blend_grow,
                     final_mask_blur_px=req.final_mask_blur_px,
+                    output_format=output_format,
+                    encoder=self.media_encoder,
+                    proxy_path=proxy_path,
                 )
             else:
                 ic_state.pipeline.generate(
@@ -613,10 +628,13 @@ class IcLoraHandler(StateHandlerBase):
                     frame_rate=fps,
                     images=images,
                     video_conditioning=[(control_video_path, req.conditioning_strength)],
-                    output_path=str(output_path),
+                    output_path=output_path,
                     mask_path=req.mask_path,
                     conditioning_strength=req.conditioning_strength,
                     original_video_path=None,
+                    output_format=output_format,
+                    encoder=self.media_encoder,
+                    proxy_path=proxy_path,
                 )
             t_inference_end = time.perf_counter()
             logger.info("[ic-lora] Inference: %.2fs", t_inference_end - t_inference_start)
@@ -633,8 +651,10 @@ class IcLoraHandler(StateHandlerBase):
             )
 
             self._generation.update_progress("complete", 100, 1, 1)
-            self._generation.complete_generation(str(output_path))
-            return IcLoraGenerateCompleteResponse(status="complete", video_path=str(output_path))
+            self._generation.complete_generation(output_path)
+            return IcLoraGenerateCompleteResponse(
+                status="complete", video_path=output_path, proxy_path=proxy_path
+            )
 
         except HTTPError:
             self._generation.fail_generation("IC-LoRA generation failed")

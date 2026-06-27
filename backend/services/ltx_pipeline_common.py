@@ -34,6 +34,43 @@ def video_chunks_number(num_frames: int, tiling_config: TilingConfigType | None)
     return int(get_video_chunks_number(num_frames, tiling_config))
 
 
+def make_primary_output_path(
+    outputs_dir: str, prefix: str, output_format: OutputFormat, gen_id: str
+) -> str:
+    """Build the primary output path (file or EXR dir) by format.
+
+    MP4 → ``<outputs>/<prefix>_<ts>_<id>.mp4``; ProRes → ``.mov``; EXR → an
+    ``<prefix>_<ts>_<id>_exr`` directory. Used by handlers (Phase 2) so path
+    construction is uniform & DRY.
+    """
+    from datetime import datetime
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stem = f"{prefix}_{timestamp}_{gen_id}"
+    if output_format in (OutputFormat.EXR_ZIP_HALF, OutputFormat.EXR_ZIP_FLOAT):
+        name = f"{stem}_exr"
+    elif output_format == OutputFormat.MP4:
+        name = f"{stem}.mp4"
+    else:
+        name = f"{stem}.mov"  # all ProRes profiles
+    return f"{outputs_dir}/{name}"
+
+
+def make_proxy_output_path(primary_path: str, output_format: OutputFormat) -> str | None:
+    """Build the proxy MP4 path, or ``None`` for MP4 (no proxy).
+
+    For non-MP4 formats the proxy sits alongside the primary:
+    ``<primary_name>_proxy.mp4``. For an EXR dir primary (``<stem>_exr``) the
+    proxy is ``<stem>_exr_proxy.mp4``.
+    """
+    if output_format == OutputFormat.MP4:
+        return None
+    from pathlib import Path
+
+    p = Path(primary_path)
+    return str(p.parent / f"{p.name}_proxy.mp4")
+
+
 def encode_video_output(
     *,
     video: torch.Tensor | Iterator[torch.Tensor],
