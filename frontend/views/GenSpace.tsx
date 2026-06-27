@@ -1275,15 +1275,12 @@ export function GenSpace() {
 
     ;(async () => {
       try {
-        const copied = await addVisualAssetToProject(videoPath, currentProjectId, 'video')
+        const copied = await addVisualAssetToProject(videoPath, currentProjectId, 'video', proxyPath || undefined)
         if (!copied) throw new Error('Could not persist generated video to project storage')
-        const copiedProxy = proxyPath
-          ? await addVisualAssetToProject(proxyPath, currentProjectId, 'video')
-          : null
         addAsset(currentProjectId, {
           type: 'video',
           path: copied.path,
-          proxyPath: copiedProxy?.path,
+          proxyPath: copied.proxyPath ?? undefined,
           bigThumbnailPath: copied.bigThumbnailPath,
           smallThumbnailPath: copied.smallThumbnailPath,
           width: copied.width,
@@ -1307,7 +1304,7 @@ export function GenSpace() {
           },
           takes: [{
             path: copied.path,
-            proxyPath: copiedProxy?.path,
+            proxyPath: copied.proxyPath ?? undefined,
             bigThumbnailPath: copied.bigThumbnailPath,
             smallThumbnailPath: copied.smallThumbnailPath,
             width: copied.width,
@@ -1416,7 +1413,7 @@ export function GenSpace() {
           : {}),
       }, async (result) => {
         // ponytail: runs async in the hook's closure, survives GenSpace unmount (Bug A)
-        const copied = await addVisualAssetToProject(result.videoPath, currentProjectId!, 'video')
+        const copied = await addVisualAssetToProject(result.videoPath, currentProjectId!, 'video', result.proxyPath || undefined)
         if (!copied) {
           logger.error('Could not persist IC-LoRA result to project storage')
           setLocalError(createLocalGenerationError('Failed to save IC-LoRA output to project storage.'))
@@ -1424,9 +1421,6 @@ export function GenSpace() {
           resetIcLora()
           return
         }
-        const copiedProxy = result.proxyPath
-          ? await addVisualAssetToProject(result.proxyPath, currentProjectId!, 'video')
-          : null
 
         if (activeIcLoraSource?.assetId) {
           const sourceAsset = activeProject?.assets?.find(a => a.id === activeIcLoraSource.assetId)
@@ -1434,7 +1428,7 @@ export function GenSpace() {
             const newTakeIndex = sourceAsset.takes ? sourceAsset.takes.length : 1
             addTakeToAsset(currentProjectId!, sourceAsset.id, {
               path: copied.path,
-              proxyPath: copiedProxy?.path,
+              proxyPath: copied.proxyPath ?? undefined,
               bigThumbnailPath: copied.bigThumbnailPath,
               smallThumbnailPath: copied.smallThumbnailPath,
               width: copied.width,
@@ -1453,7 +1447,7 @@ export function GenSpace() {
           addAsset(currentProjectId!, {
             type: 'video',
             path: copied.path,
-            proxyPath: copiedProxy?.path,
+            proxyPath: copied.proxyPath ?? undefined,
             bigThumbnailPath: copied.bigThumbnailPath,
             smallThumbnailPath: copied.smallThumbnailPath,
             width: copied.width,
@@ -1475,7 +1469,7 @@ export function GenSpace() {
             },
             takes: [{
               path: copied.path,
-              proxyPath: copiedProxy?.path,
+              proxyPath: copied.proxyPath ?? undefined,
               bigThumbnailPath: copied.bigThumbnailPath,
               smallThumbnailPath: copied.smallThumbnailPath,
               width: copied.width,
@@ -1514,7 +1508,7 @@ export function GenSpace() {
           duration: retakeInput.duration,
           videoDuration: retakeInput.videoDuration,
         }
-        const copied = await addVisualAssetToProject(result.videoPath, currentProjectId!, 'video')
+        const copied = await addVisualAssetToProject(result.videoPath, currentProjectId!, 'video', result.proxyPath || undefined)
         if (!copied) {
           logger.error('Could not persist retake result to project storage')
           setLocalError(createLocalGenerationError('Failed to save retake output to project storage.'))
@@ -1522,9 +1516,6 @@ export function GenSpace() {
           resetRetake()
           return
         }
-        const copiedProxy = result.proxyPath
-          ? await addVisualAssetToProject(result.proxyPath, currentProjectId!, 'video')
-          : null
 
         if (activeRetakeSource?.assetId) {
           const sourceAsset = activeProject?.assets?.find(a => a.id === activeRetakeSource.assetId)
@@ -1532,7 +1523,7 @@ export function GenSpace() {
             const newTakeIndex = sourceAsset.takes ? sourceAsset.takes.length : 1
             addTakeToAsset(currentProjectId!, sourceAsset.id, {
               path: copied.path,
-              proxyPath: copiedProxy?.path,
+              proxyPath: copied.proxyPath ?? undefined,
               bigThumbnailPath: copied.bigThumbnailPath,
               smallThumbnailPath: copied.smallThumbnailPath,
               width: copied.width,
@@ -1551,7 +1542,7 @@ export function GenSpace() {
           addAsset(currentProjectId!, {
             type: 'video',
             path: copied.path,
-            proxyPath: copiedProxy?.path,
+            proxyPath: copied.proxyPath ?? undefined,
             bigThumbnailPath: copied.bigThumbnailPath,
             smallThumbnailPath: copied.smallThumbnailPath,
             width: copied.width,
@@ -1575,7 +1566,7 @@ export function GenSpace() {
             },
             takes: [{
               path: copied.path,
-              proxyPath: copiedProxy?.path,
+              proxyPath: copied.proxyPath ?? undefined,
               bigThumbnailPath: copied.bigThumbnailPath,
               smallThumbnailPath: copied.smallThumbnailPath,
               width: copied.width,

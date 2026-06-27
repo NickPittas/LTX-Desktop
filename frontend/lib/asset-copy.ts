@@ -4,6 +4,7 @@ export type ProjectAssetType = 'video' | 'image'
 
 export interface ProjectAssetCopyResult {
   path: string
+  proxyPath?: string | null
   bigThumbnailPath: string
   smallThumbnailPath: string
   width: number
@@ -12,17 +13,22 @@ export interface ProjectAssetCopyResult {
 
 /**
  * Copy a video/image file to project storage and return precomputed thumbnail paths.
+ * When ``proxyPath`` is supplied (ProRes/EXR primary), the primary is preserved
+ * verbatim (no transcode) and the proxy is copied alongside — thumbnails are
+ * generated from the proxy.
  */
 export async function addVisualAssetToProject(
   srcPath: string,
   projectId: string,
   type: ProjectAssetType,
+  proxyPath?: string,
 ): Promise<ProjectAssetCopyResult | null> {
   try {
-    const result = await window.electronAPI.addVisualAssetToProject({ srcPath, projectId, type })
+    const result = await window.electronAPI.addVisualAssetToProject({ srcPath, projectId, type, proxyPath })
     if (result.success) {
       return {
         path: result.path,
+        proxyPath: result.proxyPath,
         bigThumbnailPath: result.bigThumbnailPath,
         smallThumbnailPath: result.smallThumbnailPath,
         width: result.width,

@@ -176,9 +176,10 @@ export const electronAPISchemas = {
 
   // Project assets
   addVisualAssetToProject: {
-    input: z.object({ srcPath: z.string(), projectId: z.string(), type: z.enum(['video', 'image']) }),
+    input: z.object({ srcPath: z.string(), projectId: z.string(), type: z.enum(['video', 'image']), proxyPath: z.string().optional() }),
     output: ipcResult({
       path: z.string(),
+      proxyPath: z.string().nullable().optional(),
       bigThumbnailPath: z.string(),
       smallThumbnailPath: z.string(),
       width: z.number(),

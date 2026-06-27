@@ -79,10 +79,7 @@ function resolveLocalSourcePath(srcPath: string): string {
 
   const resolved = path.resolve(normalized)
   if (!fs.existsSync(resolved)) {
-    throw new Error(`Source file does not exist: ${resolved}`)
-  }
-  if (!fs.statSync(resolved).isFile()) {
-    throw new Error(`Source path is not a file: ${resolved}`)
+    throw new Error(`Source path does not exist: ${resolved}`)
   }
   return resolved
 }
@@ -104,7 +101,12 @@ function copyToProjectAssetDirectory(srcPath: string, projectId: string): string
   fs.mkdirSync(destDir, { recursive: true })
   const fileName = path.basename(srcPath)
   const destPath = getUniqueDestinationPath(destDir, fileName)
-  fs.copyFileSync(srcPath, destPath)
+  if (fs.statSync(srcPath).isDirectory()) {
+    // EXR sequence directory — recursive copy preserving frame filenames.
+    fs.cpSync(srcPath, destPath, { recursive: true })
+  } else {
+    fs.copyFileSync(srcPath, destPath)
+  }
   return destPath
 }
 
@@ -150,8 +152,10 @@ async function transcodeVideoInPlace(videoPath: string): Promise<void> {
   fs.renameSync(tmpPath, videoPath)
 }
 
-// ponytail: copied project asset doubles as playback proxy; add proxyPath
-// field later if original-in-project preservation matters.
+// The copied project asset doubles as playback proxy for the legacy MP4 path
+// (transcode-in-place). When a proxyPath is supplied (ProRes/EXR primary), the
+// primary is preserved verbatim and the proxy is copied alongside — the primary
+// is NEVER transcoded/destroyed.
 
 function createVisualThumbnails(assetPath: string, type: 'video' | 'image'): { bigThumbnailPath: string; smallThumbnailPath: string } {
   const { bigThumbnailPath: generatedBigThumbnailPath, smallThumbnailPath } = getThumbnailPaths(assetPath)
@@ -314,23 +318,35 @@ export function registerFileHandlers(): void {
     return searchDirectoryForFilesImpl(directory, filenames)
   })
 
-  handle('addVisualAssetToProject', async ({ srcPath, projectId, type }) => {
+  handle('addVisualAssetToProject', async ({ srcPath, projectId, type, proxyPath }) => {
     try {
       const resolvedSrc = resolveLocalSourcePath(srcPath)
       const destPath = copyToProjectAssetDirectory(resolvedSrc, projectId)
 
-      // Transcode video project copy to H.264/AAC for reliable browser playback
-      if (type === 'video') {
+      let projectProxyPath: string | undefined
+      let thumbnailSourcePath = destPath
+
+      if (proxyPath) {
+        // Proxy-supplied path (ProRes .mov / EXR dir primary): preserve the
+        // primary VERBATIM — do NOT call transcodeVideoInPlace. Copy the proxy
+        // MP4 alongside and use it for thumbnails/dimensions (browser-playable).
+        const resolvedProxy = resolveLocalSourcePath(proxyPath)
+        projectProxyPath = copyToProjectAssetDirectory(resolvedProxy, projectId)
+        thumbnailSourcePath = projectProxyPath
+      } else if (type === 'video') {
+        // Legacy / no-proxy path: transcode video project copy to H.264/AAC for
+        // reliable browser playback (current behavior, byte-for-byte unchanged).
         await transcodeVideoInPlace(destPath)
       }
 
-      // Thumbnails/dimensions generated from final transcoded copy
-      const { bigThumbnailPath, smallThumbnailPath } = createVisualThumbnails(destPath, type)
-      const { width, height } = getVisualAssetDimensions(destPath, type)
+      // Thumbnails/dimensions generated from the browser-playable source.
+      const { bigThumbnailPath, smallThumbnailPath } = createVisualThumbnails(thumbnailSourcePath, type)
+      const { width, height } = getVisualAssetDimensions(thumbnailSourcePath, type)
 
       return {
         success: true,
         path: destPath,
+        proxyPath: projectProxyPath,
         bigThumbnailPath,
         smallThumbnailPath,
         width,
