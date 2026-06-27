@@ -105,3 +105,18 @@ Key patterns:
 - Electron builder config: `electron-builder.yml`
 - Video editor (largest frontend file): `frontend/views/VideoEditor.tsx`
 - Project types: `frontend/types/project.ts`
+
+## Repository Map
+
+A full hierarchical codemap is available at `codemap.md` in the project root, with
+per-folder detail in `<folder>/codemap.md` files across `backend/`, `frontend/`,
+`electron/`, and `shared/`.
+
+Before working on any task, read `codemap.md` to understand:
+- Project architecture, system entry points, and core architectural conventions
+- Directory responsibilities and design patterns
+- End-to-end data/control flow (renderer → backend routes → AppHandler → handlers → services + state)
+- Integration points and the encode-output chokepoint relevant to EXR/MOV work
+
+For deep work on a specific folder, also read that folder's `codemap.md`.
+Change detection state lives in `.slim/codemap.json` (regenerate via the codemap skill).
