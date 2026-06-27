@@ -203,6 +203,28 @@ class TestRetake:
         assert retake_call["prompt"] == "epic explosion"
         assert retake_call["mode"] == "replace_video"
 
+    def test_empty_prompt_rejected(self, client, test_state):
+        self._force_api(test_state)
+        test_state.state.app_settings.ltx_api_key = "test-key"
+        video_path = self._make_video(test_state)
+        payload = self._base_payload(video_path)
+        payload["prompt"] = ""
+
+        r = client.post("/api/retake", json=payload)
+        assert r.status_code == 400
+        assert len(test_state.ltx_api_client.retake_calls) == 0
+
+    def test_whitespace_prompt_rejected(self, client, test_state):
+        self._force_api(test_state)
+        test_state.state.app_settings.ltx_api_key = "test-key"
+        video_path = self._make_video(test_state)
+        payload = self._base_payload(video_path)
+        payload["prompt"] = "   "
+
+        r = client.post("/api/retake", json=payload)
+        assert r.status_code == 400
+        assert len(test_state.ltx_api_client.retake_calls) == 0
+
     def test_local_retake_happy_path(self, client, test_state, create_fake_model_files):
         create_fake_model_files(include_zit=False)
         test_state.state.app_settings.use_local_text_encoder = True
@@ -214,6 +236,18 @@ class TestRetake:
         data = r.json()
         assert data["status"] == "complete"
         assert data["video_path"]
+
+    def test_local_retake_accepts_non_8n1_frames(self, client, test_state, create_fake_model_files):
+        """Handler no longer rejects source videos with frame counts not satisfying 8k+1."""
+        create_fake_model_files(include_zit=False)
+        test_state.state.app_settings.use_local_text_encoder = True
+        test_state.config.local_generations_mode = "full_models_loading"
+
+        video_path = self._make_valid_video(test_state, frames=10)
+        r = client.post("/api/retake", json=self._base_payload(video_path))
+        assert r.status_code == 200, (
+            f"Expected 200 for non-8n+1 source, got {r.status_code}: {r.json()}"
+        )
 
     def test_local_retake_mode_mapping(self, client, test_state, create_fake_model_files, fake_services):
         create_fake_model_files(include_zit=False)

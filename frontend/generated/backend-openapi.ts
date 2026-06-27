@@ -1042,12 +1042,18 @@ export interface components {
             conditioning_strength: number;
             /** Conditioning Type */
             conditioning_type?: ("canny" | "depth") | null;
+            /**
+             * Final Mask Blur Px
+             * @description Blur radius for final raw-mask guard feather. Smoothens inpaint edge. 0=no feather. Separate from laplacian_blend_grow (pyramid blend level) and mask_grow_px (model context dilation).
+             * @default 6
+             */
+            final_mask_blur_px: number;
             /** Images */
             images?: components["schemas"]["IcLoraImageInput"][];
             /**
              * Laplacian Blend Grow
-             * @description Controls final LTXVLaplacianPyramidBlend.mask_low_res_dilation for inpainting Laplacian pyramid blend. 0=no low-res dilation, default=6 matches official final blend node 5226. Separate from mask_grow_px which controls LTXVDilateVideoMask radii.
-             * @default 6
+             * @description Controls Laplacian pyramid blend mask_low_res_dilation for inpaint. Larger values expand blend region at low-res level. Separate from mask_grow_px (dilation radii) and final_mask_blur_px (raw mask feather).
+             * @default 12
              */
             laplacian_blend_grow: number;
             /**

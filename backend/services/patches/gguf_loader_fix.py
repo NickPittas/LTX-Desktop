@@ -19,6 +19,7 @@ import gc
 import inspect
 import json
 import logging
+import os
 import re
 from dataclasses import replace
 from pathlib import Path
@@ -98,7 +99,8 @@ class QParam(torch.nn.Parameter):
     _gguf_name: str
 
     def __new__(
-        cls, raw: "np.ndarray | torch.Tensor", tensor_type: object, *, name: str
+        cls, raw: "np.ndarray | torch.Tensor", tensor_type: object, *,
+        name: str, device: torch.device | None = None,
     ) -> "QParam":
         placeholder = torch.empty(0, dtype=torch.float32)
         obj = super().__new__(cls, placeholder, requires_grad=False)  # type: ignore[call-overload]
@@ -107,6 +109,8 @@ class QParam(torch.nn.Parameter):
             obj._raw = torch.from_numpy(np.ascontiguousarray(raw).copy())
         else:
             obj._raw = raw.contiguous().clone()
+        if device is not None:
+            obj._raw = obj._raw.to(device=device)
         obj._tensor_type = tensor_type
         obj._gguf_name = name
         return obj
@@ -131,7 +135,7 @@ class QParam(torch.nn.Parameter):
         # real weight is dequantized in GgufLinear.forward. Returning self
         # preserves the QParam subclass, gguf_name, _raw, and _tensor_type
         # through dtype/device conversion.
-        # ponytail: raw quantized bytes stay on CPU unless explicitly moved;
+        # ponytail: raw quantized bytes residency chosen by loader target_device;
         # add device forwarding to _raw if model parallelism requires it.
         return self
 
@@ -147,8 +151,11 @@ class QParam(torch.nn.Parameter):
             if tensor is not None:
                 return tensor
 
+        # ponytail: gguf.quants.dequantize needs CPU numpy; copy CUDA raw to CPU first
+        raw_dev = self._raw.device
+        raw_for_numpy = self._raw if raw_dev.type == "cpu" else self._raw.cpu()
         try:
-            array = gguf.quants.dequantize(self._raw.numpy(), self._tensor_type)
+            array = gguf.quants.dequantize(raw_for_numpy.numpy(), self._tensor_type)
         except NotImplementedError as exc:
             raise RuntimeError(
                 f"GGUF tensor '{self._gguf_name}' uses unsupported quant type "
@@ -210,14 +217,18 @@ class GgufLinear(torch.nn.Linear):
             bias = bias.to(device=input.device, dtype=weight.dtype)
         result = torch.nn.functional.linear(input, weight, bias)
 
-        # ponytail: explicit dealloc + cache cleanup after dequant to prevent
-        # CUDA allocator fragmentation across ~432 dequant cycles in Gemma encode.
+        # ponytail: explicit dealloc after dequant; cache cleanup gated by
+        # env (off by default — Comfy-like: dequantized weight is temporary
+        # per forward, quantized blocks live on GPU, no per-layer empty_cache).
+        # Set LTX_GGUF_EMPTY_CACHE_EACH_FORWARD=1 to restore old aggressive
+        # clearing that prevented CUDA allocator fragmentation during ~432
+        # dequant cycles in Gemma encode (at higher per-forward cost).
         had_qparam = isinstance(self.weight, QParam) or isinstance(self.bias, QParam)
         if isinstance(self.weight, QParam):
             del weight
         if isinstance(self.bias, QParam):
             del bias
-        if had_qparam and input.device.type == "cuda":
+        if had_qparam and input.device.type == "cuda" and os.environ.get("LTX_GGUF_EMPTY_CACHE_EACH_FORWARD") == "1":
             torch.cuda.empty_cache()
 
         # Runtime LoRA delta (IC-LoRA / multi-LoRA).
@@ -616,9 +627,13 @@ class GgufStateDictLoader:
         ):
             raise RuntimeError("GGUF loader received no .gguf path; this is a pipeline wiring bug")
 
-        target_device = torch.device("cpu")
-        # ponytail: state-dict registry is long-lived RAM cache; GPU residency
-        # belongs to model contexts only (builder moves model to GPU later).
+        # ponytail: Comfy-like behavior — quantized raw bytes can live on
+        # active/offload device; dequantized weight remains temporary per forward.
+        # Set LTX_GGUF_KEEP_RAW_ON_CPU=1 to force CPU residency unconditionally.
+        if device is not None and os.environ.get("LTX_GGUF_KEEP_RAW_ON_CPU") != "1":
+            target_device = torch.device(device)
+        else:
+            target_device = torch.device("cpu")
         sd: dict[str, torch.Tensor] = {}
         size = 0
         dtype: set[torch.dtype] = set()
@@ -640,9 +655,10 @@ class GgufStateDictLoader:
                 if _is_quantized_type(tensor.tensor_type) and self._lazy_quantized:
                     if self._lazy_quantized_filter is None or self._lazy_quantized_filter(tensor.name):
                         # Lazy: keep raw quantized bytes as a QParam; dequant happens
-                        # per-forward inside GgufLinear. No full fp32 materialized here.
+                        # per-forward inside GgufLinear. Raw bytes placed on
+                        # target_device (GPU for full-load, CPU for streaming/env override).
                         tensor_t: torch.Tensor = QParam(
-                            tensor.data, tensor.tensor_type, name=tensor.name
+                            tensor.data, tensor.tensor_type, name=tensor.name, device=target_device
                         )
                     else:
                         # Filter mismatch: eagerly dequant even though lazy mode is on.

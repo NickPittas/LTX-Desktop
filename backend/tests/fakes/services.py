@@ -461,6 +461,7 @@ class _FakeVideoPipelineBase:
         self.last_checkpoint_path: CheckpointPath | None = None
         self.last_gemma_root: str | None = None
         self.last_transformer_format: str | None = None
+        self.last_streaming_prefetch_count: int | None = None
 
     def _record_generate(self, payload: dict[str, Any]) -> None:
         self.generate_calls.append(payload)
@@ -508,6 +509,15 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
         pipeline.last_gemma_root = gemma_root
         pipeline.last_components = components
         pipeline.last_transformer_format = transformer_format
+        # ponytail: match real __init__ guard — split safetensors needs streaming
+        _is_split = (
+            transformer_format == "safetensors"
+            and components is not None
+            and components.video_vae_path is not None
+        )
+        if _is_split and streaming_prefetch_count is None:
+            streaming_prefetch_count = 2
+        pipeline.last_streaming_prefetch_count = streaming_prefetch_count
         return pipeline
 
     def generate(
@@ -601,6 +611,15 @@ class FakeIcLoraPipeline:
         pipeline.last_components = components
         pipeline.last_lora_paths = lora_paths
         pipeline.last_lora_path = lora_paths[-1] if lora_paths else None
+        # ponytail: match real __init__ guard — split safetensors needs streaming
+        _is_split = (
+            components is not None
+            and components.transformer_format == "safetensors"
+            and components.video_vae_path is not None
+        )
+        if _is_split and streaming_prefetch_count is None:
+            streaming_prefetch_count = 2
+        pipeline.last_streaming_prefetch_count = streaming_prefetch_count
         return pipeline
 
     def __init__(self) -> None:
@@ -610,6 +629,7 @@ class FakeIcLoraPipeline:
         self.last_components: ResolvedLtxComponents | None = None
         self.last_lora_paths: list[str] | None = None
         self.last_lora_path: str | None = None
+        self.last_streaming_prefetch_count: int | None = None
 
     def generate(self, **kwargs: Any) -> None:
         self.generate_calls.append(kwargs)
@@ -706,6 +726,15 @@ class FakeA2VPipeline:
             raise RuntimeError("FakeA2VPipeline singleton is not bound")
         pipeline.last_checkpoint_path = checkpoint_path
         pipeline.last_components = components
+        # ponytail: match real __init__ guard — split safetensors needs streaming
+        _is_split = (
+            components is not None
+            and components.transformer_format == "safetensors"
+            and components.video_vae_path is not None
+        )
+        if _is_split and streaming_prefetch_count is None:
+            streaming_prefetch_count = 2
+        pipeline.last_streaming_prefetch_count = streaming_prefetch_count
         return pipeline
 
     def __init__(self) -> None:
@@ -713,6 +742,7 @@ class FakeA2VPipeline:
         self.raise_on_generate: Exception | None = None
         self.last_checkpoint_path: CheckpointPath | None = None
         self.last_components: ResolvedLtxComponents | None = None
+        self.last_streaming_prefetch_count: int | None = None
 
     def generate(self, **kwargs: Any) -> None:
         self.generate_calls.append(kwargs)
@@ -747,6 +777,15 @@ class FakeRetakePipeline:
             raise RuntimeError("FakeRetakePipeline singleton is not bound")
         pipeline.last_checkpoint_path = checkpoint_path
         pipeline.last_components = components
+        # ponytail: match real __init__ guard — split safetensors needs streaming
+        _is_split = (
+            components is not None
+            and components.transformer_format == "safetensors"
+            and components.video_vae_path is not None
+        )
+        if _is_split and streaming_prefetch_count is None:
+            streaming_prefetch_count = 2
+        pipeline.last_streaming_prefetch_count = streaming_prefetch_count
         return pipeline
 
     def __init__(self) -> None:

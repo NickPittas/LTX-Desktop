@@ -55,6 +55,7 @@ class IcLoraPipeline(Protocol):
         output_path: str,
         conditioning_strength: float = 1.0,
         mask_grow_px: int = 30,
-        laplacian_blend_grow: int = 6,
+        laplacian_blend_grow: int = 12,
+        final_mask_blur_px: int = 6,
     ) -> None:
         ...

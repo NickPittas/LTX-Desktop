@@ -991,7 +991,8 @@ export function GenSpace() {
     images: [] as { path: string; frame?: number; strength?: number }[],
     ready: false,
     maskGrowPx: 30,
-    laplacianBlendGrow: 6,
+    laplacianBlendGrow: 12,
+    finalMaskBlurPx: 6,
   })
   const [icLoraPanelKey, setIcLoraPanelKey] = useState(0)
   const [icLoraCondType, setIcLoraCondType] = useState<ICLoraConditioningType>(null)
@@ -1033,7 +1034,13 @@ export function GenSpace() {
   useEffect(() => {
     if (!genSpaceRetakeSource) return
     setMode('retake')
-    setPrompt('')
+    // ponytail: prefer source asset prompt, else keep current prompt
+    if (genSpaceRetakeSource.assetId) {
+      const sourceAsset = activeProject?.assets?.find(a => a.id === genSpaceRetakeSource.assetId)
+      if (sourceAsset) {
+        setPrompt(sourceAsset.prompt || sourceAsset.generationParams?.prompt || '')
+      }
+    }
     setActiveRetakeSource(genSpaceRetakeSource)
     setRetakeInitial({
       videoPath: genSpaceRetakeSource.videoPath,
@@ -1041,7 +1048,7 @@ export function GenSpace() {
     })
     setRetakePanelKey((prev) => prev + 1)
     setGenSpaceRetakeSource(null)
-  }, [genSpaceRetakeSource, setGenSpaceRetakeSource])
+  }, [genSpaceRetakeSource, activeProject?.assets, setGenSpaceRetakeSource])
 
   useEffect(() => {
     if (!genSpaceIcLoraSource) return
@@ -1218,6 +1225,7 @@ export function GenSpace() {
         prompt: resolvedPrompt,
         maskGrowPx: icLoraInput.maskGrowPx,
         laplacianBlendGrow: icLoraInput.laplacianBlendGrow,
+        finalMaskBlurPx: icLoraInput.finalMaskBlurPx,
       }, async (result) => {
         // ponytail: runs async in the hook's closure, survives GenSpace unmount (Bug A)
         const copied = await addVisualAssetToProject(result.videoPath, currentProjectId!, 'video')
@@ -1291,15 +1299,20 @@ export function GenSpace() {
 
     if (mode === 'retake') {
       if (!retakeInput.videoPath || retakeInput.duration < 2) return
+      const trimmedPrompt = prompt.trim()
+      if (!trimmedPrompt) {
+        setLocalError(createLocalGenerationError('Prompt is required for retake.'))
+        return
+      }
       await submitRetake({
         videoPath: retakeInput.videoPath,
         startTime: retakeInput.startTime,
         duration: retakeInput.duration,
-        prompt,
+        prompt: trimmedPrompt,
         mode: 'replace_audio_and_video',
       }, async (result) => {
         // ponytail: runs async in the hook's closure, survives GenSpace unmount (Bug A)
-        const usedPrompt = prompt
+        const usedPrompt = trimmedPrompt
         const usedInput = {
           videoPath: retakeInput.videoPath,
           startTime: retakeInput.startTime,
@@ -1446,7 +1459,8 @@ export function GenSpace() {
 
   const handleRetake = (videoAsset: Asset) => {
     setMode('retake')
-    setPrompt('')
+    // ponytail: prefer source asset prompt, else keep current
+    setPrompt(videoAsset.prompt || videoAsset.generationParams?.prompt || prompt)
     setActiveRetakeSource(null)
     setRetakeInitial({
       videoPath: videoAsset.path,

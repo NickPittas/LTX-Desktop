@@ -65,7 +65,6 @@ class LTXFastVideoPipeline:
         self._gemma_root = gemma_root
         self._upsampler_path = upsampler_path
         self._device = device
-        self._streaming_prefetch_count = streaming_prefetch_count
         self._transformer_format = transformer_format
         # GGUF is already quantized; the FP8 policy's sd_ops/module_ops would
         # downcast and overwrite the lazy QParam/GgufLinear path, so disable it.
@@ -74,6 +73,11 @@ class LTXFastVideoPipeline:
             and self._components is not None
             and self._components.video_vae_path is not None
         )
+        # ponytail: split safetensors 22B does not fit full residency on 32GB;
+        # stream 2 layers at a time unless explicit mode set.
+        if is_split and streaming_prefetch_count is None:
+            streaming_prefetch_count = 2
+        self._streaming_prefetch_count = streaming_prefetch_count
         if transformer_format == "gguf":
             self._quantization = None
         elif is_split and device_supports_fp8(device):

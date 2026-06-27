@@ -501,6 +501,81 @@ def test_qparam_to_identity_preserves_qparam() -> None:
     assert qp2 is qp
 
 
+# ---------------------------------------------------------------------------
+# GGUF-comfy-like residency: device forwarding + env gates
+# ---------------------------------------------------------------------------
+
+
+def test_qparam_raw_device_with_explicit_device_arg() -> None:
+    """QParam._raw placed on requested device when device kwarg is passed."""
+    import gguf
+
+    raw = np.arange(6, dtype=np.float32).reshape(2, 3)
+    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    qp = QParam(raw, gguf.GGMLQuantizationType.F32, name="test.weight", device=device)
+    assert qp._raw.device.type == device.type
+    assert isinstance(qp, QParam)
+    assert qp.gguf_name == "test.weight"
+    assert qp.numel() == 0
+
+
+def test_gguf_loader_qparam_raw_on_cpu_with_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """LTX_GGUF_KEEP_RAW_ON_CPU=1 forces raw CPU even when device=torch.device('cuda')."""
+    gguf_path = str(tmp_path / "quant.gguf")
+    _write_quantized_gguf(gguf_path)
+    monkeypatch.setenv("LTX_GGUF_KEEP_RAW_ON_CPU", "1")
+    requested = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    sd = GgufStateDictLoader().load(gguf_path, sd_ops=GgufNativeSDOps(), device=requested).sd
+    weight = sd["x.weight"]
+    assert isinstance(weight, QParam)
+    assert weight._raw.device.type == "cpu"
+
+
+def test_gguf_loader_qparam_raw_device_follows_device_arg(tmp_path: Path) -> None:
+    """QParam raw tensor placed on device passed to load() (CUDA if available, CPU fallback)."""
+    gguf_path = str(tmp_path / "quant.gguf")
+    _write_quantized_gguf(gguf_path)
+    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    sd = GgufStateDictLoader().load(gguf_path, sd_ops=GgufNativeSDOps(), device=device).sd
+    weight = sd["x.weight"]
+    assert isinstance(weight, QParam)
+    assert weight._raw.device.type == device.type
+
+
+def test_gguf_linear_forward_no_unconditional_empty_cache() -> None:
+    """GgufLinear.forward must only call torch.cuda.empty_cache() within an
+    LTX_GGUF_EMPTY_CACHE_EACH_FORWARD env gate — no unconditional call."""
+    import inspect
+    source = inspect.getsource(GgufLinear.forward)
+    # The env gate must be present somewhere in forward
+    assert "LTX_GGUF_EMPTY_CACHE_EACH_FORWARD" in source, \
+        "forward missing env gate for empty_cache"
+    # The env gate string must appear before the empty_cache call in source
+    # (they're on separate lines: if-condition line contains gate, call is on next)
+    env_pos = source.index("LTX_GGUF_EMPTY_CACHE_EACH_FORWARD")
+    empty_cache_pos = source.index("torch.cuda.empty_cache()")
+    assert env_pos < empty_cache_pos, \
+        "torch.cuda.empty_cache() appears before env gate"
+
+
+def test_gguf_loader_forward_old_behavior_gated_by_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Setting LTX_GGUF_EMPTY_CACHE_EACH_FORWARD=1 restores old aggressive empty_cache.
+
+    Verifies the env gate is present by checking the source code contains the
+    correct conditional. Since empty_cache is a CUDA-only call, we check the
+    source contract rather than requiring a CUDA device.
+    """
+    import inspect
+    source = inspect.getsource(GgufLinear.forward)
+    # Both the env gate and the empty_cache call must be present
+    assert "os.environ.get(\"LTX_GGUF_EMPTY_CACHE_EACH_FORWARD\")" in source
+
+
+# ---------------------------------------------------------------------------
+# Runtime LoRA on GgufLinear
+# ---------------------------------------------------------------------------
+
+
 def test_gguf_linear_load_after_dtype_conversion() -> None:
     """GgufLinear load_state_dict must still claim QParam after it has gone
     through ``.to(dtype=...)`` — simulating what
@@ -763,6 +838,52 @@ def test_qparam_dequant_cuda() -> None:
     assert out.device.type == "cuda"
     assert out.dtype == torch.bfloat16
     assert out.shape == expected_np.shape
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_qparam_dequant_cuda_fallback_to_numpy_on_unsupported_qtype(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When torch dequant returns None (unsupported qtype), numpy fallback must
+    handle CUDA raw tensor by copying it to CPU before dequantizing.
+
+    Regression test for: can't convert cuda:0 device type tensor to numpy.
+    """
+    from services.patches.gguf_torch_dequant import dequantize_gguf_tensor_torch
+
+    qtype = gguf.GGMLQuantizationType.Q4_0
+    _, type_size = gguf.GGML_QUANT_SIZES[qtype]
+    raw = torch.arange(type_size * 2, dtype=torch.uint8).reshape(2, type_size)
+
+    expected_np = gguf.quants.dequantize(raw.numpy(), qtype)
+    # Place raw on CUDA as the loader does when device="cuda"
+    qp = QParam(raw.numpy(), qtype, name="test.weight", device=torch.device("cuda"))
+    assert qp._raw.device.type == "cuda", "raw must be on CUDA for this test"
+
+    # Monkeypatch torch dequant to return None, forcing the numpy fallback
+    original_fn = dequantize_gguf_tensor_torch
+
+    def _return_none(*args: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "services.patches.gguf_torch_dequant.dequantize_gguf_tensor_torch",
+        _return_none,
+    )
+    try:
+        out = qp.dequant(device=torch.device("cuda"), dtype=torch.bfloat16)
+    finally:
+        monkeypatch.setattr(
+            "services.patches.gguf_torch_dequant.dequantize_gguf_tensor_torch",
+            original_fn,
+        )
+
+    assert out.device.type == "cuda"
+    assert out.dtype == torch.bfloat16
+    assert out.shape == expected_np.shape
+    assert torch.allclose(
+        out.float(), torch.from_numpy(expected_np.copy()).cuda().float(), atol=0.1
+    )
 
 
 # ---------------------------------------------------------------------------

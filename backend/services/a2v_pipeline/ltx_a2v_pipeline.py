@@ -66,6 +66,10 @@ class LTXa2vPipeline:
 
             quantization = QuantizationPolicy.fp8_cast() if device_supports_fp8(device) else None
 
+        # ponytail: split safetensors 22B does not fit full residency on 32GB;
+        # stream 2 layers at a time unless explicit mode set.
+        if is_split and streaming_prefetch_count is None:
+            streaming_prefetch_count = 2
         self._streaming_prefetch_count = streaming_prefetch_count
         self.pipeline = DistilledA2VPipeline(
             distilled_checkpoint_path=checkpoint_path,  # type: ignore[arg-type]  # ponytail: ltx_pipelines accepts tuple per M5 spec

@@ -48,6 +48,37 @@ del _VIDEO, _RESIZED
 # Full source: [0.909375, 0.725, 0.421875, 0.0]; [1:] drops 0.909375.
 
 
+def test_prompt_encoded_before_video_loaded():
+    """Prompt encoder call appears before decode_video_by_frame in generate_inpaint.
+
+    Regression: OOM fix avoids GGUF Gemma + 196f video tensor VRAM overlap
+    (~31.6GB). If order reverses, peak spikes.
+    """
+    import os
+    pipe_path = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "services/ic_lora_pipeline/ltx_ic_lora_pipeline.py",
+    )
+    with open(pipe_path) as f:
+        source = f.read()
+
+    start = source.find("def generate_inpaint")
+    assert start != -1, "generate_inpaint method not found"
+
+    method_body = source[start:]
+    prompt_pos = method_body.find("self.pipeline.prompt_encoder")
+    video_pos = method_body.find("decode_video_by_frame(path=video_path")
+
+    assert prompt_pos != -1, "prompt_encoder not found in generate_inpaint"
+    assert video_pos != -1, "decode_video_by_frame not found in generate_inpaint"
+    assert prompt_pos < video_pos, (
+        f"prompt_encoder at offset {prompt_pos} must appear before "
+        f"decode_video_by_frame at offset {video_pos} — "
+        "prompt encoding moved before video loading to reduce peak VRAM"
+    )
+
+
 class TestVaeFrameCount:
     """Ensure _vae_compatible_frame_count produces 1+8*k values."""
 
@@ -470,28 +501,15 @@ class TestDeriveStageRadii:
             f"Expected 5, got {INPAINT_BLEND1_LOW_RES_DILATION}"
         )
 
-    def test_blend2_low_res_dilation_is_6(self):
-        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import INPAINT_BLEND2_LOW_RES_DILATION
-        assert INPAINT_BLEND2_LOW_RES_DILATION == 6, (
-            f"Expected 6, got {INPAINT_BLEND2_LOW_RES_DILATION}"
-        )
-
-
-
     def test_blend_constants_are_separate_from_radii(self):
-        """Blend constants (5, 6) should differ from default stage radii (15, 30).
-        This documents they are independent controls."""
+        """INPAINT_BLEND1 docs blend constant independent of stage radii derived from mask_grow_px."""
         from services.ic_lora_pipeline.ltx_ic_lora_pipeline import (
             INPAINT_BLEND1_LOW_RES_DILATION,
-            INPAINT_BLEND2_LOW_RES_DILATION,
             derive_stage_radii,
         )
         s1, s2 = derive_stage_radii(30)
         assert INPAINT_BLEND1_LOW_RES_DILATION != s1, (
             "Blend1 constant should differ from stage1 radius (separate controls)"
-        )
-        assert INPAINT_BLEND2_LOW_RES_DILATION != s2, (
-            "Blend2 constant should differ from stage2 radius (separate controls)"
         )
 
 
@@ -607,6 +625,84 @@ class TestApplyRawMaskGuard:
         assert 0.05 < v_bl < 0.95, f"blurred at col {col_t} should be intermediate, got {v_bl:.4f}"
         assert abs(v_bl - v_nb) > 0.01, f"blurred should differ from no_blur at col {col_t}"
 
+    # ── Chunking / OOM guard tests ──
+
+    def test_chunking_matches_expected_math(self):
+        """Chunked GPU→CPU result matches expected composite formula for blur_radius=0 and 1.
+
+        Uses chunk_size=2 to exercise multi-chunk path even on small tensors.
+        """
+        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
+
+        F, H, W = 6, 32, 48
+        blend = torch.full((F, H, W, 3), 0.9)   # bright gen
+        orig = torch.full((F, H, W, 3), 0.1)    # dark original
+        mask = torch.full((F, H, W), 0.5)         # 50/50 everywhere
+
+        # blur_radius=0 → direct grayscale composite: 0.9*0.5 + 0.1*0.5 = 0.5
+        result = LTXIcLoraPipeline._apply_raw_mask_guard(blend, mask, orig, blur_radius=0, chunk_size=2)
+        assert result.device.type == "cpu", f"Expected CPU, got {result.device}"
+        expected = torch.full((F, H, W, 3), 0.5)
+        assert torch.allclose(result, expected, atol=1e-6), (
+            f"blur=0 chunk result should be 0.5, got mean {result.mean().item():.6f}"
+        )
+
+        # blur_radius=1 → threshold to binary (0.5>0.5=False=0), so all-black => orig
+        result_b1 = LTXIcLoraPipeline._apply_raw_mask_guard(blend, mask, orig, blur_radius=1, chunk_size=3)
+        assert result_b1.device.type == "cpu", f"Expected CPU, got {result_b1.device}"
+        expected_b1 = orig.clone()
+        assert torch.allclose(result_b1, expected_b1, atol=1e-6), (
+            f"blur=1 with 0.5 mask thresholded to 0 should return orig, "
+            f"got mean {result_b1.mean().item():.6f}"
+        )
+
+    def test_chunking_loop_source_assert(self):
+        """Source text asserts the chunking loop and .cpu() accumulation exist."""
+        from pathlib import Path
+        source = Path(__file__).resolve().parents[1] / "services" / "ic_lora_pipeline" / "ltx_ic_lora_pipeline.py"
+        text = source.read_text()
+        assert "chunk_size:" in text, "_apply_raw_mask_guard must have chunk_size parameter"
+        assert "chunks.append(chunk_result.detach().cpu())" in text, (
+            "Loop must accumulate chunk results via .cpu() detach to free GPU memory"
+        )
+        assert "torch.cat(chunks, dim=0)" in text, (
+            "Final result must torch.cat CPU chunks"
+        )
+        assert "for start in range(0, num_frames, chunk_size):" in text, (
+            "Must iterate over frame dimension in chunks"
+        )
+
+    def test_chunk_size_greater_than_frames_still_works(self):
+        """chunk_size > num_frames (single chunk) produces same result as chunk_size=2."""
+        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
+
+        F, H, W = 3, 16, 24
+        blend = torch.rand(F, H, W, 3)
+        orig = torch.rand(F, H, W, 3)
+        mask = torch.rand(F, H, W)
+
+        r1 = LTXIcLoraPipeline._apply_raw_mask_guard(blend, mask, orig, blur_radius=0, chunk_size=999)
+        r2 = LTXIcLoraPipeline._apply_raw_mask_guard(blend, mask, orig, blur_radius=0, chunk_size=2)
+        assert torch.allclose(r1, r2, atol=1e-6), (
+            "Single chunk must match multi-chunk result"
+        )
+
+    def test_chunking_preserves_device_of_input_on_default(self):
+        """Default chunk_size=8 works; result is CPU regardless of input device."""
+        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
+
+        F, H, W = 9, 16, 24
+        blend = torch.full((F, H, W, 3), 0.85, device="cpu")
+        orig = torch.full((F, H, W, 3), 0.15, device="cpu")
+        mask = torch.full((F, H, W), 0.6, device="cpu")
+
+        result = LTXIcLoraPipeline._apply_raw_mask_guard(blend, mask, orig)
+        assert result.device.type == "cpu", f"Expected CPU default, got {result.device}"
+        assert result.shape == (F, H, W, 3), f"Shape mismatch: {result.shape}"
+        assert 0.0 <= result.min() <= result.max() <= 1.0, (
+            f"Values out of [0,1]: [{result.min():.4f}, {result.max():.4f}]"
+        )
+
 
 class TestInpaintRuntimeParity:
     """Stage2 sigma, seed, and audio preservation parity checks."""
@@ -695,6 +791,20 @@ class TestInpaintRuntimeParity:
             "Stage 2 must pass encoded_blend as initial_latent — "
             "was the green-leak root cause fix"
         )
+
+# ponytail: bare assert self-check — GPU bicubic upsample preserves shape and [0,1] range
+_STAGE1 = torch.rand(17, 3, 96, 128)  # (F, 3, H_half, W_half)
+_STAGE1_FULL = torch.nn.functional.interpolate(
+    _STAGE1, size=(384, 512), mode="bicubic", align_corners=False,
+).clamp(0.0, 1.0)
+assert _STAGE1_FULL.shape == (17, 3, 384, 512), (
+    f"stage1 upsample shape: {_STAGE1_FULL.shape}"
+)
+assert _STAGE1_FULL.min() >= 0.0 and _STAGE1_FULL.max() <= 1.0, (
+    f"range: [{_STAGE1_FULL.min()}, {_STAGE1_FULL.max()}]"
+)
+del _STAGE1, _STAGE1_FULL
+
 
 def test_resize_video_mask_spatial():
     """(F, H, W) mask half-resized → (F, H_half, W_half)."""
@@ -1018,15 +1128,36 @@ class TestInpaintBlendOutsideMaskPreservation:
 
 
 class TestLaplacianBlendGrowParameter:
-    """laplacian_blend_grow param is separate from mask_grow_px and targets final blend only."""
+    """laplacian_blend_grow is now 12, final_mask_blur_px is separate control."""
 
-    def test_default_is_6(self):
+    def test_default_is_12(self):
         from inspect import signature
         from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
 
         sig = signature(LTXIcLoraPipeline.generate_inpaint)
         param = sig.parameters["laplacian_blend_grow"]
+        assert param.default == 12, f"Expected default=12, got {param.default}"
+
+    def test_final_mask_blur_px_default_is_6(self):
+        from inspect import signature
+        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
+
+        sig = signature(LTXIcLoraPipeline.generate_inpaint)
+        param = sig.parameters["final_mask_blur_px"]
         assert param.default == 6, f"Expected default=6, got {param.default}"
+
+    def test_param_source_assertions(self):
+        """Source-text assertions: laplacian_blend_grow feeds mask_low_res_dilation; final_mask_blur_px feeds blur_radius."""
+        from pathlib import Path
+
+        source = Path(__file__).resolve().parents[1] / "services" / "ic_lora_pipeline" / "ltx_ic_lora_pipeline.py"
+        text = source.read_text()
+        assert "mask_low_res_dilation=laplacian_blend_grow" in text, (
+            "laplacian_blend_grow must feed mask_low_res_dilation in Laplacian blend"
+        )
+        assert "blur_radius=final_mask_blur_px" in text, (
+            "final_mask_blur_px must feed blur_radius in raw-mask guard feather"
+        )
 
 
 class TestEncodeGreenGuideConditioning:
@@ -1160,6 +1291,68 @@ class TestEncodeGreenGuideConditioning:
         assert result[0].latent.dtype == torch.bfloat16
         assert result[0].latent.shape == (1, 16, 3, 8, 8)
 
+    def test_uses_tiled_encode_when_available_with_default_tiling_config_fallback_to_direct_call(self):
+        """_encode_green_guide_conditioning uses .tiled_encode(default_tiling_config()) when available,
+        falls back to enc() call when encoder lacks tiled API."""
+        import os as _os
+        import sys as _sys
+        _site = _os.path.expanduser("~/.local/share/LTXDesktop/python/lib/python3.13/site-packages")
+        _sys.path.insert(0, _site)
+        from pathlib import Path
+        import services.ic_lora_pipeline.ltx_ic_lora_pipeline as _pmod
+
+        # Source-text assertion: the method must reference both tiled_encode and default_tiling_config
+        source = Path(_pmod.__file__).read_text()
+        # Verify _encode_green_guide_conditioning contains tiled_encode branch
+        assert "tiled_encode" in source, "Missing tiled_encode reference in pipeline source"
+        assert "default_tiling_config" in source, (
+            "Missing default_tiling_config reference in pipeline source"
+        )
+
+        # Runtime test 1: encoder with tiled_encode uses it
+        class _FakeTiledEnc:
+            def __call__(self, video):
+                raise AssertionError("direct call should not be used when tiled_encode exists")
+            def tiled_encode(self, video, tiling_config):
+                _, _, f, h, w = video.shape
+                return torch.zeros(1, 16, f, h // 8, w // 8)
+
+        class _FakePipeline:
+            device = torch.device("cpu")
+            dtype = torch.bfloat16
+
+        pipe = _pmod.LTXIcLoraPipeline.__new__(_pmod.LTXIcLoraPipeline)
+        pipe.pipeline = _FakePipeline()
+
+        tensor = torch.rand(1, 3, 5, 64, 128)
+        result = pipe._encode_green_guide_conditioning(
+            enc=_FakeTiledEnc(), tensor=tensor, strength=0.8,
+        )
+        assert len(result) == 1
+        assert result[0].latent.shape == (1, 16, 5, 8, 16), (
+            f"tiled_encode: {result[0].latent.shape}"
+        )
+
+        # Runtime test 2: encoder without tiled_encode falls back to direct call
+        class _FakeDirectEnc:
+            def __call__(self, video):
+                _, _, f, h, w = video.shape
+                return torch.zeros(1, 16, f, h // 8, w // 8)
+
+        pipe2 = _pmod.LTXIcLoraPipeline.__new__(_pmod.LTXIcLoraPipeline)
+        pipe2.pipeline = _FakePipeline()
+
+        result2 = pipe2._encode_green_guide_conditioning(
+            enc=_FakeDirectEnc(), tensor=tensor, strength=0.7,
+        )
+        assert len(result2) == 1
+        assert result2[0].latent.shape == (1, 16, 5, 8, 16), (
+            f"direct fallback: {result2[0].latent.shape}"
+        )
+        assert result2[0].strength == 0.7, (
+            f"Expected strength=0.7, got {result2[0].strength}"
+        )
+
 
 class TestBlendOutputToUint8:
     """Smoke: (F, H, W, 3) float [0,1] → uint8 [0,255] conversion, shape preserved."""
@@ -1172,3 +1365,370 @@ class TestBlendOutputToUint8:
         assert out.dtype == torch.uint8, f"Expected uint8, got {out.dtype}"
         assert out.min() >= 0, f"Min value {out.min()} below 0"
         assert out.max() <= 255, f"Max value {out.max()} above 255"
+
+
+class TestStage1UpsampleDevicePath:
+    """Validate blend_stage1 to upsample pipeline device/dtype/range.
+
+    After fix: laplacian_pyramid_blend returns tensor on requested device
+    (no forced .cpu()), and interpolate input is explicitly moved to device.
+    """
+
+    def test_blend_upsample_shape_dtype_range(self):
+        """blend(F, H, W, 3) -> permute -> interpolate -> _frames_chw_to_bcfhw -> *2-1
+        gives (1, 3, F, H, W), bfloat16, [-1, 1]."""
+        from services.ic_lora_pipeline.official_inpaint import laplacian_pyramid_blend
+
+        F, H, W = 5, 64, 64
+        img_a = torch.rand(F, H, W, 3)
+        img_b = torch.rand(F, H, W, 3)
+        mask = (torch.rand(F, H, W) > 0.5).float()
+
+        blend = laplacian_pyramid_blend(img_a, img_b, mask, max_level=3, mask_low_res_dilation=0)
+
+        bchw = blend.permute(0, 3, 1, 2)  # (F, 3, H, W)
+        up_h, up_w = H * 2, W * 2
+        up = torch.nn.functional.interpolate(
+            bchw, size=(up_h, up_w), mode="bicubic", align_corners=False,
+        ).clamp(0.0, 1.0)
+        up = up.to(dtype=torch.bfloat16)
+
+        bcfhw = LTXIcLoraPipeline._frames_chw_to_bcfhw(up)
+        result = bcfhw * 2.0 - 1.0
+
+        assert result.shape == (1, 3, F, up_h, up_w), (
+            f"Expected (1, 3, {F}, {up_h}, {up_w}), got {result.shape}"
+        )
+        assert result.dtype == torch.bfloat16, f"Expected bfloat16, got {result.dtype}"
+        assert result.min() >= -1.0 and result.max() <= 1.0, (
+            f"Range: [{result.min()}, {result.max()}], expected [-1, 1]"
+        )
+
+    def test_laplacian_blend_returns_requested_device(self):
+        """When device= is set, laplacian_pyramid_blend returns tensor on that device.
+
+        When device=None, result stays on input device (CPU).
+        CUDA branch is conditional; CPU branch always runs.
+        """
+        from services.ic_lora_pipeline.official_inpaint import laplacian_pyramid_blend
+
+        F, H, W = 3, 32, 32
+        img_a = torch.rand(F, H, W, 3)
+        img_b = torch.rand(F, H, W, 3)
+        mask = (torch.rand(F, H, W) > 0.5).float()
+
+        # Baseline: device=None returns CPU
+        blend_cpu = laplacian_pyramid_blend(img_a, img_b, mask, max_level=3, mask_low_res_dilation=0)
+        assert blend_cpu.device == torch.device("cpu"), (
+            f"Without device arg, expected cpu, got {blend_cpu.device}"
+        )
+
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+            blend_gpu = laplacian_pyramid_blend(
+                img_a, img_b, mask, max_level=3, mask_low_res_dilation=0, device=device,
+            )
+            assert blend_gpu.device.type == "cuda", (
+                f"Expected CUDA device, got {blend_gpu.device}"
+            )
+            # Interpolate input stays on the same device as blend
+            bchw = blend_gpu.permute(0, 3, 1, 2)
+            assert bchw.device == blend_gpu.device, (
+                f"permute changed device from {blend_gpu.device} to {bchw.device}"
+            )
+
+
+class TestInpaintVramOffload:
+    """Source-text assertions for VRAM offload of originals before stage1/stage2 denoising.
+
+    At 196f 1080p, original video/mask tensors (~4.7GB @ bf16) + GGUF transformer raw
+    load OOM. Offload to CPU before each denoising pass, move back only for blends.
+    """
+
+    def test_cpu_offload_before_stage1(self):
+        """Verify .cpu() calls on originals appear before self.pipeline.stage_1(."""
+        import os
+        pipe_path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "services/ic_lora_pipeline/ltx_ic_lora_pipeline.py",
+        )
+        with open(pipe_path) as f:
+            source = f.read()
+
+        stage1_pos = source.find("self.pipeline.stage_1(")
+        assert stage1_pos != -1, "stage_1 call not found"
+
+        offload_targets = ["video_half", "video_full", "mask_stage1_half", "mask_stage2_full", "mask_full_gray"]
+        for name in offload_targets:
+            cpu_call = f"{name}.cpu()"
+            pos = source.find(cpu_call)
+            assert pos != -1, f"{cpu_call} not found"
+            assert pos < stage1_pos, (
+                f"{cpu_call} at offset {pos} must appear before "
+                f"self.pipeline.stage_1( at offset {stage1_pos}"
+            )
+
+    def test_empty_cache_guarded_by_cuda_check(self):
+        """torch.cuda.empty_cache() must be inside `if device.type == "cuda":`."""
+        import os
+        pipe_path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "services/ic_lora_pipeline/ltx_ic_lora_pipeline.py",
+        )
+        with open(pipe_path) as f:
+            source = f.read()
+
+        empty_cache_pos = source.find("torch.cuda.empty_cache()")
+        assert empty_cache_pos != -1, "torch.cuda.empty_cache() not found"
+
+        # Find the preceding if device.type == "cuda": within reasonable scope
+        preceding_block = source[max(0, empty_cache_pos - 200):empty_cache_pos]
+        assert 'if device.type == "cuda":' in preceding_block, (
+            "torch.cuda.empty_cache() must be guarded by 'if device.type == \"cuda\":'"
+        )
+
+    def test_stage1_offload_includes_del_green_half(self):
+        """del green_half must appear in the offload block before stage1."""
+        import os
+        pipe_path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "services/ic_lora_pipeline/ltx_ic_lora_pipeline.py",
+        )
+        with open(pipe_path) as f:
+            source = f.read()
+
+        stage1_pos = source.find("self.pipeline.stage_1(")
+        assert stage1_pos != -1
+
+        del_pos = source.find("del green_half")
+        assert del_pos != -1, "del green_half not found"
+        assert del_pos < stage1_pos, (
+            f"del green_half at {del_pos} must be before stage_1 at {stage1_pos}"
+        )
+
+    def test_stage1_offload_includes_del_mask_temps(self):
+        """Combined del line including mask_video, mask_gray, mask_stage1_full."""
+        import os
+        pipe_path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "services/ic_lora_pipeline/ltx_ic_lora_pipeline.py",
+        )
+        with open(pipe_path) as f:
+            source = f.read()
+
+        stage1_pos = source.find("self.pipeline.stage_1(")
+        assert stage1_pos != -1
+
+        del_line = "del green_half, mask_video, mask_gray, mask_stage1_full"
+        pos = source.find(del_line)
+        assert pos != -1, f"'{del_line}' not found"
+        assert pos < stage1_pos, (
+            f"del line at {pos} must be before stage_1 at {stage1_pos}"
+        )
+
+    def test_move_back_before_stage1_blend(self):
+        """video_half.to(device=...) and mask_stage1_half.to(device=...) appear before blend."""
+        import os
+        pipe_path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "services/ic_lora_pipeline/ltx_ic_lora_pipeline.py",
+        )
+        with open(pipe_path) as f:
+            source = f.read()
+
+        blend_comment_pos = source.find("# Original video as [0, 1] pixel frames for stage 1 blend")
+        assert blend_comment_pos != -1, "blend orig comment not found"
+
+        for call in ('video_half = video_half.to(device=', 'mask_stage1_half = mask_stage1_half.to(device='):
+            pos = source.find(call)
+            assert pos != -1, f"'{call}' not found"
+            assert pos < blend_comment_pos, (
+                f"'{call}' at {pos} must be before blend comment at {blend_comment_pos}"
+            )
+
+    def test_stage2_pre_denoising_offload(self):
+        """After stage1 blend del, video_half.cpu() and mask_stage1_half.cpu() and
+        empty_cache guard appear before stage 2 denoising."""
+        import os
+        pipe_path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "services/ic_lora_pipeline/ltx_ic_lora_pipeline.py",
+        )
+        with open(pipe_path) as f:
+            source = f.read()
+
+        # The offload should happen after the del line and before the # 9. section header
+        del_pos = source.find("del blend_stage1, blend_stage1_bchw")
+        assert del_pos != -1, "blend del line not found"
+
+        stage2_header_pos = source.find("# 9. Stage 2:")
+        assert stage2_header_pos != -1, "Stage 2 section header not found"
+
+        for call in ('video_half = video_half.cpu()', 'mask_stage1_half = mask_stage1_half.cpu()'):
+            pos = source.find(call, del_pos)
+            assert pos != -1, f"'{call}' after del line not found"
+            assert pos < stage2_header_pos, (
+                f"'{call}' at {pos} must be before "
+                f"stage 2 header ({stage2_header_pos})"
+            )
+
+        # empty_cache guard must also be in this region
+        cuda_check_pos = source.find('if device.type == "cuda":', del_pos, stage2_header_pos)
+        assert cuda_check_pos != -1, (
+            f"empty_cache guard not found between offload and stage 2 header"
+        )
+
+    def test_move_back_before_final_blend(self):
+        """video_full, mask_stage2_full, mask_full_gray moved back before final blend."""
+        import os
+        pipe_path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "services/ic_lora_pipeline/ltx_ic_lora_pipeline.py",
+        )
+        with open(pipe_path) as f:
+            source = f.read()
+
+        blend2_comment = source.find("# Original video as [0, 1] pixel frames for stage 2 blend")
+        assert blend2_comment != -1, "blend2 comment not found"
+
+        for name, dtype in [("video_full", True), ("mask_stage2_full", False), ("mask_full_gray", False)]:
+            call = f"{name} = {name}.to(device="
+            pos = source.find(call)
+            assert pos != -1, f"'{call}' not found"
+            assert pos < blend2_comment, (
+                f"'{call}' at {pos} must be before blend2 comment at {blend2_comment}"
+            )
+
+
+class TestInpaintStreamingPrefetchCount:
+    """_inpaint_streaming_prefetch_count behavior and stage_1/stage_2 wiring."""
+
+    def test_full_mode_frames_returns_none(self):
+        """< 97 frames with full mode (_streaming_prefetch_count=None) returns None."""
+        import services.ic_lora_pipeline.ltx_ic_lora_pipeline as _pmod
+
+        pipe = _pmod.LTXIcLoraPipeline.__new__(_pmod.LTXIcLoraPipeline)
+        pipe._streaming_prefetch_count = None
+
+        result = pipe._inpaint_streaming_prefetch_count(frames=17)
+        assert result is None
+
+    def test_long_frames_full_mode_returns_two(self):
+        """97+ frames with full mode returns 2 (up from 1 for better VRAM layer streaming)."""
+        import services.ic_lora_pipeline.ltx_ic_lora_pipeline as _pmod
+
+        pipe = _pmod.LTXIcLoraPipeline.__new__(_pmod.LTXIcLoraPipeline)
+        pipe._streaming_prefetch_count = None
+
+        result = pipe._inpaint_streaming_prefetch_count(frames=97)
+        assert result == 2
+
+        result = pipe._inpaint_streaming_prefetch_count(frames=196)
+        assert result == 2
+
+    def test_preserves_explicit_streaming_count(self):
+        """When _streaming_prefetch_count is explicitly set (e.g. 2), return it for all frames."""
+        import services.ic_lora_pipeline.ltx_ic_lora_pipeline as _pmod
+
+        pipe = _pmod.LTXIcLoraPipeline.__new__(_pmod.LTXIcLoraPipeline)
+        pipe._streaming_prefetch_count = 2
+
+        assert pipe._inpaint_streaming_prefetch_count(frames=17) == 2
+        assert pipe._inpaint_streaming_prefetch_count(frames=97) == 2
+        assert pipe._inpaint_streaming_prefetch_count(frames=196) == 2
+
+    def test_long_frames_env_override(self):
+        """LTX_INPAINT_STREAM_PREFETCH=4 applies for 196f, not for 17f."""
+        import os
+        import services.ic_lora_pipeline.ltx_ic_lora_pipeline as _pmod
+
+        pipe = _pmod.LTXIcLoraPipeline.__new__(_pmod.LTXIcLoraPipeline)
+        pipe._streaming_prefetch_count = None
+
+        os.environ["LTX_INPAINT_STREAM_PREFETCH"] = "4"
+        try:
+            result_short = pipe._inpaint_streaming_prefetch_count(frames=17)
+            assert result_short is None, f"Short frames w/ env should be None, got {result_short}"
+
+            result_long = pipe._inpaint_streaming_prefetch_count(frames=196)
+            assert result_long == 4, f"Long frames w/ env=4 should return 4, got {result_long}"
+        finally:
+            os.environ.pop("LTX_INPAINT_STREAM_PREFETCH", None)
+
+    def test_env_override_invalid_falls_back_to_two(self):
+        """LTX_INPAINT_STREAM_PREFETCH=0 or invalid text falls back to default 2 for long frames."""
+        import os
+        import services.ic_lora_pipeline.ltx_ic_lora_pipeline as _pmod
+
+        pipe = _pmod.LTXIcLoraPipeline.__new__(_pmod.LTXIcLoraPipeline)
+        pipe._streaming_prefetch_count = None
+
+        for bad_val in ("0", "-1", "not-a-number", ""):
+            os.environ["LTX_INPAINT_STREAM_PREFETCH"] = bad_val
+            try:
+                result = pipe._inpaint_streaming_prefetch_count(frames=196)
+                assert result == 2, (
+                    f"Env={bad_val!r} should fall back to 2, got {result}"
+                )
+            finally:
+                os.environ.pop("LTX_INPAINT_STREAM_PREFETCH", None)
+
+    def test_explicit_streaming_wins_over_env(self):
+        """Explicit _streaming_prefetch_count=3 wins over env override."""
+        import os
+        import services.ic_lora_pipeline.ltx_ic_lora_pipeline as _pmod
+
+        pipe = _pmod.LTXIcLoraPipeline.__new__(_pmod.LTXIcLoraPipeline)
+        pipe._streaming_prefetch_count = 3
+
+        os.environ["LTX_INPAINT_STREAM_PREFETCH"] = "99"
+        try:
+            result = pipe._inpaint_streaming_prefetch_count(frames=196)
+            assert result == 3, (
+                f"Explicit 3 should win over env=99, got {result}"
+            )
+        finally:
+            os.environ.pop("LTX_INPAINT_STREAM_PREFETCH", None)
+
+    def test_stage1_stage2_use_denoise_prefetch(self):
+        """stage_1 and stage_2 calls use denoise_streaming_prefetch_count;
+        prompt_encoder still uses self._streaming_prefetch_count."""
+        import os
+        pipe_path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "services/ic_lora_pipeline/ltx_ic_lora_pipeline.py",
+        )
+        with open(pipe_path) as f:
+            source = f.read()
+
+        # Stage 1 and stage 2 must reference denoise_streaming_prefetch_count
+        assert "streaming_prefetch_count=denoise_streaming_prefetch_count" in source, (
+            "stage_1/stage_2 must use denoise_streaming_prefetch_count"
+        )
+
+        # prompt_encoder must still reference self._streaming_prefetch_count
+        encoder_call_idx = source.find("streaming_prefetch_count=self._streaming_prefetch_count,")
+        assert encoder_call_idx != -1, (
+            "prompt_encoder must still use self._streaming_prefetch_count"
+        )
+
+        # stage_1/stage_2 migrated away. Remaining 2 occurrences: prompt_encoder + _run_inference (non-inpaint).
+        assert source.count("streaming_prefetch_count=self._streaming_prefetch_count,") == 2, (
+            "Expected 2: prompt_encoder and _run_inference (non-inpaint); "
+            "stage_1/stage_2 should use denoise_streaming_prefetch_count"
+        )
+
+        # Stage 1 and stage 2 should both use denoise_streaming_prefetch_count
+        assert source.count("streaming_prefetch_count=denoise_streaming_prefetch_count") >= 2, (
+            "At least 2 call sites (stage_1, stage_2) must use denoise_streaming_prefetch_count"
+        )
+
+

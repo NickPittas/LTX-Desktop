@@ -35,6 +35,7 @@ interface ICLoraPanelProps {
     ready: boolean
     maskGrowPx: number
     laplacianBlendGrow: number
+    finalMaskBlurPx: number
   }) => void
 }
 
@@ -115,7 +116,8 @@ export function ICLoraPanel({
 
   const [maskPath, setMaskPath] = useState<string | null>(null)
   const [maskGrowPx, setMaskGrowPx] = useState(30)
-  const [laplacianBlendGrow, setLaplacianBlendGrow] = useState(6)
+  const [laplacianBlendGrow, setLaplacianBlendGrow] = useState(12)
+  const [finalMaskBlurPx, setFinalMaskBlurPx] = useState(6)
   const [ingredientPaths, setIngredientPaths] = useState<string[]>([])
 
   const showConditioning = internalCondType !== null
@@ -147,7 +149,9 @@ export function ICLoraPanel({
     setInternalAdapterId(null)
     setMaskPath(null)
     setIngredientPaths([])
-    setLaplacianBlendGrow(6)
+    setMaskGrowPx(30)
+    setLaplacianBlendGrow(12)
+    setFinalMaskBlurPx(6)
     onConditioningTypeChange?.(null)
     onConditioningStrengthChange?.(1.0)
     setConditioningPreview(null)
@@ -173,9 +177,10 @@ export function ICLoraPanel({
       images,
       ready,
       maskGrowPx: selectedEntry?.workflow === 'in_outpainting' ? maskGrowPx : 30,
-      laplacianBlendGrow: selectedEntry?.workflow === 'in_outpainting' ? laplacianBlendGrow : 6,
+      laplacianBlendGrow: selectedEntry?.workflow === 'in_outpainting' ? laplacianBlendGrow : 12,
+      finalMaskBlurPx: selectedEntry?.workflow === 'in_outpainting' ? finalMaskBlurPx : 6,
     })
-  }, [inputVideoUrl, inputVideoPath, conditioningType, conditioningStrength, internalAdapterId, icLoraReady, maskPath, maskGrowPx, ingredientPaths, onChange])
+  }, [inputVideoUrl, inputVideoPath, conditioningType, conditioningStrength, internalAdapterId, icLoraReady, maskPath, maskGrowPx, laplacianBlendGrow, finalMaskBlurPx, ingredientPaths, onChange])
 
   const checkIcLoraAvailability = useCallback(async () => {
     setIsCheckingIcLora(true)
@@ -650,16 +655,29 @@ export function ICLoraPanel({
                 </label>
                 <label className="flex items-center gap-2">
                   <span className="text-[10px] text-zinc-400 shrink-0">Blend grow:</span>
-                  <span className="text-[9px] text-zinc-600 shrink-0">Laplacian blend</span>
+                  <span className="text-[9px] text-zinc-600 shrink-0">Laplacian mask</span>
                   <input
                     type="range"
                     min={0}
-                    max={15}
+                    max={64}
                     value={laplacianBlendGrow}
                     onChange={(e) => setLaplacianBlendGrow(Number(e.target.value))}
                     className="w-full h-1.5 accent-blue-500"
                   />
                   <span className="text-[10px] text-zinc-400 w-6 text-right tabular-nums">{laplacianBlendGrow}</span>
+                </label>
+                <label className="flex items-center gap-2">
+                  <span className="text-[10px] text-zinc-400 shrink-0">Final blur:</span>
+                  <span className="text-[9px] text-zinc-600 shrink-0">edge feather</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={64}
+                    value={finalMaskBlurPx}
+                    onChange={(e) => setFinalMaskBlurPx(Number(e.target.value))}
+                    className="w-full h-1.5 accent-blue-500"
+                  />
+                  <span className="text-[10px] text-zinc-400 w-6 text-right tabular-nums">{finalMaskBlurPx}</span>
                 </label>
               </div>
               <div className="flex-1 flex items-center justify-center min-h-0 p-4">

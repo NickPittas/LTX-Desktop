@@ -19,7 +19,28 @@ interface RetakePanelProps {
   }) => void
 }
 
+const RETAKE_FPS = 24
 const MIN_DURATION = 2
+
+/** Snap frame count down to nearest 1+8k (VAE-compatible). Minimum 1. */
+function snapFramesDown(frames: number): number {
+  return frames < 1 ? 1 : 1 + 8 * Math.max(0, Math.floor((frames - 1) / 8))
+}
+
+/** Snap duration (seconds) down to valid VAE-compatible frame count at RETAKE_FPS. */
+function snapDurationToValid(dur: number): number {
+  return snapFramesDown(Math.round(dur * RETAKE_FPS)) / RETAKE_FPS
+}
+// ponytail: RETAKE_FPS=24 assumed for UI snap. Backend enforces/adjusts using source video metadata.
+
+function snapEndToDuration(start: number, end: number, videoDuration: number): number {
+  let snapped = start + snapDurationToValid(end - start)
+  if (snapped > videoDuration) {
+    snapped = videoDuration
+    snapped = start + snapDurationToValid(snapped - start)
+  }
+  return snapped
+}
 
 function formatTimecode(seconds: number): string {
   const m = Math.floor(seconds / 60)
@@ -65,7 +86,7 @@ export function RetakePanel({
     setIsPlaying(false)
     setCurrenTime(0)
     setSelStart(0)
-    setSelEnd(Math.min(initialDuration || 0, 5))
+    setSelEnd(snapEndToDuration(0, Math.min(initialDuration || 0, 5), initialDuration || 0))
     setThumbnails([])
     extractingRef.current = false
     initialSelectionAppliedRef.current = false
@@ -89,7 +110,7 @@ export function RetakePanel({
   useEffect(() => {
     if (!videoUrl || videoDuration <= 0 || initialSelectionAppliedRef.current) return
     setSelStart(0)
-    setSelEnd(Math.min(videoDuration, 5))
+    setSelEnd(snapEndToDuration(0, Math.min(videoDuration, 5), videoDuration))
     initialSelectionAppliedRef.current = true
   }, [videoDuration, videoUrl])
 
@@ -206,14 +227,17 @@ export function RetakePanel({
         e.stopPropagation()
         if (video) {
           const t = video.currentTime
-          if (t < selEnd - MIN_DURATION) setSelStart(t)
+          if (t < selEnd - MIN_DURATION) {
+            setSelStart(t)
+            setSelEnd(snapEndToDuration(t, selEnd, videoDuration))
+          }
         }
       } else if (key === 'o') {
         e.preventDefault()
         e.stopPropagation()
         if (video) {
           const t = video.currentTime
-          if (t > selStart + MIN_DURATION) setSelEnd(t)
+          if (t > selStart + MIN_DURATION) setSelEnd(snapEndToDuration(selStart, t, videoDuration))
         }
       } else if (key === 'arrowleft') {
         e.preventDefault()
@@ -274,17 +298,20 @@ export function RetakePanel({
         let newEnd = origin.selEnd + dtSeconds
         if (newStart < 0) { newStart = 0; newEnd = rangeDuration }
         if (newEnd > videoDuration) { newEnd = videoDuration; newStart = videoDuration - rangeDuration }
-        setSelStart(Math.max(0, newStart))
-        setSelEnd(Math.min(videoDuration, newEnd))
+        const clampedStart = Math.max(0, newStart)
+        setSelStart(clampedStart)
+        setSelEnd(snapEndToDuration(clampedStart, Math.min(videoDuration, newEnd), videoDuration))
       } else {
         const fraction = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
         const time = fraction * videoDuration
         if (draggingHandle === 'start') {
           const maxStart = selEndRef.current - MIN_DURATION
-          setSelStart(Math.max(0, Math.min(maxStart, time)))
+          const newStartVal = Math.max(0, Math.min(maxStart, time))
+          setSelStart(newStartVal)
+          setSelEnd(snapEndToDuration(newStartVal, selEndRef.current, videoDuration))
         } else {
           const minEnd = selStartRef.current + MIN_DURATION
-          setSelEnd(Math.min(videoDuration, Math.max(minEnd, time)))
+          setSelEnd(snapEndToDuration(selStartRef.current, Math.min(videoDuration, Math.max(minEnd, time)), videoDuration))
         }
       }
     }

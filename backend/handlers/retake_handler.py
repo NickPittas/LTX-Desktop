@@ -57,6 +57,10 @@ class RetakeHandler(StateHandlerBase):
         if duration < 2:
             raise HTTPError(400, "duration must be at least 2 seconds")
 
+        prompt = prompt.strip()
+        if not prompt:
+            raise HTTPError(400, "Prompt is required for retake")
+
         video_file = Path(video_path)
         if not video_file.exists():
             raise HTTPError(400, f"Video file not found: {video_path}")
@@ -206,17 +210,11 @@ class RetakeHandler(StateHandlerBase):
 
     @staticmethod
     def _validate_video_metadata(video_path: str) -> None:
-        from ltx_core.types import SpatioTemporalScaleFactors
         from ltx_pipelines.utils.media_io import get_videostream_metadata
 
         meta = get_videostream_metadata(video_path)
-        num_frames, width, height = meta.frames, meta.width, meta.height
-        scale = SpatioTemporalScaleFactors.default()
-        if (num_frames - 1) % scale.time != 0:
-            snapped = ((num_frames - 1) // scale.time) * scale.time + 1
-            raise HTTPError(
-                400,
-                f"Video frame count must satisfy 8k+1 (e.g. 97, 193). Got {num_frames}; use a video with {snapped} frames.",
-            )
+        width, height = meta.width, meta.height
         if width % 32 != 0 or height % 32 != 0:
             raise HTTPError(400, f"Video width and height must be multiples of 32. Got {width}x{height}.")
+        # ponytail: frame count 8n+1 requirement is enforced in pipeline._run by snapping output_shape.frames down.
+        # Handler accepts any frame count; pipeline trims to compatible prefix.

@@ -84,6 +84,10 @@ class LTXRetakePipeline:
 
             install_gguf_prompt_encoder_patch()
 
+        # ponytail: split safetensors 22B does not fit full residency on 32GB;
+        # stream 2 layers at a time unless explicit mode set.
+        if is_split and streaming_prefetch_count is None:
+            streaming_prefetch_count = 2
         self.device = device
         self.dtype = torch.bfloat16
         self._streaming_prefetch_count = streaming_prefetch_count
@@ -203,6 +207,16 @@ class LTXRetakePipeline:
 
         # --- Encode source video (tiled) ---
         output_shape = get_videostream_metadata(video_path)
+
+        # ponytail: snap source video frames down to nearest 8n+1 for VAE compatibility.
+        from ltx_core.types import SpatioTemporalScaleFactors
+        _vae_time = SpatioTemporalScaleFactors.default().time
+        if (output_shape.frames - 1) % _vae_time != 0:
+            _snapped = ((output_shape.frames - 1) // _vae_time) * _vae_time + 1
+            output_shape = type(output_shape)(
+                output_shape.batch, _snapped,
+                output_shape.height, output_shape.width, output_shape.fps,
+            )
 
         initial_video_latent = self.image_conditioner(
             lambda enc: video_latent_from_file(

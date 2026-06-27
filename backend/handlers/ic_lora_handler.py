@@ -447,8 +447,12 @@ class IcLoraHandler(StateHandlerBase):
 
             self._generation.update_progress("inference", 15, 0, 1)
 
-            width = _align_up(input_width, 64)
-            height = _align_up(input_height, 64)
+            uses_union_control = req.conditioning_type is not None
+            align_to = 128 if uses_union_control else 64
+            # ponytail: canny/depth loads Union Control ref_downscale=2 LoRA; half-res ref
+            # must still be VAE 32x compatible; 64*2 alignment avoids VAE SpaceToDepth odd latent dims
+            width = _align_up(input_width, align_to)
+            height = _align_up(input_height, align_to)
 
             output_path = (
                 self.config.outputs_dir / f"ic_lora_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.mp4"
@@ -470,6 +474,7 @@ class IcLoraHandler(StateHandlerBase):
                     conditioning_strength=req.conditioning_strength,
                     mask_grow_px=req.mask_grow_px,
                     laplacian_blend_grow=req.laplacian_blend_grow,
+                    final_mask_blur_px=req.final_mask_blur_px,
                 )
             else:
                 ic_state.pipeline.generate(

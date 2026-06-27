@@ -13,6 +13,7 @@ export interface IcLoraSubmitParams {
   maskPath?: string | null
   maskGrowPx?: number
   laplacianBlendGrow?: number
+  finalMaskBlurPx?: number
   images?: { path: string; frame?: number; strength?: number }[]
 }
 
@@ -66,7 +67,8 @@ export function useIcLora() {
       body.mask_path = params.maskPath
     }
     body.mask_grow_px = params.maskGrowPx ?? 30
-    body.laplacian_blend_grow = params.laplacianBlendGrow ?? 6
+    body.laplacian_blend_grow = params.laplacianBlendGrow ?? 12
+    body.final_mask_blur_px = params.finalMaskBlurPx ?? 6
     if (params.images && params.images.length > 0) {
       body.images = params.images
     }

@@ -349,7 +349,8 @@ def laplacian_pyramid_blend(
 
         blended = _pyramid_blend_chunk(img1_chunk, img2_chunk, mask_chunk, max_level=max_level)
         cropped = blended[..., :orig_h, :orig_w].clamp(0, 1)
-        results.append(cropped.cpu() if device is not None else cropped)
+        # ponytail: keep result on compute device — callers own .cpu() if needed
+        results.append(cropped)
 
     result = torch.cat(results, dim=0)
 

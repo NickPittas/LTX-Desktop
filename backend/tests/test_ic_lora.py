@@ -1034,10 +1034,10 @@ class TestIcLoraEmptyPromptWorkflow:
 class TestIcLoraLaplacianBlendGrow:
     """laplacian_blend_grow separate field forwarded to pipeline for inpaint final blend."""
 
-    def test_default_forwards_6(self, client, test_state,
-                                create_fake_model_files, create_fake_ic_lora_files,
-                                fake_services):
-        """Default laplacian_blend_grow=6 forwarded to pipeline generate_inpaint."""
+    def test_default_forwards_12(self, client, test_state,
+                                 create_fake_model_files, create_fake_ic_lora_files,
+                                 fake_services):
+        """Default laplacian_blend_grow=12 and final_mask_blur_px=6 forwarded."""
         create_fake_model_files()
         from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
         adapter = OFFICIAL_LTX23_ADAPTERS["in_outpainting"]
@@ -1068,8 +1068,11 @@ class TestIcLoraLaplacianBlendGrow:
         )
         assert response.status_code == 200, f"Unexpected status: {response.json()}"
         kwargs = fake_services.ic_lora_pipeline.generate_calls[0]
-        assert kwargs.get("laplacian_blend_grow") == 6, (
-            f"Expected default laplacian_blend_grow=6, got {kwargs.get('laplacian_blend_grow')!r}"
+        assert kwargs.get("laplacian_blend_grow") == 12, (
+            f"Expected default laplacian_blend_grow=12, got {kwargs.get('laplacian_blend_grow')!r}"
+        )
+        assert kwargs.get("final_mask_blur_px") == 6, (
+            f"Expected default final_mask_blur_px=6, got {kwargs.get('final_mask_blur_px')!r}"
         )
 
     def test_custom_laplacian_blend_grow(self, client, test_state,
@@ -1150,6 +1153,48 @@ class TestIcLoraLaplacianBlendGrow:
         )
         assert kwargs.get("mask_grow_px") == 30, (
             f"mask_grow_px should still default to 30, got {kwargs.get('mask_grow_px')!r}"
+        )
+
+    def test_custom_final_mask_blur_px(self, client, test_state,
+                                        create_fake_model_files, fake_services):
+        """Custom final_mask_blur_px=14 forwarded independently of laplacian_blend_grow."""
+        create_fake_model_files()
+        from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
+        adapter = OFFICIAL_LTX23_ADAPTERS["in_outpainting"]
+        adapter_path = test_state.config.default_models_dir / adapter.filename
+        adapter_path.parent.mkdir(parents=True, exist_ok=True)
+        adapter_path.write_bytes(b"\x00" * 1024)
+
+        test_state.state.app_settings.use_local_text_encoder = True
+        fake_services.ic_lora_pipeline.bind_singleton(fake_services.ic_lora_pipeline)
+
+        video_path = test_state.config.outputs_dir / "test_video.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(str(video_path),
+                                                   FakeCapture(frames=["frame-a", "frame-b"]))
+
+        mask_path = test_state.config.outputs_dir / "test_mask.mp4"
+        mask_path.write_bytes(b"\x00" * 100)
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "prompt": "add a car",
+                "images": [],
+                "adapter_id": "in_outpainting",
+                "mask_path": str(mask_path),
+                "laplacian_blend_grow": 20,
+                "final_mask_blur_px": 14,
+            },
+        )
+        assert response.status_code == 200, f"Unexpected status: {response.json()}"
+        kwargs = fake_services.ic_lora_pipeline.generate_calls[0]
+        assert kwargs.get("laplacian_blend_grow") == 20, (
+            f"Expected laplacian_blend_grow=20, got {kwargs.get('laplacian_blend_grow')!r}"
+        )
+        assert kwargs.get("final_mask_blur_px") == 14, (
+            f"Expected final_mask_blur_px=14, got {kwargs.get('final_mask_blur_px')!r}"
         )
 
 
@@ -1240,3 +1285,147 @@ class TestIcLoraResolution:
         # Non-inpaint now also preserves aligned input resolution
         assert kwargs["width"] == 1920, f"Expected width=1920, got {kwargs['width']}"
         assert kwargs["height"] == 1088, f"Expected height=1088, got {kwargs['height']}"
+
+    def test_union_control_1920x1080_aligns_to_128(self, client, test_state,
+                                                     create_fake_model_files,
+                                                     fake_services):
+        """Union Control aligns to 128 because ref_downscale=2 means half-res ref
+        must still be VAE 32x compatible (align 64*2)."""
+        create_fake_model_files()
+        test_state.state.app_settings.use_local_text_encoder = True
+        fake_services.ic_lora_pipeline.bind_singleton(fake_services.ic_lora_pipeline)
+
+        adapter_dir = test_state.config.default_models_dir / "adapters"
+        adapter_dir.mkdir(parents=True, exist_ok=True)
+        union_file = adapter_dir / "union_control.safetensors"
+        union_file.write_bytes(b"\x00" * 1024)
+
+        profile = ModelProfilePayload(
+            id="union-profile",
+            name="Union Profile",
+            source="official",
+            components=ModelComponentPaths(
+                official_adapters={"union_control": str(union_file)},
+            ),
+        )
+        test_state.state.model_profiles = [profile]
+        test_state.state.active_model_profile_id = "union-profile"
+
+        video_path = test_state.config.outputs_dir / "test_video.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(
+            str(video_path),
+            FakeCapture(frames=["frame-a", "frame-b"], width=1920, height=1080),
+        )
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "conditioning_type": "canny",
+                "adapter_id": "union_control",
+                "prompt": "test prompt",
+                "images": [{"path": "/fake/img.png", "frame": 0, "strength": 1.0}],
+            },
+        )
+        assert response.status_code == 200, f"Unexpected status: {response.json()}"
+        kwargs = fake_services.ic_lora_pipeline.generate_calls[0]
+        # union_control uses align_to=128: align_up(1920, 128) = 1920, align_up(1080, 128) = 1152
+        assert kwargs["width"] == 1920, f"Expected width=1920, got {kwargs['width']}"
+        assert kwargs["height"] == 1152, f"Expected height=1152 (1080 aligned to 128), got {kwargs['height']}"
+
+    def test_plain_canny_1920x1080_aligns_to_128(self, client, test_state,
+                                                  create_fake_model_files,
+                                                  fake_services):
+        """Plain canny (no adapter_id) also aligns to 128 because union control is loaded."""
+        create_fake_model_files()
+        test_state.state.app_settings.use_local_text_encoder = True
+        fake_services.ic_lora_pipeline.bind_singleton(fake_services.ic_lora_pipeline)
+
+        adapter_dir = test_state.config.default_models_dir / "adapters"
+        adapter_dir.mkdir(parents=True, exist_ok=True)
+        union_file = adapter_dir / "union_control.safetensors"
+        union_file.write_bytes(b"\x00" * 1024)
+
+        profile = ModelProfilePayload(
+            id="canny-only",
+            name="Canny Only",
+            source="official",
+            components=ModelComponentPaths(
+                official_adapters={"union_control": str(union_file)},
+            ),
+        )
+        test_state.state.model_profiles = [profile]
+        test_state.state.active_model_profile_id = "canny-only"
+
+        video_path = test_state.config.outputs_dir / "test_video.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(
+            str(video_path),
+            FakeCapture(frames=["frame-a", "frame-b"], width=1920, height=1080),
+        )
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "conditioning_type": "canny",
+                "prompt": "test prompt",
+                "images": [{"path": "/fake/img.png", "frame": 0, "strength": 1.0}],
+            },
+        )
+        assert response.status_code == 200, f"Unexpected status: {response.json()}"
+        kwargs = fake_services.ic_lora_pipeline.generate_calls[0]
+        assert kwargs["width"] == 1920, f"Expected width=1920, got {kwargs['width']}"
+        assert kwargs["height"] == 1152, f"Expected height=1152 (1080 aligned to 128), got {kwargs['height']}"
+
+    def test_canny_with_adapter_1920x1080_aligns_to_128(self, client, test_state,
+                                                        create_fake_model_files,
+                                                        fake_services):
+        """Canny + another adapter (ingredients) aligns to 128 because union control is loaded."""
+        create_fake_model_files()
+        test_state.state.app_settings.use_local_text_encoder = True
+        fake_services.ic_lora_pipeline.bind_singleton(fake_services.ic_lora_pipeline)
+
+        adapter_dir = test_state.config.default_models_dir / "adapters"
+        adapter_dir.mkdir(parents=True, exist_ok=True)
+        union_file = adapter_dir / "union_control.safetensors"
+        union_file.write_bytes(b"\x00" * 1024)
+        adapter_file = adapter_dir / "ingredients.safetensors"
+        adapter_file.write_bytes(b"\x00" * 1024)
+
+        profile = ModelProfilePayload(
+            id="canny-plus-adapter",
+            name="Canny Plus Adapter",
+            source="official",
+            components=ModelComponentPaths(
+                official_adapters={
+                    "union_control": str(union_file),
+                    "ingredients": str(adapter_file),
+                },
+            ),
+        )
+        test_state.state.model_profiles = [profile]
+        test_state.state.active_model_profile_id = "canny-plus-adapter"
+
+        video_path = test_state.config.outputs_dir / "test_video.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(
+            str(video_path),
+            FakeCapture(frames=["frame-a", "frame-b"], width=1920, height=1080),
+        )
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "conditioning_type": "canny",
+                "prompt": "test prompt",
+                "images": [{"path": "/fake/img.png", "frame": 0, "strength": 1.0}],
+                "adapter_id": "ingredients",
+            },
+        )
+        assert response.status_code == 200, f"Unexpected status: {response.json()}"
+        kwargs = fake_services.ic_lora_pipeline.generate_calls[0]
+        assert kwargs["width"] == 1920, f"Expected width=1920, got {kwargs['width']}"
+        assert kwargs["height"] == 1152, f"Expected height=1152 (1080 aligned to 128), got {kwargs['height']}"
