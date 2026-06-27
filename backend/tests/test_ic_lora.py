@@ -92,7 +92,7 @@ class TestIcLoraGenerate:
             name="Test Profile",
             source="official",
             components=ModelComponentPaths(
-                official_adapters={"ingredients": str(adapter_file)},
+                official_adapters={"water_simulation": str(adapter_file)},
             ),
         )
         test_state.state.model_profiles = [profile]
@@ -109,7 +109,7 @@ class TestIcLoraGenerate:
                 "conditioning_type": "canny",
                 "prompt": "test prompt",
                 "images": [{"path": "/fake/img.png", "frame": 0, "strength": 1.0}],
-                "adapter_id": "ingredients",
+                "adapter_id": "water_simulation",
             },
         )
         assert response.status_code == 200
@@ -195,7 +195,7 @@ class TestIcLoraGenerate:
         adapter_dir.mkdir(parents=True, exist_ok=True)
         union_file = adapter_dir / "union_control.safetensors"
         union_file.write_bytes(b"\x00" * 1024)
-        adapter_file = adapter_dir / "ingredients.safetensors"
+        adapter_file = adapter_dir / "water_simulation.safetensors"
         adapter_file.write_bytes(b"\x00" * 1024)
 
         profile = ModelProfilePayload(
@@ -204,7 +204,7 @@ class TestIcLoraGenerate:
             source="official",
             components=ModelComponentPaths(
                 official_adapters={
-                    "ingredients": str(adapter_file),
+                    "water_simulation": str(adapter_file),
                     "union_control": str(union_file),
                 },
             ),
@@ -223,7 +223,7 @@ class TestIcLoraGenerate:
                 "conditioning_type": "canny",
                 "prompt": "test prompt",
                 "images": [{"path": "/fake/img.png", "frame": 0, "strength": 1.0}],
-                "adapter_id": "ingredients",
+                "adapter_id": "water_simulation",
             },
         )
         assert response.status_code == 200
@@ -304,6 +304,88 @@ class TestIcLoraGenerate:
         )
         assert_http_error(response, status_code=400, code="HTTP_400", message="Mask not found: /nonexistent/mask.mp4")
 
+    def test_lora_strength_default_1_0(self, client, test_state, create_fake_model_files, create_fake_ic_lora_files, fake_services):
+        """Default lora_strength=1.0 reaches pipeline create."""
+        create_fake_model_files()
+        create_fake_ic_lora_files()
+        test_state.state.app_settings.use_local_text_encoder = True
+
+        video_path = test_state.config.outputs_dir / "test_video.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(str(video_path), FakeCapture(frames=["frame-a", "frame-b"]))
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "conditioning_type": "canny",
+                "prompt": "test prompt",
+                "images": [{"path": "/fake/img.png", "frame": 0, "strength": 1.0}],
+            },
+        )
+        assert response.status_code == 200
+        assert fake_services.ic_lora_pipeline.last_lora_strength == 1.0
+
+    def test_lora_strength_explicit_forwards(self, client, test_state, create_fake_model_files, create_fake_ic_lora_files, fake_services):
+        """Explicit lora_strength=0.5 reaches pipeline create."""
+        create_fake_model_files()
+        create_fake_ic_lora_files()
+        test_state.state.app_settings.use_local_text_encoder = True
+
+        video_path = test_state.config.outputs_dir / "test_video.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(str(video_path), FakeCapture(frames=["frame-a", "frame-b"]))
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "conditioning_type": "canny",
+                "prompt": "test prompt",
+                "images": [{"path": "/fake/img.png", "frame": 0, "strength": 1.0}],
+                "lora_strength": 0.5,
+            },
+        )
+        assert response.status_code == 200
+        assert fake_services.ic_lora_pipeline.last_lora_strength == 0.5
+
+    def test_lora_strength_change_causes_reload(self, client, test_state, create_fake_model_files, create_fake_ic_lora_files, fake_services):
+        """Changing lora_strength triggers pipeline rebuild (cache miss)."""
+        create_fake_model_files()
+        create_fake_ic_lora_files()
+        test_state.state.app_settings.use_local_text_encoder = True
+
+        video_path = test_state.config.outputs_dir / "test_video.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(str(video_path), FakeCapture(frames=["frame-a", "frame-b"]))
+
+        # First call with default lora_strength (1.0)
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "conditioning_type": "canny",
+                "prompt": "test prompt",
+                "images": [{"path": "/fake/img.png", "frame": 0, "strength": 1.0}],
+            },
+        )
+        assert response.status_code == 200
+        assert fake_services.ic_lora_pipeline.last_lora_strength == 1.0
+
+        # Second call with different lora_strength should force reload
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "conditioning_type": "canny",
+                "prompt": "test prompt",
+                "images": [{"path": "/fake/img.png", "frame": 0, "strength": 1.0}],
+                "lora_strength": 0.75,
+            },
+        )
+        assert response.status_code == 200
+        assert fake_services.ic_lora_pipeline.last_lora_strength == 0.75
+
     def test_adapter_id_non_ic_lora_returns_error(self, client, test_state, create_fake_model_files, create_fake_ic_lora_files):
         create_fake_model_files()
         create_fake_ic_lora_files()
@@ -354,7 +436,7 @@ class TestIcLoraGenerate:
         # Active profile with transformer path — no official model files created
         adapter_dir = test_state.config.default_models_dir / "adapters"
         adapter_dir.mkdir(parents=True, exist_ok=True)
-        adapter_file = adapter_dir / "ingredients.safetensors"
+        adapter_file = adapter_dir / "water_simulation.safetensors"
         adapter_file.write_bytes(b"\x00" * 1024)
 
         profile = ModelProfilePayload(
@@ -365,7 +447,7 @@ class TestIcLoraGenerate:
                 transformer="/fake/path/model.safetensors",
                 text_encoder_root="/fake/text/encoder",
                 text_encoder_format="hf_folder",
-                official_adapters={"ingredients": str(adapter_file)},
+                official_adapters={"water_simulation": str(adapter_file)},
             ),
         )
         test_state.state.model_profiles = [profile]
@@ -382,7 +464,7 @@ class TestIcLoraGenerate:
                 "conditioning_type": "canny",
                 "prompt": "test prompt",
                 "images": [{"path": "/fake/img.png", "frame": 0, "strength": 1.0}],
-                "adapter_id": "ingredients",
+                "adapter_id": "water_simulation",
             },
         )
         assert response.status_code == 200
@@ -405,7 +487,7 @@ class TestIcLoraGenerate:
         adapter_dir.mkdir(parents=True, exist_ok=True)
         union_file = adapter_dir / "union_control.safetensors"
         union_file.write_bytes(b"\x00" * 1024)
-        adapter_file = adapter_dir / "ingredients.safetensors"
+        adapter_file = adapter_dir / "water_simulation.safetensors"
         adapter_file.write_bytes(b"\x00" * 1024)
 
         # Profile with official_adapters — no legacy IC-LoRA checkpoints under models_dir
@@ -416,7 +498,7 @@ class TestIcLoraGenerate:
             components=ModelComponentPaths(
                 official_adapters={
                     "union_control": str(union_file),
-                    "ingredients": str(adapter_file),
+                    "water_simulation": str(adapter_file),
                 },
             ),
         )
@@ -434,7 +516,7 @@ class TestIcLoraGenerate:
                 "conditioning_type": "canny",
                 "prompt": "test prompt",
                 "images": [{"path": "/fake/img.png", "frame": 0, "strength": 1.0}],
-                "adapter_id": "ingredients",
+                "adapter_id": "water_simulation",
             },
         )
         assert response.status_code == 200
@@ -450,7 +532,7 @@ class TestIcLoraGenerate:
 
         adapter_dir = test_state.config.default_models_dir / "adapters"
         adapter_dir.mkdir(parents=True, exist_ok=True)
-        adapter_file = adapter_dir / "ingredients.safetensors"
+        adapter_file = adapter_dir / "water_simulation.safetensors"
         adapter_file.write_bytes(b"\x00" * 1024)
 
         profile = ModelProfilePayload(
@@ -458,7 +540,7 @@ class TestIcLoraGenerate:
             name="Test Profile",
             source="official",
             components=ModelComponentPaths(
-                official_adapters={"ingredients": str(adapter_file)},
+                official_adapters={"water_simulation": str(adapter_file)},
             ),
         )
         test_state.state.model_profiles = [profile]
@@ -476,17 +558,17 @@ class TestIcLoraGenerate:
                 "video_path": str(video_path),
                 "prompt": "test prompt",
                 "images": [{"path": "/fake/img.png", "frame": 0, "strength": 1.0}],
-                "adapter_id": "ingredients",
+                "adapter_id": "water_simulation",
             },
         )
         assert response.status_code == 200
         assert response.json()["status"] == "complete"
         assert fake_services.ic_lora_pipeline.last_lora_paths == [str(adapter_file)]
 
-    def test_canny_with_adapter_loads_union_then_ingredients(
+    def test_canny_with_adapter_loads_union_then_water_simulation(
         self, client, test_state, fake_services, create_fake_model_files, make_test_image
     ):
-        """Canny + ingredients: loads union first then ingredients, passes a control video."""
+        """Canny + adapter: loads union first then adapter, passes a control video."""
         create_fake_model_files()
         test_state.state.app_settings.use_local_text_encoder = True
 
@@ -494,7 +576,7 @@ class TestIcLoraGenerate:
         adapter_dir.mkdir(parents=True, exist_ok=True)
         union_file = adapter_dir / "union_control.safetensors"
         union_file.write_bytes(b"\x00" * 1024)
-        adapter_file = adapter_dir / "ingredients.safetensors"
+        adapter_file = adapter_dir / "water_simulation.safetensors"
         adapter_file.write_bytes(b"\x00" * 1024)
 
         profile = ModelProfilePayload(
@@ -504,7 +586,7 @@ class TestIcLoraGenerate:
             components=ModelComponentPaths(
                 official_adapters={
                     "union_control": str(union_file),
-                    "ingredients": str(adapter_file),
+                    "water_simulation": str(adapter_file),
                 },
             ),
         )
@@ -524,7 +606,7 @@ class TestIcLoraGenerate:
                 "conditioning_type": "canny",
                 "prompt": "test prompt",
                 "images": [{"path": "/fake/img.png", "frame": 0, "strength": 1.0}],
-                "adapter_id": "ingredients",
+                "adapter_id": "water_simulation",
             },
         )
         assert response.status_code == 200
@@ -604,6 +686,7 @@ class TestIcLoraWorkflowGating:
         create_fake_ic_lora_files()
         test_state.state.app_settings.use_local_text_encoder = True
 
+        # video_path provided but will be ignored — ingredients no longer requires it
         video_path = test_state.config.outputs_dir / "test_video.mp4"
         video_path.write_bytes(b"\x00" * 100)
         test_state.video_processor.register_video(str(video_path), FakeCapture(frames=["frame-a", "frame-b"]))
@@ -619,6 +702,171 @@ class TestIcLoraWorkflowGating:
         )
         assert_http_error(response, status_code=400, code="HTTP_400",
                           message="Ingredients adapter requires at least one image in images[]")
+
+    def test_ingredients_without_video_path_ok(self, client, test_state,
+                                                create_fake_model_files,
+                                                fake_services):
+        """Ingredients T2V works without video_path; no video opened, uses request dims."""
+        create_fake_model_files()
+        test_state.state.app_settings.use_local_text_encoder = True
+        fake_services.ic_lora_pipeline.bind_singleton(fake_services.ic_lora_pipeline)
+
+        adapter_dir = test_state.config.default_models_dir / "adapters"
+        adapter_dir.mkdir(parents=True, exist_ok=True)
+        adapter_file = adapter_dir / "ingredients.safetensors"
+        adapter_file.write_bytes(b"\x00" * 1024)
+
+        profile = ModelProfilePayload(
+            id="ingredients-profile",
+            name="Ingredients Profile",
+            source="official",
+            components=ModelComponentPaths(
+                official_adapters={"ingredients": str(adapter_file)},
+            ),
+        )
+        test_state.state.model_profiles = [profile]
+        test_state.state.active_model_profile_id = "ingredients-profile"
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "prompt": "test prompt",
+                "images": [{"path": "/fake/img.png", "frame": 0, "strength": 1.0}],
+                "adapter_id": "ingredients",
+            },
+        )
+        assert response.status_code == 200, f"Unexpected status: {response.json()}"
+        assert response.json()["status"] == "complete"
+
+        # No video was opened
+        assert test_state.video_processor.open_video_calls == [], (
+            f"Expected no open_video calls, got: {test_state.video_processor.open_video_calls}"
+        )
+
+        # Generate called with video_conditioning=[] and images
+        kwargs = fake_services.ic_lora_pipeline.generate_calls[0]
+        assert kwargs.get("video_conditioning") == [], (
+            f"Expected video_conditioning=[], got {kwargs.get('video_conditioning')!r}"
+        )
+        assert len(kwargs.get("images", [])) == 1
+        assert kwargs["images"][0].path == "/fake/img.png"
+
+        # Default T2V dims
+        assert kwargs["width"] == 704
+        assert kwargs["height"] == 1280
+        assert kwargs["num_frames"] == 121
+        assert kwargs["frame_rate"] == 24.0
+
+    def test_non_ingredients_without_video_path_returns_400(self, client, test_state,
+                                                             create_fake_model_files,
+                                                             create_fake_ic_lora_files):
+        """Standard adapter without video_path returns 400, not 500."""
+        create_fake_model_files()
+        create_fake_ic_lora_files()
+        test_state.state.app_settings.use_local_text_encoder = True
+
+        adapter_dir = test_state.config.default_models_dir / "adapters"
+        adapter_dir.mkdir(parents=True, exist_ok=True)
+        adapter_file = adapter_dir / "water_simulation.safetensors"
+        adapter_file.write_bytes(b"\x00" * 1024)
+
+        profile = ModelProfilePayload(
+            id="ws-profile",
+            name="WaterSim Profile",
+            source="official",
+            components=ModelComponentPaths(
+                official_adapters={"water_simulation": str(adapter_file)},
+            ),
+        )
+        test_state.state.model_profiles = [profile]
+        test_state.state.active_model_profile_id = "ws-profile"
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "prompt": "test prompt",
+                "images": [{"path": "/fake/img.png", "frame": 0, "strength": 1.0}],
+                "adapter_id": "water_simulation",
+            },
+        )
+        assert_http_error(response, status_code=400, code="HTTP_400",
+                          message="video_path is required for this adapter")
+
+    def test_ingredients_with_conditioning_type_returns_400(self, client, test_state,
+                                                             create_fake_model_files,
+                                                             create_fake_ic_lora_files):
+        """Ingredients rejects conditioning_type."""
+        create_fake_model_files()
+        create_fake_ic_lora_files()
+        test_state.state.app_settings.use_local_text_encoder = True
+
+        adapter_dir = test_state.config.default_models_dir / "adapters"
+        adapter_dir.mkdir(parents=True, exist_ok=True)
+        adapter_file = adapter_dir / "ingredients.safetensors"
+        adapter_file.write_bytes(b"\x00" * 1024)
+
+        profile = ModelProfilePayload(
+            id="ingredients-profile",
+            name="Ingredients Profile",
+            source="official",
+            components=ModelComponentPaths(
+                official_adapters={"ingredients": str(adapter_file)},
+            ),
+        )
+        test_state.state.model_profiles = [profile]
+        test_state.state.active_model_profile_id = "ingredients-profile"
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "prompt": "test prompt",
+                "images": [{"path": "/fake/img.png", "frame": 0, "strength": 1.0}],
+                "adapter_id": "ingredients",
+                "conditioning_type": "canny",
+            },
+        )
+        assert_http_error(response, status_code=400, code="HTTP_400",
+                          message="Ingredients adapter is image-only; omit conditioning_type")
+
+    def test_ingredients_num_frames_snaps_valid(self, client, test_state,
+                                                 create_fake_model_files,
+                                                 fake_services):
+        """Invalid num_frames (not 1+8k) is snapped to valid LTX frame count."""
+        create_fake_model_files()
+        test_state.state.app_settings.use_local_text_encoder = True
+        fake_services.ic_lora_pipeline.bind_singleton(fake_services.ic_lora_pipeline)
+
+        adapter_dir = test_state.config.default_models_dir / "adapters"
+        adapter_dir.mkdir(parents=True, exist_ok=True)
+        adapter_file = adapter_dir / "ingredients.safetensors"
+        adapter_file.write_bytes(b"\x00" * 1024)
+
+        profile = ModelProfilePayload(
+            id="ingredients-profile",
+            name="Ingredients Profile",
+            source="official",
+            components=ModelComponentPaths(
+                official_adapters={"ingredients": str(adapter_file)},
+            ),
+        )
+        test_state.state.model_profiles = [profile]
+        test_state.state.active_model_profile_id = "ingredients-profile"
+
+        # 90 is not 1+8k; expected snap: 1 + 8 * ((90-1)//8) = 1 + 8*11 = 89
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "prompt": "test prompt",
+                "images": [{"path": "/fake/img.png", "frame": 0, "strength": 1.0}],
+                "adapter_id": "ingredients",
+                "num_frames": 90,
+            },
+        )
+        assert response.status_code == 200, f"Unexpected status: {response.json()}"
+        kwargs = fake_services.ic_lora_pipeline.generate_calls[0]
+        assert kwargs["num_frames"] == 89, (
+            f"Expected num_frames snapped to 89, got {kwargs['num_frames']}"
+        )
 
     def test_lipdub_returns_400_unavailable(self, client, test_state, create_fake_model_files, create_fake_ic_lora_files):
         create_fake_model_files()
@@ -1391,7 +1639,7 @@ class TestIcLoraResolution:
         adapter_dir.mkdir(parents=True, exist_ok=True)
         union_file = adapter_dir / "union_control.safetensors"
         union_file.write_bytes(b"\x00" * 1024)
-        adapter_file = adapter_dir / "ingredients.safetensors"
+        adapter_file = adapter_dir / "water_simulation.safetensors"
         adapter_file.write_bytes(b"\x00" * 1024)
 
         profile = ModelProfilePayload(
@@ -1401,7 +1649,7 @@ class TestIcLoraResolution:
             components=ModelComponentPaths(
                 official_adapters={
                     "union_control": str(union_file),
-                    "ingredients": str(adapter_file),
+                    "water_simulation": str(adapter_file),
                 },
             ),
         )
@@ -1422,7 +1670,7 @@ class TestIcLoraResolution:
                 "conditioning_type": "canny",
                 "prompt": "test prompt",
                 "images": [{"path": "/fake/img.png", "frame": 0, "strength": 1.0}],
-                "adapter_id": "ingredients",
+                "adapter_id": "water_simulation",
             },
         )
         assert response.status_code == 200, f"Unexpected status: {response.json()}"

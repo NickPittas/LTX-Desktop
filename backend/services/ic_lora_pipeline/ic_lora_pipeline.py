@@ -21,6 +21,7 @@ class IcLoraPipeline(Protocol):
         device: torch.device,
         streaming_prefetch_count: int | None,
         components: ResolvedLtxComponents | None = None,
+        lora_strength: float = 1.0,
     ) -> "IcLoraPipeline":
         ...
 

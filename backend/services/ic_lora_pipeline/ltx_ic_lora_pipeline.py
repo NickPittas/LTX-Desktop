@@ -106,6 +106,7 @@ class LTXIcLoraPipeline:
         device: torch.device,
         streaming_prefetch_count: int | None,
         components: ResolvedLtxComponents | None = None,
+        lora_strength: float = 1.0,
     ) -> "LTXIcLoraPipeline":
         return LTXIcLoraPipeline(
             checkpoint_path=checkpoint_path,
@@ -115,6 +116,7 @@ class LTXIcLoraPipeline:
             device=device,
             streaming_prefetch_count=streaming_prefetch_count,
             components=components,
+            lora_strength=lora_strength,
         )
 
     def __init__(
@@ -126,6 +128,7 @@ class LTXIcLoraPipeline:
         device: torch.device,
         streaming_prefetch_count: int | None,
         components: ResolvedLtxComponents | None = None,
+        lora_strength: float = 1.0,
     ) -> None:
         self._components = components
         from ltx_core.loader.primitives import LoraPathStrengthAndSDOps
@@ -160,8 +163,10 @@ class LTXIcLoraPipeline:
         if is_split and streaming_prefetch_count is None:
             streaming_prefetch_count = 2
         self._streaming_prefetch_count = streaming_prefetch_count
+        # ponytail: one strength applies uniformly to all LoRAs in the stack;
+        # split per-LoRA only if product needs it.
         lora_entries = [
-            LoraPathStrengthAndSDOps(path=lp, strength=1.0, sd_ops=LTXV_LORA_COMFY_RENAMING_MAP)
+            LoraPathStrengthAndSDOps(path=lp, strength=lora_strength, sd_ops=LTXV_LORA_COMFY_RENAMING_MAP)
             for lp in lora_paths
         ]
         self.pipeline = ICLoraPipeline(

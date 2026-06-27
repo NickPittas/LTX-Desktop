@@ -394,6 +394,10 @@ function PromptBar({
   onIcLoraCondTypeChange,
   icLoraStrength,
   onIcLoraStrengthChange,
+  loraStrength,
+  onLoraStrengthChange,
+  showIcLoraOutputSettings,
+  onFpsChange,
 }: {
   mode: 'image' | 'video' | 'retake' | 'ic-lora'
   onModeChange: (mode: 'image' | 'video' | 'retake' | 'ic-lora') => void
@@ -426,6 +430,10 @@ function PromptBar({
   onIcLoraCondTypeChange?: (type: ICLoraConditioningType) => void
   icLoraStrength?: number
   onIcLoraStrengthChange?: (strength: number) => void
+  loraStrength?: number
+  onLoraStrengthChange?: (strength: number) => void
+  showIcLoraOutputSettings?: boolean
+  onFpsChange?: (fps: number) => void
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const audioInputRef = useRef<HTMLInputElement>(null)
@@ -668,6 +676,99 @@ function PromptBar({
                 </>
               }
             />
+            <div className="w-px h-4 bg-zinc-700 mx-0.5" />
+            <SettingsDropdown
+              title="LORA WEIGHT"
+              value={String(loraStrength ?? 1.0)}
+              onChange={(v) => onLoraStrengthChange?.(parseFloat(v))}
+              options={[
+                { value: '0', label: '0.00' },
+                { value: '0.25', label: '0.25' },
+                { value: '0.5', label: '0.50' },
+                { value: '0.75', label: '0.75' },
+                { value: '1', label: '1.00' },
+                { value: '1.25', label: '1.25' },
+                { value: '1.5', label: '1.50' },
+                { value: '1.75', label: '1.75' },
+                { value: '2', label: '2.00' },
+              ]}
+              trigger={
+                <>
+                  <span className="text-zinc-500 text-[10px]">W</span>
+                  <span className="text-zinc-300 font-medium">{(loraStrength ?? 1.0).toFixed(2)}</span>
+                  <ChevronUp className="h-3 w-3 text-zinc-500" />
+                </>
+              }
+            />
+          {showIcLoraOutputSettings && (() => {
+            // ponytail: direct call for Ingredients; can't reuse resolvedVideoOptions (null in ic-lora)
+            const ico = resolveVideoGenerationOptions({ settings, modelSpecs: videoModelSpecs, hasAudio: false })
+            return (
+              <>
+                <div className="w-px h-4 bg-zinc-700 mx-0.5" />
+                <SettingsDropdown
+                  title="DURATION"
+                  value={String(ico.selectedDuration ?? settings.duration)}
+                  onChange={(v) => onSettingsChange({ ...settings, duration: parseInt(v) })}
+                  options={ico.durationOptions.map((d) => ({ value: String(d), label: `${d}s` }))}
+                  trigger={
+                    <>
+                      <span className="text-zinc-500 text-[10px]">DUR</span>
+                      <span className="text-zinc-300 font-medium">{ico.selectedDuration ?? settings.duration}s</span>
+                      <ChevronUp className="h-3 w-3 text-zinc-500" />
+                    </>
+                  }
+                />
+                <div className="w-px h-4 bg-zinc-700 mx-0.5" />
+                <SettingsDropdown
+                  title="RESOLUTION"
+                  value={settings.videoResolution}
+                  onChange={(v) => onSettingsChange({ ...settings, videoResolution: v })}
+                  options={ico.resolutionOptions.map((r) => ({ value: r, label: r.replace('p', 'p') }))}
+                  trigger={
+                    <>
+                      <span className="text-zinc-500 text-[10px]">RES</span>
+                      <span className="text-zinc-300 font-medium">{settings.videoResolution?.replace('p', '')}</span>
+                      <ChevronUp className="h-3 w-3 text-zinc-500" />
+                    </>
+                  }
+                />
+                <div className="w-px h-4 bg-zinc-700 mx-0.5" />
+                <SettingsDropdown
+                  title="ASPECT RATIO"
+                  value={settings.aspectRatio || '16:9'}
+                  onChange={(v) => onSettingsChange({ ...settings, aspectRatio: v })}
+                  options={[
+                    { value: '16:9', label: '16:9' },
+                    { value: '9:16', label: '9:16' },
+                  ]}
+                  trigger={
+                    <>
+                      <span className="text-zinc-500 text-[10px]">AR</span>
+                      <span className="text-zinc-300 font-medium">{settings.aspectRatio || '16:9'}</span>
+                      <ChevronUp className="h-3 w-3 text-zinc-500" />
+                    </>
+                  }
+                />
+                <div className="w-px h-4 bg-zinc-700 mx-0.5" />
+                <div className="flex items-center gap-1.5 px-2">
+                  <span className="text-zinc-500 text-[10px]">FPS</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={120}
+                    step={1}
+                    value={settings.fps}
+                    onChange={(e) => {
+                      const v = parseInt(e.target.value, 10)
+                      if (!isNaN(v) && v > 0) (onFpsChange ?? ((x) => onSettingsChange({ ...settings, fps: x })))(v)
+                    }}
+                    className="w-14 px-2 py-0.5 text-[11px] bg-zinc-800 border border-zinc-700 rounded text-zinc-200 text-center focus:outline-none focus:border-amber-500/50 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                  />
+                </div>
+              </>
+            )
+          })()}
           </>
         ) : mode === 'image' ? (
           <>
@@ -997,6 +1098,7 @@ export function GenSpace() {
   const [icLoraPanelKey, setIcLoraPanelKey] = useState(0)
   const [icLoraCondType, setIcLoraCondType] = useState<ICLoraConditioningType>(null)
   const [icLoraStrength, setIcLoraStrength] = useState(1.0)
+  const [loraStrength, setLoraStrength] = useState(1.0)
   const [icLoraInitial, setIcLoraInitial] = useState<{
     videoPath: string | null
   }>({ videoPath: null })
@@ -1211,14 +1313,31 @@ export function GenSpace() {
   
   const handleGenerate = async () => {
     if (mode === 'ic-lora') {
-      if (!icLoraInput.videoPath || !icLoraInput.ready) return
+      if (!icLoraInput.ready) return
+      if (icLoraInput.adapterId !== 'ingredients' && !icLoraInput.videoPath) return
       if (!prompt.trim() && icLoraInput.adapterId !== 'in_outpainting') return
+
+      // Derive Ingredients output settings from PromptBar controls
+      const fpsForIcLora = settings.fps
+      // ponytail: local resolution map mirrors backend; move to shared schema if more res added
+      const RES_MAP: Record<string, { width: number; height: number }> = {
+        '540p': { width: 960, height: 544 },
+        '720p': { width: 1280, height: 704 },
+        '1080p': { width: 1920, height: 1088 },
+      }
+      const baseRes = RES_MAP[settings.videoResolution] ?? RES_MAP['540p']
+      const aspect = settings.aspectRatio || '16:9'
+      const icWidth = aspect === '9:16' ? baseRes.height : baseRes.width
+      const icHeight = aspect === '9:16' ? baseRes.width : baseRes.height
+      const icDuration = settings.duration || 5
+      const icNumFrames = Math.max(9, 1 + 8 * Math.floor((icDuration * fpsForIcLora) / 8))
 
       const resolvedPrompt = prompt
       await submitIcLora({
         videoPath: icLoraInput.videoPath,
         conditioningType: icLoraCondType,
         conditioningStrength: icLoraStrength,
+        loraStrength: loraStrength,
         adapterId: icLoraInput.adapterId,
         maskPath: icLoraInput.maskPath,
         images: icLoraInput.images,
@@ -1226,6 +1345,10 @@ export function GenSpace() {
         maskGrowPx: icLoraInput.maskGrowPx,
         laplacianBlendGrow: icLoraInput.laplacianBlendGrow,
         finalMaskBlurPx: icLoraInput.finalMaskBlurPx,
+        frameRate: fpsForIcLora,
+        ...(icLoraInput.adapterId === 'ingredients'
+          ? { width: icWidth, height: icHeight, numFrames: icNumFrames }
+          : {}),
       }, async (result) => {
         // ponytail: runs async in the hook's closure, survives GenSpace unmount (Bug A)
         const copied = await addVisualAssetToProject(result.videoPath, currentProjectId!, 'video')
@@ -1490,10 +1613,11 @@ export function GenSpace() {
     }).hasCompatibleOptions
   )
   const isInOutpainting = isIcLoraMode && icLoraInput.adapterId === 'in_outpainting'
+  const isIngredients = isIcLoraMode && icLoraInput.adapterId === 'ingredients'
   const canSubmit = isRetakeMode
     ? retakeInput.ready && !!retakeInput.videoPath && !isRetaking
     : isIcLoraMode
-      ? (isInOutpainting || !!prompt.trim()) && icLoraInput.ready && !!icLoraInput.videoPath && !isIcLoraGenerating
+      ? (isInOutpainting || !!prompt.trim()) && icLoraInput.ready && (!!icLoraInput.videoPath || isIngredients) && !isIcLoraGenerating
       : !!prompt.trim() && hasCompatibleVideoSettings
   const promptButtonLabel = isRetakeMode ? 'Retake' : isIcLoraMode ? 'Generate' : 'Generate'
   const promptButtonIcon = isRetakeMode
@@ -1744,6 +1868,10 @@ export function GenSpace() {
           onIcLoraCondTypeChange={setIcLoraCondType}
           icLoraStrength={icLoraStrength}
           onIcLoraStrengthChange={setIcLoraStrength}
+          loraStrength={loraStrength}
+          onLoraStrengthChange={setLoraStrength}
+          showIcLoraOutputSettings={isIngredients}
+          onFpsChange={(fps) => setSettings((prev) => ({ ...prev, fps }))}
         />
       </div>
       

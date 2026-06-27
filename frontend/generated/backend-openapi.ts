@@ -1048,6 +1048,18 @@ export interface components {
              * @default 6
              */
             final_mask_blur_px: number;
+            /**
+             * Frame Rate
+             * @description T2V frame rate (ingredients/no-video only)
+             * @default 24
+             */
+            frame_rate: number;
+            /**
+             * Height
+             * @description T2V output height (ingredients/no-video only)
+             * @default 1280
+             */
+            height: number;
             /** Images */
             images?: components["schemas"]["IcLoraImageInput"][];
             /**
@@ -1056,6 +1068,11 @@ export interface components {
              * @default 12
              */
             laplacian_blend_grow: number;
+            /**
+             * Lora Strength
+             * @default 1
+             */
+            lora_strength: number;
             /**
              * Mask Grow Px
              * @description Mask dilation radius in pixels. Controls LTXVDilateVideoMask radii. 0=no dilation, default=30 matches official full-res (stage2) radius
@@ -1070,6 +1087,12 @@ export interface components {
              */
             negative_prompt: string;
             /**
+             * Num Frames
+             * @description T2V frame count (ingredients/no-video only)
+             * @default 121
+             */
+            num_frames: number;
+            /**
              * Num Inference Steps
              * @default 30
              */
@@ -1080,7 +1103,13 @@ export interface components {
              */
             prompt: string;
             /** Video Path */
-            video_path: string;
+            video_path?: string | null;
+            /**
+             * Width
+             * @description T2V output width (ingredients/no-video only)
+             * @default 704
+             */
+            width: number;
         };
         /** IcLoraImageInput */
         IcLoraImageInput: {

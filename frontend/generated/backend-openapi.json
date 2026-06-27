@@ -1404,6 +1404,20 @@
             "title": "Final Mask Blur Px",
             "type": "integer"
           },
+          "frame_rate": {
+            "default": 24.0,
+            "description": "T2V frame rate (ingredients/no-video only)",
+            "exclusiveMinimum": 0.0,
+            "title": "Frame Rate",
+            "type": "number"
+          },
+          "height": {
+            "default": 1280,
+            "description": "T2V output height (ingredients/no-video only)",
+            "minimum": 64.0,
+            "title": "Height",
+            "type": "integer"
+          },
           "images": {
             "items": {
               "$ref": "#/components/schemas/IcLoraImageInput"
@@ -1418,6 +1432,13 @@
             "minimum": 0.0,
             "title": "Laplacian Blend Grow",
             "type": "integer"
+          },
+          "lora_strength": {
+            "default": 1.0,
+            "maximum": 2.0,
+            "minimum": 0.0,
+            "title": "Lora Strength",
+            "type": "number"
           },
           "mask_grow_px": {
             "default": 30,
@@ -1443,6 +1464,13 @@
             "title": "Negative Prompt",
             "type": "string"
           },
+          "num_frames": {
+            "default": 121,
+            "description": "T2V frame count (ingredients/no-video only)",
+            "minimum": 9.0,
+            "title": "Num Frames",
+            "type": "integer"
+          },
           "num_inference_steps": {
             "default": 30,
             "title": "Num Inference Steps",
@@ -1454,13 +1482,24 @@
             "type": "string"
           },
           "video_path": {
-            "title": "Video Path",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Video Path"
+          },
+          "width": {
+            "default": 704,
+            "description": "T2V output width (ingredients/no-video only)",
+            "minimum": 64.0,
+            "title": "Width",
+            "type": "integer"
           }
         },
-        "required": [
-          "video_path"
-        ],
         "title": "IcLoraGenerateRequest",
         "type": "object"
       },

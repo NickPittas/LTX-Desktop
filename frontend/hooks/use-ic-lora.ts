@@ -5,7 +5,7 @@ import { logger } from '../lib/logger'
 export type IcLoraConditioningType = 'canny' | 'depth'
 
 export interface IcLoraSubmitParams {
-  videoPath: string
+  videoPath: string | null
   conditioningType: IcLoraConditioningType | null
   conditioningStrength: number
   prompt: string
@@ -14,6 +14,11 @@ export interface IcLoraSubmitParams {
   maskGrowPx?: number
   laplacianBlendGrow?: number
   finalMaskBlurPx?: number
+  loraStrength?: number
+  frameRate?: number
+  width?: number
+  height?: number
+  numFrames?: number
   images?: { path: string; frame?: number; strength?: number }[]
 }
 
@@ -41,8 +46,6 @@ export function useIcLora() {
   const onCompleteRef = useRef<((result: IcLoraResult) => void) | undefined>()
 
   const submitIcLora = useCallback(async (params: IcLoraSubmitParams, onComplete?: (result: IcLoraResult) => void) => {
-    if (!params.videoPath) return
-
     onCompleteRef.current = onComplete
 
     setState({
@@ -53,9 +56,13 @@ export function useIcLora() {
     })
 
     const body: Record<string, unknown> = {
-      video_path: params.videoPath,
       conditioning_strength: params.conditioningStrength,
+      lora_strength: params.loraStrength ?? undefined,
       prompt: params.prompt,
+      frame_rate: params.frameRate ?? 24,
+    }
+    if (params.videoPath) {
+      body.video_path = params.videoPath
     }
     if (params.conditioningType !== null) {
       body.conditioning_type = params.conditioningType
@@ -69,6 +76,9 @@ export function useIcLora() {
     body.mask_grow_px = params.maskGrowPx ?? 30
     body.laplacian_blend_grow = params.laplacianBlendGrow ?? 12
     body.final_mask_blur_px = params.finalMaskBlurPx ?? 6
+    if (params.width !== undefined) body.width = params.width
+    if (params.height !== undefined) body.height = params.height
+    if (params.numFrames !== undefined) body.num_frames = params.numFrames
     if (params.images && params.images.length > 0) {
       body.images = params.images
     }

@@ -605,7 +605,7 @@ def _default_ic_lora_images() -> list[IcLoraImageInput]:
 
 class IcLoraGenerateRequest(BaseModel):
     model_config = ConfigDict(strict=True)
-    video_path: str
+    video_path: str | None = None
     conditioning_type: ConditioningType | None = None
     prompt: str = ""
     conditioning_strength: float = 1.0
@@ -618,3 +618,8 @@ class IcLoraGenerateRequest(BaseModel):
     mask_grow_px: int = Field(default=30, ge=0, le=128, description="Mask dilation radius in pixels. Controls LTXVDilateVideoMask radii. 0=no dilation, default=30 matches official full-res (stage2) radius")
     laplacian_blend_grow: int = Field(default=12, ge=0, le=64, description="Controls Laplacian pyramid blend mask_low_res_dilation for inpaint. Larger values expand blend region at low-res level. Separate from mask_grow_px (dilation radii) and final_mask_blur_px (raw mask feather).")
     final_mask_blur_px: int = Field(default=6, ge=0, le=64, description="Blur radius for final raw-mask guard feather. Smoothens inpaint edge. 0=no feather. Separate from laplacian_blend_grow (pyramid blend level) and mask_grow_px (model context dilation).")
+    lora_strength: float = Field(default=1.0, ge=0.0, le=2.0)
+    width: int = Field(default=704, ge=64, description="T2V output width (ingredients/no-video only)")
+    height: int = Field(default=1280, ge=64, description="T2V output height (ingredients/no-video only)")
+    num_frames: int = Field(default=121, ge=9, description="T2V frame count (ingredients/no-video only)")
+    frame_rate: float = Field(default=24.0, gt=0.0, description="T2V frame rate (ingredients/no-video only)")

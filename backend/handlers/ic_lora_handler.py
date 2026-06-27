@@ -107,6 +107,18 @@ def _align_up(value: int, multiple: int) -> int:
     return max((value + multiple - 1) // multiple * multiple, multiple)
 
 
+# ponytail: simple frame-count snap for LTX 1+8k constraint; move to LTX utils if reused
+_SNAP_FRAME_MIN = 9
+
+
+def _snap_frame_count(n: int) -> int:
+    """Snap to valid LTX frame count: min {_SNAP_FRAME_MIN}, format 1+8k."""
+    if n < _SNAP_FRAME_MIN:
+        return _SNAP_FRAME_MIN
+    k = max(0, (n - 1) // 8)
+    return 1 + 8 * k
+
+
 class IcLoraHandler(StateHandlerBase):
     def __init__(
         self,
@@ -289,10 +301,131 @@ class IcLoraHandler(StateHandlerBase):
             )
             return str(legacy_path), depth_model_path
 
+    def _generate_ingredients(
+        self, req: IcLoraGenerateRequest, workflow: str
+    ) -> IcLoraGenerateResponse:
+        """Ingredients T2V path: no video, no conditioning, use request dims."""
+        generation_id = uuid.uuid4().hex[:8]
+        t_total_start = time.perf_counter()
+        logger.info("[ic-lora] Ingredients generation started")
+
+        try:
+            t_load_start = time.perf_counter()
+            # ponytail: no conditioning → load just the adapter, no union control
+            assert req.adapter_id is not None  # guarded by workflow == "ingredients" above
+            adapter_path = self._resolve_ic_lora_adapter_path(req.adapter_id)
+            model_id = get_downloaded_ltx_model_id(self.models_dir)
+            if model_id is None:
+                profile_id = self.state.active_model_profile_id
+                profile = (
+                    next((p for p in self.state.model_profiles if p.id == profile_id), None)
+                    if profile_id is not None else None
+                )
+                if profile is None or profile.components.transformer is None:
+                    raise HTTPError(409, "NO_DOWNLOADED_LTX_MODEL")
+
+            ic_state = self._pipelines.load_ic_lora(
+                [adapter_path],
+                None,  # no depth
+                adapter_path=adapter_path,
+                lora_strength=req.lora_strength,
+            )
+            t_load_end = time.perf_counter()
+            logger.info("[ic-lora] Pipeline load: %.2fs", t_load_end - t_load_start)
+
+            self._generation.start_generation(generation_id)
+            self._generation.update_progress("loading_model", 5, 0, 1)
+
+            s = self.state.app_settings
+            use_api = not self._text.should_use_local_encoding()
+            encoding_method = "api" if use_api else "local"
+            t_text_start = time.perf_counter()
+            self._text.prepare_text_encoding(
+                req.prompt, enhance_prompt=use_api and s.prompt_enhancer_enabled_t2v
+            )
+            t_text_end = time.perf_counter()
+            logger.info("[ic-lora] Text encoding (%s): %.2fs", encoding_method, t_text_end - t_text_start)
+
+            height = _align_up(req.height, 64)
+            width = _align_up(req.width, 64)
+            num_frames = _snap_frame_count(req.num_frames)
+            frame_rate = req.frame_rate
+
+            images: list[ImageConditioningInput] = [
+                ImageConditioningInput(path=img.path, frame_idx=int(img.frame), strength=float(img.strength))
+                for img in req.images
+            ]
+
+            self._generation.update_progress("inference", 15, 0, 1)
+
+            output_path = (
+                self.config.outputs_dir
+                / f"ic_lora_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.mp4"
+            )
+
+            t_inference_start = time.perf_counter()
+            ic_state.pipeline.generate(
+                prompt=req.prompt,
+                seed=self._resolve_seed(),
+                height=height,
+                width=width,
+                num_frames=num_frames,
+                frame_rate=frame_rate,
+                images=images,
+                video_conditioning=[],
+                output_path=str(output_path),
+                mask_path=None,
+                conditioning_strength=req.conditioning_strength,
+                original_video_path=None,
+            )
+            t_inference_end = time.perf_counter()
+            logger.info("[ic-lora] Inference: %.2fs", t_inference_end - t_inference_start)
+
+            t_total_end = time.perf_counter()
+            logger.info(
+                "[ic-lora] Total ingredients generation: %.2fs (load=%.2fs, text=%.2fs, inference=%.2fs)",
+                t_total_end - t_total_start,
+                t_load_end - t_load_start,
+                t_text_end - t_text_start,
+                t_inference_end - t_inference_start,
+            )
+
+            self._generation.update_progress("complete", 100, 1, 1)
+            self._generation.complete_generation(str(output_path))
+            return IcLoraGenerateCompleteResponse(status="complete", video_path=str(output_path))
+
+        except HTTPError:
+            self._generation.fail_generation("IC-LoRA generation failed")
+            raise
+        except Exception as exc:
+            self._generation.fail_generation(str(exc))
+            if "cancelled" in str(exc).lower():
+                return IcLoraGenerateCancelledResponse(status="cancelled")
+            raise HTTPError(500, f"Generation error: {exc}") from exc
+        finally:
+            self._text.clear_api_embeddings()
+
     def generate(self, req: IcLoraGenerateRequest) -> IcLoraGenerateResponse:
         if self._generation.is_generation_running():
             raise HTTPError(409, "Generation already in progress")
 
+        # ponytail: resolve workflow before any Path(req.video_path) so ingredients can skip
+        workflow: str | None = _ADAPTER_WORKFLOW.get(req.adapter_id) if req.adapter_id else None
+        if workflow in _UNAVAILABLE_WORKFLOWS:
+            raise HTTPError(400, _UNAVAILABLE_MESSAGES[workflow])
+
+        # ponytail: dispatch ingredients before any video path validation
+        if workflow == "ingredients":
+            if not (req.prompt or "").strip():
+                raise HTTPError(400, "Prompt is required for this adapter")
+            if not req.images:
+                raise HTTPError(400, "Ingredients adapter requires at least one image in images[]")
+            if req.conditioning_type is not None:
+                raise HTTPError(400, "Ingredients adapter is image-only; omit conditioning_type")
+            return self._generate_ingredients(req, workflow)
+
+        if not req.video_path:
+            raise HTTPError(400, "video_path is required for this adapter")
         video_path = Path(req.video_path)
         if not video_path.exists():
             raise HTTPError(400, f"Video not found: {req.video_path}")
@@ -301,10 +434,6 @@ class IcLoraHandler(StateHandlerBase):
             if not mask_path.exists():
                 raise HTTPError(400, f"Mask not found: {req.mask_path}")
 
-        # ponytail: workflow validation before any LoRA resolution
-        workflow: str | None = _ADAPTER_WORKFLOW.get(req.adapter_id) if req.adapter_id else None
-        if workflow in _UNAVAILABLE_WORKFLOWS:
-            raise HTTPError(400, _UNAVAILABLE_MESSAGES[workflow])
         if workflow == "union_control" and req.conditioning_type is None:
             raise HTTPError(400, "Union Control requires conditioning_type (canny or depth)")
         if workflow == "in_outpainting" and req.mask_path is None:
@@ -313,10 +442,7 @@ class IcLoraHandler(StateHandlerBase):
         if workflow != "in_outpainting" and not (req.prompt or "").strip():
             raise HTTPError(400, "Prompt is required for this adapter")
 
-        # ponytail: in_outpainting allows empty prompt (official workflow supports it)
         resolved_prompt: str = req.prompt or ""
-        if workflow == "ingredients" and not req.images:
-            raise HTTPError(400, "Ingredients adapter requires at least one image in images[]")
 
         resolved_adapter_path: str | None = None
         if req.adapter_id is not None:
@@ -358,6 +484,7 @@ class IcLoraHandler(StateHandlerBase):
                 lora_paths,
                 str(depth_model_path) if depth_model_path else None,
                 adapter_path=resolved_adapter_path,
+                lora_strength=req.lora_strength,
             )
             t_load_end = time.perf_counter()
             logger.info("[ic-lora] Pipeline load: %.2fs", t_load_end - t_load_start)

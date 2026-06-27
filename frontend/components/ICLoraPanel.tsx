@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import {
-  Upload, Loader2, Film, Sparkles, Image as ImageIcon,
+  Loader2, Film, Sparkles, Image as ImageIcon,
   RefreshCw, Download, AlertCircle, Trash2,
 } from 'lucide-react'
 import { ApiClient, type ApiRequestBodyOf, type ApiSuccessOf } from '../lib/api-client'
@@ -166,11 +166,14 @@ export function ICLoraPanel({
         ? ingredientPaths.length > 0
         : true
     const adapterReady = internalAdapterId !== null && selectedEntry?.workflow !== 'unavailable'
-    const ready = !!inputVideoPath && icLoraReady && requiredSlotsReady && (conditioningType !== null || adapterReady)
-    const images = selectedEntry?.workflow === 'ingredients' ? ingredientPaths.map(p => ({ path: p })) : []
+    const selectedWorkflow = selectedEntry?.workflow
+    // ponytail: ingredients doesn't need driving video; conditioning is always null
+    const needsVideo = selectedWorkflow !== 'ingredients'
+    const ready = (needsVideo ? !!inputVideoPath : true) && icLoraReady && requiredSlotsReady && (conditioningType !== null || adapterReady)
+    const images = selectedWorkflow === 'ingredients' ? ingredientPaths.map(p => ({ path: p })) : []
     onChange?.({
-      videoPath: inputVideoPath,
-      conditioningType,
+      videoPath: selectedWorkflow === 'ingredients' ? null : inputVideoPath,
+      conditioningType: selectedWorkflow === 'ingredients' ? null : conditioningType,
       conditioningStrength,
       adapterId: internalAdapterId,
       maskPath: selectedEntry?.workflow === 'in_outpainting' ? maskPath : null,
@@ -558,48 +561,58 @@ export function ICLoraPanel({
           <div className="flex-1 flex flex-col border-r border-zinc-800 min-w-0">
             <div className="px-3 py-2 border-b border-zinc-800 flex items-center justify-between gap-2">
               <span className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider shrink-0">Input</span>
-              {inputVideoPath && (
+              {getAdapterEntry(internalAdapterId)?.workflow === 'ingredients' ? (
+                <span className="text-[10px] text-amber-500 truncate min-w-0">Ingredients — prompt + reference sheet</span>
+              ) : inputVideoPath ? (
                 <span className="text-[10px] text-zinc-500 truncate min-w-0">
                   {inputVideoPath.split(/[\\/]/).pop()}
                 </span>
-              )}
-              <button
-                onClick={handleBrowse}
-                className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors shrink-0"
-              >
-                <Upload className="h-3 w-3" />
-                Import
-              </button>
+              ) : null}
             </div>
-            <div
-              className={`flex-1 min-h-0 bg-black flex items-center justify-center relative ${!inputVideoUrl ? 'border-2 border-dashed border-zinc-700 m-3 rounded-lg' : ''} ${isDragOver ? 'border-blue-500 bg-blue-500/10' : ''}`}
-              onDragOver={(e) => { e.preventDefault(); setIsDragOver(true) }}
-              onDragLeave={() => setIsDragOver(false)}
-              onDrop={handleDrop}
-            >
-              {inputVideoUrl ? (
-                <video
-                  ref={inputVideoRef}
-                  src={inputVideoUrl}
-                  className="w-full h-full object-contain"
-                  controls
-                  onError={(e) => console.error('[ICLoraPanel] Input video failed to load:', inputVideoUrl, (e.target as HTMLVideoElement)?.error)}
-                />
-              ) : (
-                <div className="text-center p-4">
-                  <div className="w-12 h-12 rounded-full bg-zinc-800 flex items-center justify-center mx-auto mb-2">
-                    <Film className="h-6 w-6 text-zinc-600" />
+            {getAdapterEntry(internalAdapterId)?.workflow === 'ingredients' ? (
+              <div className="flex-1 flex items-center justify-center bg-zinc-900/50 m-3 rounded-lg border border-dashed border-zinc-700">
+                <div className="text-center p-6">
+                  <div className="w-12 h-12 rounded-full bg-amber-500/10 flex items-center justify-center mx-auto mb-3">
+                    <Sparkles className="h-6 w-6 text-amber-500" />
                   </div>
-                  <p className="text-zinc-400 text-xs">Drop or import a driving video</p>
-                  <button
-                    onClick={handleBrowse}
-                    className="mt-2 px-3 py-1.5 text-[10px] text-blue-400 border border-blue-500/30 rounded-lg hover:bg-blue-600/10 transition-colors"
-                  >
-                    Import Video
-                  </button>
+                  <p className="text-zinc-300 text-sm font-medium">Ingredients</p>
+                  <p className="text-zinc-500 text-xs mt-1 max-w-xs">
+                    Uses prompt + reference sheet image. No driving video needed.
+                  </p>
+
                 </div>
-              )}
-            </div>
+              </div>
+            ) : (
+              <div
+                className={`flex-1 min-h-0 bg-black flex items-center justify-center relative ${!inputVideoUrl ? 'border-2 border-dashed border-zinc-700 m-3 rounded-lg' : ''} ${isDragOver ? 'border-blue-500 bg-blue-500/10' : ''}`}
+                onDragOver={(e) => { e.preventDefault(); setIsDragOver(true) }}
+                onDragLeave={() => setIsDragOver(false)}
+                onDrop={handleDrop}
+              >
+                {inputVideoUrl ? (
+                  <video
+                    ref={inputVideoRef}
+                    src={inputVideoUrl}
+                    className="w-full h-full object-contain"
+                    controls
+                    onError={(e) => console.error('[ICLoraPanel] Input video failed to load:', inputVideoUrl, (e.target as HTMLVideoElement)?.error)}
+                  />
+                ) : (
+                  <div className="text-center p-4">
+                    <div className="w-12 h-12 rounded-full bg-zinc-800 flex items-center justify-center mx-auto mb-2">
+                      <Film className="h-6 w-6 text-zinc-600" />
+                    </div>
+                    <p className="text-zinc-400 text-xs">Drop or import a driving video</p>
+                    <button
+                      onClick={handleBrowse}
+                      className="mt-2 px-3 py-1.5 text-[10px] text-blue-400 border border-blue-500/30 rounded-lg hover:bg-blue-600/10 transition-colors"
+                    >
+                      Import Video
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {showConditioning ? (

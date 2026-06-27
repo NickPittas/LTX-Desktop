@@ -116,6 +116,7 @@ class PoseResources:
 class ICLoraState:
     pipeline: IcLoraPipeline
     lora_paths: list[str]
+    lora_strength: float = 1.0
     depth_pipeline: DepthProcessorPipeline | None = None
     depth_model_path: str | None = None
     adapter_path: str | None = None

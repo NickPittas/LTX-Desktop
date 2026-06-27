@@ -603,6 +603,7 @@ class FakeIcLoraPipeline:
         device: str | object,
         streaming_prefetch_count: int | None,
         components: ResolvedLtxComponents | None = None,
+        lora_strength: float = 1.0,
     ) -> "FakeIcLoraPipeline":
         pipeline = FakeIcLoraPipeline._singleton
         if pipeline is None:
@@ -611,6 +612,7 @@ class FakeIcLoraPipeline:
         pipeline.last_components = components
         pipeline.last_lora_paths = lora_paths
         pipeline.last_lora_path = lora_paths[-1] if lora_paths else None
+        pipeline.last_lora_strength = lora_strength
         # ponytail: match real __init__ guard — split safetensors needs streaming
         _is_split = (
             components is not None
@@ -629,6 +631,7 @@ class FakeIcLoraPipeline:
         self.last_components: ResolvedLtxComponents | None = None
         self.last_lora_paths: list[str] | None = None
         self.last_lora_path: str | None = None
+        self.last_lora_strength: float | None = None
         self.last_streaming_prefetch_count: int | None = None
 
     def generate(self, **kwargs: Any) -> None:

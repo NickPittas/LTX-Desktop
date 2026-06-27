@@ -307,6 +307,7 @@ class PipelinesHandler(StateHandlerBase):
         lora_paths: list[str],
         depth_model_path: str | None,
         adapter_path: str | None = None,
+        lora_strength: float = 1.0,
     ) -> ICLoraState:
         self._install_text_patches_if_needed()
 
@@ -317,11 +318,13 @@ class PipelinesHandler(StateHandlerBase):
                         lora_paths=current_lora_paths,
                         depth_model_path=current_depth_model_path,
                         adapter_path=current_adapter_path,
+                        lora_strength=current_lora_strength,
                     ) as state
                 ) if (
                     current_lora_paths == lora_paths
                     and current_depth_model_path == depth_model_path
                     and current_adapter_path == adapter_path
+                    and abs(current_lora_strength - lora_strength) < 0.001
                 ):
                     return state
                 case _:
@@ -339,6 +342,7 @@ class PipelinesHandler(StateHandlerBase):
             self.config.device,
             streaming_prefetch_count_for_mode(self.config.local_generations_mode),
             components=components,
+            lora_strength=lora_strength,
         )
         depth_pipeline: DepthProcessorPipeline | None = None
         if depth_model_path is not None:
@@ -346,6 +350,7 @@ class PipelinesHandler(StateHandlerBase):
         state = ICLoraState(
             pipeline=pipeline,
             lora_paths=lora_paths,
+            lora_strength=lora_strength,
             depth_pipeline=depth_pipeline,
             depth_model_path=depth_model_path,
             adapter_path=adapter_path,
