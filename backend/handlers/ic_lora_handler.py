@@ -38,7 +38,7 @@ from runtime_config.model_download_specs import (
 from runtime_config.runtime_config import RuntimeConfig
 from state.conditioning_cache import ConditioningCacheEntry, ConditioningCacheKey
 from services.interfaces import VideoProcessor
-from services.exr_input import is_exr_input
+from services.exr_input import is_exr_input, resolve_video_input_path
 from services.color_management import detect_colorspace
 from services.ltx_pipeline_common import make_encode_progress_callback, make_primary_output_path, make_proxy_output_path
 from services.media_encoder.media_encoder import MediaEncoder
@@ -447,6 +447,12 @@ class IcLoraHandler(StateHandlerBase):
             if not mask_path.exists():
                 raise HTTPError(400, f"Mask not found: {req.mask_path}")
 
+        # P0-3: EXR source resolution — the handler's VideoProcessor.open_video
+        # at :516 can't open an EXR dir/file. Resolve to a temp MP4 BEFORE that
+        # call so metadata reads succeed. Non-EXR: resolve_video_input_path
+        # returns the path UNCHANGED (pure-suffix gate, zero I/O).
+        resolved_video_path = resolve_video_input_path(str(video_path))
+
         if workflow == "union_control" and req.conditioning_type is None:
             raise HTTPError(400, "Union Control requires conditioning_type (canny or depth)")
         if workflow == "in_outpainting" and req.mask_path is None:
@@ -513,7 +519,7 @@ class IcLoraHandler(StateHandlerBase):
             t_text_end = time.perf_counter()
             logger.info("[ic-lora] Text encoding (%s): %.2fs", encoding_method, t_text_end - t_text_start)
 
-            cap = self._video_processor.open_video(str(video_path))
+            cap = self._video_processor.open_video(resolved_video_path)
             if not cap.isOpened():
                 raise HTTPError(400, f"Cannot open video: {video_path}")
             info = self._video_processor.get_video_info(cap)
@@ -612,7 +618,7 @@ class IcLoraHandler(StateHandlerBase):
                     num_frames=frame_count,
                     frame_rate=fps,
                     images=images,
-                    video_path=str(video_path),
+                    video_path=resolved_video_path,
                     mask_path=str(req.mask_path),
                     output_path=output_path,
                     conditioning_strength=req.conditioning_strength,

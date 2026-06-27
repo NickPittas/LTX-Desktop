@@ -5,6 +5,7 @@ import { pathToFileUrl } from '../lib/file-url'
 
 interface RetakePanelProps {
   initialVideoPath?: string | null
+  initialPreviewPath?: string | null
   initialDuration?: number
   resetKey?: number
   isProcessing?: boolean
@@ -51,6 +52,7 @@ function formatTimecode(seconds: number): string {
 
 export function RetakePanel({
   initialVideoPath,
+  initialPreviewPath,
   initialDuration,
   resetKey,
   isProcessing = false,
@@ -61,7 +63,9 @@ export function RetakePanel({
   const videoRef = useRef<HTMLVideoElement>(null)
   const filmstripRef = useRef<HTMLDivElement>(null)
   const [videoPath, setVideoPath] = useState<string | null>(initialVideoPath || null)
-  const videoUrl = videoPath ? pathToFileUrl(videoPath) : null
+  // P0-2: preview uses the proxy (browser-playable) if provided; submit uses videoPath (primary).
+  const [previewPath, setPreviewPath] = useState<string | null>(initialPreviewPath || initialVideoPath || null)
+  const videoUrl = previewPath ? pathToFileUrl(previewPath) : null
   const [videoDuration, setVideoDuration] = useState<number>(initialDuration || 0)
 
   const [isPlaying, setIsPlaying] = useState(false)
@@ -82,6 +86,7 @@ export function RetakePanel({
   useEffect(() => {
     if (resetKey === undefined) return
     setVideoPath(initialVideoPath || null)
+    setPreviewPath(initialPreviewPath || initialVideoPath || null)
     setVideoDuration(initialDuration || 0)
     setIsPlaying(false)
     setCurrenTime(0)
@@ -90,7 +95,7 @@ export function RetakePanel({
     setThumbnails([])
     extractingRef.current = false
     initialSelectionAppliedRef.current = false
-  }, [resetKey, initialVideoPath, initialDuration])
+  }, [resetKey, initialVideoPath, initialPreviewPath, initialDuration])
 
   useEffect(() => {
     if (!videoUrl) {
@@ -347,6 +352,7 @@ export function RetakePanel({
     if (paths && paths.length > 0) {
       const filePath = paths[0]
       setVideoPath(filePath)
+      setPreviewPath(filePath) // user upload: primary == preview
       setThumbnails([])
       extractingRef.current = false
     }
@@ -354,6 +360,7 @@ export function RetakePanel({
 
   const handleClear = useCallback(() => {
     setVideoPath(null)
+    setPreviewPath(null)
     setVideoDuration(0)
     setIsPlaying(false)
     setCurrenTime(0)
@@ -374,6 +381,7 @@ export function RetakePanel({
         const asset = JSON.parse(assetData) as { type?: string; path?: string }
         if (asset.type === 'video' && asset.path) {
           setVideoPath(asset.path)
+          setPreviewPath(asset.path)
           setThumbnails([])
           extractingRef.current = false
           return
@@ -388,6 +396,7 @@ export function RetakePanel({
       const filePath = window.electronAPI?.getPathForFile(file)
       if (filePath) {
         setVideoPath(filePath)
+        setPreviewPath(filePath)
         setThumbnails([])
         extractingRef.current = false
       }

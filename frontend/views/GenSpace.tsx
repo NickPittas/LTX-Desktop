@@ -1135,6 +1135,7 @@ export function GenSpace() {
   const [retakePanelKey, setRetakePanelKey] = useState(0)
   const [retakeInitial, setRetakeInitial] = useState<{
     videoPath: string | null
+    previewPath?: string | null
     duration?: number
   }>({ videoPath: null, duration: undefined })
   const [activeRetakeSource, setActiveRetakeSource] = useState<GenSpaceRetakeSource | null>(null)
@@ -1160,6 +1161,7 @@ export function GenSpace() {
   const [loraStrength, setLoraStrength] = useState(1.0)
   const [icLoraInitial, setIcLoraInitial] = useState<{
     videoPath: string | null
+    previewPath?: string | null
   }>({ videoPath: null })
 
   const {
@@ -1625,6 +1627,7 @@ export function GenSpace() {
           imageResolution: videoSettings.imageResolution,
           imageAspectRatio: videoSettings.aspectRatio,
           imageSteps: 4,
+          outputFormat: settings.outputFormat,
         },
         audioPath,
       )
@@ -1654,8 +1657,11 @@ export function GenSpace() {
     // ponytail: prefer source asset prompt, else keep current
     setPrompt(videoAsset.prompt || videoAsset.generationParams?.prompt || prompt)
     setActiveRetakeSource(null)
+    // P0-2: submit the PRIMARY path to the backend (not the proxy);
+    // pass the proxy separately for panel preview playback.
     setRetakeInitial({
-      videoPath: videoAsset.proxyPath ?? videoAsset.path,
+      videoPath: videoAsset.path,
+      previewPath: videoAsset.proxyPath ?? videoAsset.path,
       duration: videoAsset.duration,
     })
     setRetakePanelKey((prev) => prev + 1)
@@ -1666,7 +1672,11 @@ export function GenSpace() {
     setMode('ic-lora')
     setPrompt('')
     setActiveIcLoraSource(null)
-    setIcLoraInitial({ videoPath: videoAsset.proxyPath ?? videoAsset.path })
+    // P0-2: submit the PRIMARY path to the backend (not the proxy).
+    setIcLoraInitial({
+      videoPath: videoAsset.path,
+      previewPath: videoAsset.proxyPath ?? videoAsset.path,
+    })
     setIcLoraPanelKey((prev) => prev + 1)
   }
 
@@ -1876,6 +1886,7 @@ export function GenSpace() {
         <div className="absolute inset-x-0 top-0 bottom-[160px] px-4 pt-4 pb-4 flex flex-col overflow-hidden">
           <RetakePanel
             initialVideoPath={retakeInitial.videoPath}
+            initialPreviewPath={retakeInitial.previewPath}
             initialDuration={retakeInitial.duration}
             resetKey={retakePanelKey}
             fillHeight
@@ -1890,6 +1901,7 @@ export function GenSpace() {
         <div className="absolute inset-x-0 top-0 bottom-[160px] px-4 pt-4 pb-4 flex flex-col overflow-hidden">
           <ICLoraPanel
             initialVideoPath={icLoraInitial.videoPath}
+            initialPreviewPath={icLoraInitial.previewPath}
             resetKey={icLoraPanelKey}
             fillHeight
             isProcessing={isIcLoraGenerating}

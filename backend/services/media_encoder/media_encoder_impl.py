@@ -345,22 +345,20 @@ class MediaEncoderImpl:
                     line = raw.decode("utf-8", errors="replace").strip()
                 except Exception:
                     continue
-                    if line:
-                        progress_lines.append(line)
-                        if on_progress is not None and line.startswith("frame="):
-                            try:
-                                frames_done = int(line.split("=", 1)[1])
-                                if total_frames and total_frames > 0:
-                                    # Precise: frame/total mapped to encode budget [0, _ENCODE_FRACTION].
-                                    pct = min(_ENCODE_FRACTION,
-                                              frames_done / total_frames * _ENCODE_FRACTION)
-                                else:
-                                    # Heuristic fallback (total unknown).
-                                    pct = min(_ENCODE_FRACTION,
-                                              frames_done / max(1, frames_done + 8) * _ENCODE_FRACTION)
-                                on_progress(pct)
-                            except (ValueError, IndexError):
-                                pass
+                if line:
+                    progress_lines.append(line)
+                    if on_progress is not None and line.startswith("frame="):
+                        try:
+                            frames_done = int(line.split("=", 1)[1])
+                            if total_frames and total_frames > 0:
+                                pct = min(_ENCODE_FRACTION,
+                                          frames_done / total_frames * _ENCODE_FRACTION)
+                            else:
+                                pct = min(_ENCODE_FRACTION,
+                                          frames_done / max(1, frames_done + 8) * _ENCODE_FRACTION)
+                            on_progress(pct)
+                        except (ValueError, IndexError):
+                            pass
 
         def _read_stderr() -> None:
             assert proc.stderr is not None

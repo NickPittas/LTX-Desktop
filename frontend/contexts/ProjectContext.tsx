@@ -214,6 +214,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
 
         const existingTakes: AssetTake[] = asset.takes || [{
           path: asset.path,
+          proxyPath: asset.proxyPath,
           bigThumbnailPath: asset.bigThumbnailPath,
           smallThumbnailPath: asset.smallThumbnailPath,
           width: asset.width,
@@ -228,6 +229,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
           takes: newTakes,
           activeTakeIndex: newIndex,
           path: take.path,
+          proxyPath: take.proxyPath,
           bigThumbnailPath: take.bigThumbnailPath,
           smallThumbnailPath: take.smallThumbnailPath,
           width: take.width,
@@ -255,6 +257,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
           takes: newTakes,
           activeTakeIndex: newActiveIdx,
           path: activeTake.path,
+          proxyPath: activeTake.proxyPath,
           bigThumbnailPath: activeTake.bigThumbnailPath,
           smallThumbnailPath: activeTake.smallThumbnailPath,
           width: activeTake.width,
@@ -278,6 +281,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
           ...asset,
           activeTakeIndex: nextIndex,
           path: take.path,
+          proxyPath: take.proxyPath,
           bigThumbnailPath: take.bigThumbnailPath,
           smallThumbnailPath: take.smallThumbnailPath,
           width: take.width,

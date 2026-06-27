@@ -25,7 +25,7 @@ from handlers.text_handler import TextHandler
 from runtime_config.runtime_config import RuntimeConfig
 from services.ltx_api_client.ltx_api_client import LTXAPIClientError
 from services.interfaces import LTXAPIClient
-from services.exr_input import is_exr_input
+from services.exr_input import is_exr_input, resolve_video_input_path
 from services.color_management import detect_colorspace
 from services.ltx_pipeline_common import make_encode_progress_callback, make_primary_output_path, make_proxy_output_path
 from services.media_encoder.media_encoder import MediaEncoder
@@ -157,7 +157,13 @@ class RetakeHandler(StateHandlerBase):
         if start_time >= end_time:
             raise HTTPError(400, "start_time must be less than end_time")
 
-        self._validate_video_metadata(str(video_file))
+        # P0-3: resolve EXR source → temp MP4 BEFORE the metadata read (handler-
+        # level `_validate_video_metadata` uses av.open which can't read EXR dirs).
+        # Non-EXR: returns the path UNCHANGED (pure-suffix gate, zero I/O).
+        # The pipeline's `generate()` receives this resolved path — no double-resolve
+        # because is_exr_input(resolved_temp_mp4) is False (the temp is an MP4).
+        resolved_video_file = resolve_video_input_path(str(video_file))
+        self._validate_video_metadata(resolved_video_file)
 
         try:
             self._text.prepare_text_encoding(prompt, enhance_prompt=False)
@@ -181,7 +187,7 @@ class RetakeHandler(StateHandlerBase):
             self._generation.update_progress("inference", 15, 0, 1)
 
             pipeline_state.pipeline.generate(
-                video_path=str(video_file),
+                video_path=resolved_video_file,
                 prompt=prompt,
                 start_time=start_time,
                 end_time=end_time,

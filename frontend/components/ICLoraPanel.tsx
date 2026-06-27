@@ -16,6 +16,7 @@ export type ICLoraConditioningType = 'canny' | 'depth' | null
 
 interface ICLoraPanelProps {
   initialVideoPath?: string | null
+  initialPreviewPath?: string | null
   resetKey?: number
   fillHeight?: boolean
   isProcessing?: boolean
@@ -90,6 +91,7 @@ type DownloadProgress = ApiSuccessOf<'getModelDownloadProgress'>
 
 export function ICLoraPanel({
   initialVideoPath,
+  initialPreviewPath,
   resetKey,
   fillHeight = false,
   isProcessing = false,
@@ -103,7 +105,9 @@ export function ICLoraPanel({
 }: ICLoraPanelProps) {
   const inputVideoRef = useRef<HTMLVideoElement>(null)
   const [inputVideoPath, setInputVideoPath] = useState<string | null>(initialVideoPath || null)
-  const inputVideoUrl = inputVideoPath ? pathToFileUrl(inputVideoPath) : null
+  // P0-2: preview uses the proxy (browser-playable) if provided; submit uses inputVideoPath (primary).
+  const [previewPath, setPreviewPath] = useState<string | null>(initialPreviewPath || initialVideoPath || null)
+  const inputVideoUrl = previewPath ? pathToFileUrl(previewPath) : null
   const [inputTime, setInputTime] = useState(0)
 
   const [internalCondType, setInternalCondType] = useState<ICLoraConditioningType>(null)
@@ -143,6 +147,7 @@ export function ICLoraPanel({
   useEffect(() => {
     if (resetKey === undefined) return
     setInputVideoPath(initialVideoPath || null)
+    setPreviewPath(initialPreviewPath || initialVideoPath || null)
     setInputTime(0)
     setInternalCondType(null)
     setInternalCondStrength(1.0)
@@ -339,7 +344,7 @@ export function ICLoraPanel({
     if (paths && paths.length > 0) {
       const filePath = paths[0]
       setInputVideoPath(filePath)
-      
+      setPreviewPath(filePath) // user upload: primary == preview
       setConditioningPreview(null)
       setExtractError(null)
     }
@@ -366,6 +371,7 @@ export function ICLoraPanel({
 
   const handleClear = useCallback(() => {
     setInputVideoPath(null)
+    setPreviewPath(null)
     setMaskPath(null)
     setIngredientPaths([])
     setInputTime(0)
@@ -383,6 +389,7 @@ export function ICLoraPanel({
         const asset = JSON.parse(assetData) as { type?: string; path?: string }
         if (asset.type === 'video' && asset.path) {
           setInputVideoPath(asset.path)
+          setPreviewPath(asset.path)
           setConditioningPreview(null)
           setExtractError(null)
           return
@@ -397,6 +404,7 @@ export function ICLoraPanel({
       const filePath = window.electronAPI?.getPathForFile(file)
       if (filePath) {
         setInputVideoPath(filePath)
+        setPreviewPath(filePath)
         
         setConditioningPreview(null)
         setExtractError(null)

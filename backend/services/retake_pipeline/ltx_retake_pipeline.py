@@ -27,7 +27,6 @@ from ltx_core.quantization import QuantizationPolicy
 from ltx_core.types import Audio
 from ltx_pipelines.utils.media_io import get_videostream_metadata
 
-from services.exr_input import resolve_video_input_path
 from services.ltx_components import CheckpointPath, ResolvedLtxComponents
 from services.ltx_pipeline_common import encode_video_output
 from services.retake_pipeline.retake_pipeline import RetakePipeline
@@ -356,11 +355,11 @@ class LTXRetakePipeline:
         on_progress: Callable[[float], None] | None = None,
         input_colorspace: ColorSpace | None = None,
     ) -> None:
-        # CM-1b: resolve EXR source → temp MP4 BEFORE the metadata read (an EXR
-        # dir/file would crash get_videostream_metadata). Non-EXR returns the
-        # path UNCHANGED (pure-suffix gate, zero I/O). The temp MP4 lives until
-        # the lazy video iterator is consumed by encode_video_output below.
-        resolved_video_path = resolve_video_input_path(video_path)
+        # P0-3: EXR resolution is owned by the HANDLER (retake_handler resolves
+        # before _validate_video_metadata). ``video_path`` here is already the
+        # resolved path (temp MP4 for EXR sources, original for non-EXR). NON-EXR
+        # byte-identical — no double-resolve (resolved temp MP4 is non-EXR).
+        resolved_video_path = video_path
         try:
             meta = get_videostream_metadata(resolved_video_path)
             fps, num_frames = meta.fps, meta.frames
