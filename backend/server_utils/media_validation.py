@@ -7,6 +7,7 @@ return HTTP 400 for invalid user-supplied paths instead of leaking exceptions.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from PIL import Image
 
@@ -16,7 +17,7 @@ _MAX_IMAGE_BYTES = 50 * 1024 * 1024
 _MAX_AUDIO_BYTES = 100 * 1024 * 1024
 _MAX_IMAGE_PIXELS = 50_000_000
 
-_ALLOWED_IMAGE_FORMATS = {"PNG", "JPEG", "WEBP", "GIF", "BMP", "TIFF"}
+_ALLOWED_IMAGE_FORMATS = {"PNG", "JPEG", "WEBP", "GIF", "BMP", "TIFF", "EXR"}
 
 
 def normalize_optional_path(value: str | None) -> str | None:
@@ -57,6 +58,23 @@ def validate_image_file(path: str) -> Path:
 
     _assert_is_file(file_path, kind="Image", raw_path=path)
     _assert_max_bytes(file_path, limit_bytes=_MAX_IMAGE_BYTES, error_detail=f"Image file too large: {path}")
+
+    # CM-1b: EXR is validated via an OpenEXR header read (PIL cannot read EXR).
+    # All other formats use the existing PIL path UNCHANGED.
+    if file_path.suffix.lower() == ".exr":
+        try:
+            import OpenEXR
+
+            openexr: Any = OpenEXR
+            exr_file: Any = openexr.File(str(file_path), header_only=True)
+            header: Any = exr_file.header()
+            if header.get("dataWindow") is None:
+                raise ValueError("EXR missing dataWindow")
+        except HTTPError:
+            raise
+        except Exception:
+            raise HTTPError(400, f"Invalid image file: {path}") from None
+        return file_path
 
     try:
         with Image.open(file_path) as img:

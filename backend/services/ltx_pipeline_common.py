@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from api_types import ImageConditioningInput, OutputFormat
+from services.exr_input import resolve_image_input_path
 from services.services_utils import AudioOrNone, TilingConfigType, device_supports_fp8
 
 if TYPE_CHECKING:
@@ -155,17 +156,35 @@ class DistilledNativePipeline:
 
         sigmas = torch.Tensor(DISTILLED_SIGMA_VALUES).to(self.device)
 
-        ltx_images = [_LtxImageInput(img.path, img.frame_idx, img.strength) for img in images]
-        conditionings = self.image_conditioner(
-            lambda enc: image_conditionings_by_replacing_latent(
-                images=ltx_images,
-                height=height,
-                width=width,
-                video_encoder=enc,
-                dtype=dtype,
-                device=self.device,
+        # CM-1b: EXR image inputs are pre-decoded → linear → Rec.709 gamma
+        # (model domain) → temp PNG, so the external reader consumes a normal
+        # sRGB/Rec.709-domain raster. NON-EXR paths are returned UNCHANGED
+        # (literal identity — byte-identical to today). The temp PNGs are owned
+        # here: cleaned up in the `finally` once image_conditioner has consumed
+        # them (no leak across a generation).
+        resolved_paths = [resolve_image_input_path(img.path) for img in images]
+        ltx_images = [
+            _LtxImageInput(rp, img.frame_idx, img.strength)
+            for rp, img in zip(resolved_paths, images)
+        ]
+        try:
+            conditionings = self.image_conditioner(
+                lambda enc: image_conditionings_by_replacing_latent(
+                    images=ltx_images,
+                    height=height,
+                    width=width,
+                    video_encoder=enc,
+                    dtype=dtype,
+                    device=self.device,
+                )
             )
-        )
+        finally:
+            # Unlink the temp PNGs produced for EXR image inputs (if any).
+            from pathlib import Path as _Path
+
+            for rp, img in zip(resolved_paths, images):
+                if rp != img.path:
+                    _Path(rp).unlink(missing_ok=True)
 
         video_state, audio_state = self.stage(
             denoiser=SimpleDenoiser(video_context, audio_context),

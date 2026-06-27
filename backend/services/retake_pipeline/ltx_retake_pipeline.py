@@ -15,6 +15,7 @@ with the following adjustments:
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 import torch
 
 from ltx_core.components.guiders import MultiModalGuiderParams
@@ -24,6 +25,7 @@ from ltx_core.quantization import QuantizationPolicy
 from ltx_core.types import Audio
 from ltx_pipelines.utils.media_io import get_videostream_metadata
 
+from services.exr_input import resolve_video_input_path
 from services.ltx_components import CheckpointPath, ResolvedLtxComponents
 from services.ltx_pipeline_common import encode_video_output
 from services.retake_pipeline.retake_pipeline import RetakePipeline
@@ -192,6 +194,11 @@ class LTXRetakePipeline:
         if start_time >= end_time:
             raise ValueError(f"start_time ({start_time}) must be less than end_time ({end_time})")
 
+        # CM-1b: EXR resolution is owned by generate() (it must happen BEFORE the
+        # get_videostream_metadata call there). ``video_path`` here is already the
+        # resolved path (temp MP4 for EXR sources, original path otherwise) — the
+        # path-based helpers below consume it directly. NON-EXR byte-identical.
+
         effective_seed = int(torch.randint(0, 2**31, (1,)).item()) if seed < 0 else seed
         generator = torch.Generator(device=self.device).manual_seed(effective_seed)
         noiser = GaussianNoiser(generator=generator)
@@ -338,35 +345,45 @@ class LTXRetakePipeline:
         enhance_prompt: bool = False,
         distilled: bool = True,
     ) -> None:
-        meta = get_videostream_metadata(video_path)
-        fps, num_frames = meta.fps, meta.frames
-        video_iter, audio = self._run(
-            video_path=video_path,
-            prompt=prompt,
-            start_time=start_time,
-            end_time=end_time,
-            seed=seed,
-            negative_prompt=negative_prompt,
-            num_inference_steps=num_inference_steps,
-            video_guider_params=video_guider_params,
-            audio_guider_params=audio_guider_params,
-            regenerate_video=regenerate_video,
-            regenerate_audio=regenerate_audio,
-            enhance_prompt=enhance_prompt,
-            distilled=distilled,
-            streaming_prefetch_count=self._streaming_prefetch_count,
-        )
-        audio_out: Audio | None = audio
-        tiling_config = TilingConfig.default()
-        video_chunks = get_video_chunks_number(num_frames, tiling_config)
-        # Routed through the shared encode_video_output dispatcher (was a direct
-        # encode_video call). Relies on MP4 defaults → byte-identical to today,
-        # but now funnels through the MediaEncoder so format/proxy can be added
-        # by handlers in a later phase without touching this pipeline again.
-        encode_video_output(
-            video=video_iter,
-            audio=audio_out,
-            fps=int(fps),
-            output_path=output_path,
-            video_chunks_number_value=video_chunks,
-        )
+        # CM-1b: resolve EXR source → temp MP4 BEFORE the metadata read (an EXR
+        # dir/file would crash get_videostream_metadata). Non-EXR returns the
+        # path UNCHANGED (pure-suffix gate, zero I/O). The temp MP4 lives until
+        # the lazy video iterator is consumed by encode_video_output below.
+        resolved_video_path = resolve_video_input_path(video_path)
+        try:
+            meta = get_videostream_metadata(resolved_video_path)
+            fps, num_frames = meta.fps, meta.frames
+            video_iter, audio = self._run(
+                video_path=resolved_video_path,
+                prompt=prompt,
+                start_time=start_time,
+                end_time=end_time,
+                seed=seed,
+                negative_prompt=negative_prompt,
+                num_inference_steps=num_inference_steps,
+                video_guider_params=video_guider_params,
+                audio_guider_params=audio_guider_params,
+                regenerate_video=regenerate_video,
+                regenerate_audio=regenerate_audio,
+                enhance_prompt=enhance_prompt,
+                distilled=distilled,
+                streaming_prefetch_count=self._streaming_prefetch_count,
+            )
+            audio_out: Audio | None = audio
+            tiling_config = TilingConfig.default()
+            video_chunks = get_video_chunks_number(num_frames, tiling_config)
+            # Routed through the shared encode_video_output dispatcher (was a direct
+            # encode_video call). Relies on MP4 defaults → byte-identical to today,
+            # but now funnels through the MediaEncoder so format/proxy can be added
+            # by handlers in a later phase without touching this pipeline again.
+            encode_video_output(
+                video=video_iter,
+                audio=audio_out,
+                fps=int(fps),
+                output_path=output_path,
+                video_chunks_number_value=video_chunks,
+            )
+        finally:
+            # Clean up the temp MP4 produced for an EXR source (if any).
+            if resolved_video_path != video_path:
+                Path(resolved_video_path).unlink(missing_ok=True)
