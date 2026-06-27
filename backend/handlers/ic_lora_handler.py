@@ -38,7 +38,7 @@ from runtime_config.model_download_specs import (
 from runtime_config.runtime_config import RuntimeConfig
 from state.conditioning_cache import ConditioningCacheEntry, ConditioningCacheKey
 from services.interfaces import VideoProcessor
-from services.ltx_pipeline_common import make_primary_output_path, make_proxy_output_path
+from services.ltx_pipeline_common import make_encode_progress_callback, make_primary_output_path, make_proxy_output_path
 from services.media_encoder.media_encoder import MediaEncoder
 from services.services_utils import FrameArray
 from state.app_state_types import AppState, ICLoraState
@@ -385,6 +385,7 @@ class IcLoraHandler(StateHandlerBase):
                 output_format=output_format,
                 encoder=self.media_encoder,
                 proxy_path=proxy_path,
+                on_progress=make_encode_progress_callback(self._generation.update_progress),
             )
             t_inference_end = time.perf_counter()
             logger.info("[ic-lora] Inference: %.2fs", t_inference_end - t_inference_start)
@@ -617,6 +618,7 @@ class IcLoraHandler(StateHandlerBase):
                     output_format=output_format,
                     encoder=self.media_encoder,
                     proxy_path=proxy_path,
+                    on_progress=make_encode_progress_callback(self._generation.update_progress),
                 )
             else:
                 ic_state.pipeline.generate(
@@ -635,6 +637,7 @@ class IcLoraHandler(StateHandlerBase):
                     output_format=output_format,
                     encoder=self.media_encoder,
                     proxy_path=proxy_path,
+                    on_progress=make_encode_progress_callback(self._generation.update_progress),
                 )
             t_inference_end = time.perf_counter()
             logger.info("[ic-lora] Inference: %.2fs", t_inference_end - t_inference_start)

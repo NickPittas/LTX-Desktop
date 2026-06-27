@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING
 
 import torch
@@ -71,6 +71,34 @@ def make_proxy_output_path(primary_path: str, output_format: OutputFormat) -> st
     return str(p.parent / f"{p.name}_proxy.mp4")
 
 
+# Encode progress split: the encoder's primary encode covers [0, _ENCODE_FRACTION]
+# of the combined 0→1 range; the proxy pass covers [_ENCODE_FRACTION, 1.0]. Must
+# match the encoder's ``_ENCODE_FRACTION`` constant (documented coupling).
+_ENCODE_FRACTION: float = 0.6
+
+
+def make_encode_progress_callback(
+    update_progress: Callable[[str, int, int | None, int | None], None],
+) -> Callable[[float], None]:
+    """Create an ``on_progress`` callback for the encoder.
+
+    Maps the encoder's combined 0→1 progress (encode=[0, _ENCODE_FRACTION],
+    proxy=[_ENCODE_FRACTION, 1.0]) to ``update_progress(stage, int_pct, None, None)``
+    with stages ``"encoding"`` (0→100% within encode) then ``"writing_proxy"``
+    (0→100% within proxy). ``update_progress`` is the handler's
+    ``GenerationHandler.update_progress`` method (takes integer percent).
+    """
+    def _cb(p: float) -> None:
+        if p < _ENCODE_FRACTION:
+            pct = int(round(p / _ENCODE_FRACTION * 100))
+            update_progress("encoding", pct, None, None)
+        else:
+            pct = int(round((p - _ENCODE_FRACTION) / (1.0 - _ENCODE_FRACTION) * 100))
+            update_progress("writing_proxy", pct, None, None)
+
+    return _cb
+
+
 def encode_video_output(
     *,
     video: torch.Tensor | Iterator[torch.Tensor],
@@ -81,6 +109,8 @@ def encode_video_output(
     output_format: OutputFormat = OutputFormat.MP4,
     proxy_path: str | None = None,
     encoder: "MediaEncoder | None" = None,
+    on_progress: "Callable[[float], None] | None" = None,
+    total_frames: int | None = None,
 ) -> None:
     """Dispatch decoded VAE frames to the media encoder.
 
@@ -93,6 +123,10 @@ def encode_video_output(
     If ``encoder is None`` (legacy callers / the retake bypass), a
     ``MediaEncoderImpl`` singleton is lazily constructed. Non-MP4 formats require
     ``proxy_path`` to be set by the caller (handlers, Phase 2).
+
+    ``on_progress`` (0.0→1.0 combined encode+proxy budget) and ``total_frames``
+    are forwarded to the encoder for save-side progress (Phase 4a). MP4 ignores
+    them (no hook from external ``encode_video``).
     """
     if encoder is None:
         encoder = _get_default_encoder()
@@ -104,6 +138,8 @@ def encode_video_output(
         output_format=output_format,
         proxy_path=proxy_path,
         video_chunks_number=video_chunks_number_value,
+        on_progress=on_progress,
+        total_frames=total_frames,
     )
 
 

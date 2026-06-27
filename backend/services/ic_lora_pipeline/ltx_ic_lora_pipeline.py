@@ -408,6 +408,7 @@ class LTXIcLoraPipeline:
         output_format: OutputFormat = OutputFormat.MP4,
         encoder: MediaEncoder | None = None,
         proxy_path: str | None = None,
+        on_progress: Callable[[float], None] | None = None,
     ) -> None:
         tiling_config = default_tiling_config()
         result = self._run_inference(
@@ -444,6 +445,7 @@ class LTXIcLoraPipeline:
             video=video, audio=audio, fps=int(frame_rate), output_path=output_path,
             video_chunks_number_value=chunks, output_format=output_format,
             encoder=encoder, proxy_path=proxy_path,
+            on_progress=on_progress, total_frames=num_frames,
         )
 
     # ------------------------------------------------------------------ #
@@ -470,6 +472,7 @@ class LTXIcLoraPipeline:
         output_format: OutputFormat = OutputFormat.MP4,
         encoder: MediaEncoder | None = None,
         proxy_path: str | None = None,
+        on_progress: Callable[[float], None] | None = None,
     ) -> None:
         """Official two-stage IC-LoRA inpaint pipeline.
 
@@ -857,6 +860,8 @@ class LTXIcLoraPipeline:
             output_format=output_format,
             encoder=encoder,
             proxy_path=proxy_path,
+            on_progress=on_progress,
+            total_frames=num_actual_frames,
         )
         logger.info("[inpaint] Done — %s", output_path)
 

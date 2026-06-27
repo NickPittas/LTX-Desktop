@@ -14,7 +14,7 @@ with the following adjustments:
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 import torch
@@ -352,6 +352,7 @@ class LTXRetakePipeline:
         output_format: OutputFormat = OutputFormat.MP4,
         encoder: MediaEncoder | None = None,
         proxy_path: str | None = None,
+        on_progress: Callable[[float], None] | None = None,
     ) -> None:
         # CM-1b: resolve EXR source → temp MP4 BEFORE the metadata read (an EXR
         # dir/file would crash get_videostream_metadata). Non-EXR returns the
@@ -393,6 +394,8 @@ class LTXRetakePipeline:
                 output_format=output_format,
                 encoder=encoder,
                 proxy_path=proxy_path,
+                on_progress=on_progress,
+                total_frames=num_frames,
             )
         finally:
             # Clean up the temp MP4 produced for an EXR source (if any).

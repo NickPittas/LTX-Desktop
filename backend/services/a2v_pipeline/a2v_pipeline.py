@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Protocol
 from api_types import ImageConditioningInput, OutputFormat
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from services.ltx_components import CheckpointPath, ResolvedLtxComponents
     from services.media_encoder.media_encoder import MediaEncoder
     import torch
@@ -41,4 +43,5 @@ class A2VPipeline(Protocol):
         output_format: OutputFormat = OutputFormat.MP4,
         encoder: MediaEncoder | None = None,
         proxy_path: str | None = None,
+        on_progress: Callable[[float], None] | None = None,
     ) -> None: ...

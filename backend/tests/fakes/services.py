@@ -535,6 +535,7 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
         output_format: Any = None,
         encoder: Any = None,
         proxy_path: Any = None,
+        on_progress: Any = None,
     ) -> None:
         self._record_generate(
             {
@@ -550,6 +551,7 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
                 "output_format": output_format,
                 "encoder": encoder,
                 "proxy_path": proxy_path,
+                "on_progress": on_progress,
             }
         )
 
@@ -865,6 +867,7 @@ class FakeMediaEncoder:
         proxy_path: str | None,
         video_chunks_number: int,  # noqa: ARG002
         on_progress: Any = None,  # noqa: ARG002
+        total_frames: int | None = None,  # noqa: ARG002
     ) -> EncoderResult:
         self.calls.append(
             {

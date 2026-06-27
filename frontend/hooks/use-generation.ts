@@ -76,6 +76,10 @@ function getPhaseMessage(phase: string): string {
       return 'Downloading output...'
     case 'decoding':
       return 'Decoding video...'
+    case 'encoding':
+      return 'Encoding video...'
+    case 'writing_proxy':
+      return 'Building preview...'
     case 'complete':
       return 'Complete!'
     default:

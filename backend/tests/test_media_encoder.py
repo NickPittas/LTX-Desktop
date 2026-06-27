@@ -614,3 +614,63 @@ def test_exr_cleanup_on_proxy_failure(tmp_path: Path) -> None:
 
     assert not primary.exists(), "partial EXR directory must be cleaned up on failure"
     assert not proxy.exists()
+
+
+# ---------------------------------------------------------------------------
+# Phase 4a: encode progress (on_progress)
+# ---------------------------------------------------------------------------
+
+
+def test_exr_encode_progress_monotonic(tmp_path: Path) -> None:
+    """EXR encode: on_progress called monotonically non-decreasing, final ≈ 1.0."""
+    encoder = MediaEncoderImpl()
+    progress: list[float] = []
+    primary = tmp_path / "exr_prog"
+    video = _make_gray_frames(4, 16, 16, gray=0.5)
+    encoder.encode(
+        video=video, audio=None, fps=24, primary_path=str(primary),
+        output_format=OutputFormat.EXR_ZIP_HALF, proxy_path=None,
+        video_chunks_number=1, total_frames=4,
+        on_progress=lambda p: progress.append(p),
+    )
+    assert len(progress) > 0, "on_progress must be called during EXR encode"
+    # Monotonic non-decreasing.
+    for i in range(1, len(progress)):
+        assert progress[i] >= progress[i - 1] - 1e-9, (
+            f"progress decreased at index {i}: {progress[i - 1]} → {progress[i]}"
+        )
+    # Final ≈ 1.0.
+    assert progress[-1] == pytest.approx(1.0, abs=0.01)
+
+
+def test_prores_encode_progress(tmp_path: Path) -> None:
+    """ProRes encode: on_progress called; final ≈ 1.0 (frame-based may be coarse)."""
+    encoder = MediaEncoderImpl()
+    progress: list[float] = []
+    primary = tmp_path / "prores_prog.mov"
+    video = _make_gray_frames(4, 16, 16, gray=0.5)
+    encoder.encode(
+        video=video, audio=None, fps=24, primary_path=str(primary),
+        output_format=OutputFormat.PRORES_422_HQ, proxy_path=None,
+        video_chunks_number=1, total_frames=4,
+        on_progress=lambda p: progress.append(p),
+    )
+    assert len(progress) > 0, "on_progress must be called during ProRes encode"
+    assert progress[-1] == pytest.approx(1.0, abs=0.01)
+
+
+def test_mp4_encode_no_progress(tmp_path: Path) -> None:
+    """MP4 encode: on_progress must NOT be called (external encode_video has no hook)."""
+    encoder = MediaEncoderImpl()
+    progress: list[float] = []
+    primary = tmp_path / "mp4_prog.mp4"
+    video = _make_gray_frames(3, 32, 32, gray=0.5)
+    encoder.encode(
+        video=video, audio=None, fps=24, primary_path=str(primary),
+        output_format=OutputFormat.MP4, proxy_path=None,
+        video_chunks_number=1, total_frames=3,
+        on_progress=lambda p: progress.append(p),
+    )
+    assert len(progress) == 0, (
+        "MP4 must not call on_progress (external encode_video has no hook)"
+    )

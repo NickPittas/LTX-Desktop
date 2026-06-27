@@ -572,6 +572,19 @@ class TestOutputFormat:
         assert r.status_code == 400
         assert "API mode cannot produce primary ProRes/EXR" in r.json()["message"]
 
+    def test_handler_passes_on_progress(self, client, test_state, fake_services, create_fake_model_files):
+        """Phase 4a: handler passes an on_progress callback to the pipeline."""
+        create_fake_model_files()
+        _enable_local_text_encoding(test_state)
+
+        r = client.post("/api/generate", json={**_T2V_JSON, "output_format": "prores_422_hq"})
+        assert r.status_code == 200
+        call = fake_services.fast_video_pipeline.generate_calls[-1]
+        assert call["on_progress"] is not None, "handler must pass on_progress for non-MP4"
+        # Invoking the callback should not raise (it calls update_progress with int pct).
+        call["on_progress"](0.3)  # encode phase
+        call["on_progress"](0.8)  # proxy phase
+
 
 class TestForcedApiGenerate:
     def test_prefers_api_video_routes_to_ltx_api(self, client, test_state, fake_services):

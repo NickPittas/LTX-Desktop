@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING
 
 import torch
@@ -158,6 +158,7 @@ class LTXa2vPipeline:
         output_format: OutputFormat = OutputFormat.MP4,
         encoder: MediaEncoder | None = None,
         proxy_path: str | None = None,
+        on_progress: Callable[[float], None] | None = None,
     ) -> None:
         tiling_config = default_tiling_config()
         video, audio = self._run_inference(
@@ -180,4 +181,5 @@ class LTXa2vPipeline:
             video=video, audio=audio, fps=int(frame_rate), output_path=output_path,
             video_chunks_number_value=chunks, output_format=output_format,
             encoder=encoder, proxy_path=proxy_path,
+            on_progress=on_progress, total_frames=num_frames,
         )

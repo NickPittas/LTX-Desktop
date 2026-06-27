@@ -84,6 +84,11 @@ _EXR_FRAME_PATTERN: Final[str] = "frame_{:05d}.exr"
 # counterpart (``frame_%05d.exr``) — the two are intentionally distinct.
 _EXR_FFMPEG_SEQ_PATTERN: Final[str] = "frame_%05d.exr"
 
+# Encode progress budget: the primary encode covers [0, _ENCODE_FRACTION] of the
+# combined 0→1 ``on_progress`` range; the proxy pass covers [_ENCODE_FRACTION, 1.0].
+# The handler splits on this threshold to label stages "encoding" vs "writing_proxy".
+_ENCODE_FRACTION: Final[float] = 0.6
+
 
 def _is_exr_format(output_format: OutputFormat) -> bool:
     return output_format in (OutputFormat.EXR_ZIP_HALF, OutputFormat.EXR_ZIP_FLOAT)
@@ -128,6 +133,7 @@ class MediaEncoderImpl:
         proxy_path: str | None,
         video_chunks_number: int,  # noqa: ARG002 tqdm total only — unused by real impl
         on_progress: Callable[[float], None] | None = None,
+        total_frames: int | None = None,
     ) -> EncoderResult:
         try:
             if output_format == OutputFormat.MP4:
@@ -146,6 +152,7 @@ class MediaEncoderImpl:
                     output_format=output_format,
                     proxy_path=proxy_path,
                     on_progress=on_progress,
+                    total_frames=total_frames,
                     audio=audio,
                 )
             if _is_exr_format(output_format):
@@ -156,6 +163,7 @@ class MediaEncoderImpl:
                     output_format=output_format,
                     proxy_path=proxy_path,
                     on_progress=on_progress,
+                    total_frames=total_frames,
                     audio=audio,
                 )
             raise ValueError(f"Unsupported output_format: {output_format!r}")
@@ -178,6 +186,21 @@ class MediaEncoderImpl:
             primary.unlink(missing_ok=True)
         if proxy_path is not None:
             Path(proxy_path).unlink(missing_ok=True)
+
+    @staticmethod
+    def _proxy_progress_wrapper(
+        on_progress: Callable[[float], None] | None,
+    ) -> Callable[[float], None] | None:
+        """Wrap ``on_progress`` so the proxy's local [0,1] maps to the proxy budget
+        ``[_ENCODE_FRACTION, 1.0]`` of the combined progress range. Returns None if
+        ``on_progress`` is None (no callback)."""
+        if on_progress is None:
+            return None
+
+        def _wrapped(p: float) -> None:
+            on_progress(_ENCODE_FRACTION + p * (1.0 - _ENCODE_FRACTION))
+
+        return _wrapped
 
     # ------------------------------------------------------------------
     # MP4 (default — byte-identical to today)
@@ -254,6 +277,7 @@ class MediaEncoderImpl:
         output_format: OutputFormat,
         proxy_path: str | None,
         on_progress: Callable[[float], None] | None,
+        total_frames: int | None,
         audio: AudioOrNone,
     ) -> EncoderResult:
         profile = _PRORES_PROFILE[output_format]
@@ -318,17 +342,22 @@ class MediaEncoderImpl:
                     line = raw.decode("utf-8", errors="replace").strip()
                 except Exception:
                     continue
-                if line:
-                    progress_lines.append(line)
-                    if on_progress is not None and line.startswith("frame="):
-                        try:
-                            frames_done = int(line.split("=", 1)[1])
-                            # total unknown here; report a monotonic-ish fraction
-                            # capped < 1.0 — handler only needs coarse progress.
-                            pct = min(0.95, max(0.0, frames_done / max(1, frames_done + 8)))
-                            on_progress(pct)
-                        except (ValueError, IndexError):
-                            pass
+                    if line:
+                        progress_lines.append(line)
+                        if on_progress is not None and line.startswith("frame="):
+                            try:
+                                frames_done = int(line.split("=", 1)[1])
+                                if total_frames and total_frames > 0:
+                                    # Precise: frame/total mapped to encode budget [0, _ENCODE_FRACTION].
+                                    pct = min(_ENCODE_FRACTION,
+                                              frames_done / total_frames * _ENCODE_FRACTION)
+                                else:
+                                    # Heuristic fallback (total unknown).
+                                    pct = min(_ENCODE_FRACTION,
+                                              frames_done / max(1, frames_done + 8) * _ENCODE_FRACTION)
+                                on_progress(pct)
+                            except (ValueError, IndexError):
+                                pass
 
         def _read_stderr() -> None:
             assert proc.stderr is not None
@@ -372,11 +401,13 @@ class MediaEncoderImpl:
         logger.info("ProRes (%s) written to %s", output_format.value, primary_path)
 
         if proxy_path:
+            if on_progress is not None:
+                on_progress(_ENCODE_FRACTION)  # encode done → proxy stage
             self._proxy_from_file(
                 primary_path=primary_path,
                 proxy_path=proxy_path,
                 audio=audio,
-                on_progress=on_progress,
+                on_progress=self._proxy_progress_wrapper(on_progress),
             )
 
         if on_progress is not None:
@@ -396,6 +427,7 @@ class MediaEncoderImpl:
         output_format: OutputFormat,
         proxy_path: str | None,
         on_progress: Callable[[float], None] | None,
+        total_frames: int | None,
         audio: AudioOrNone,
     ) -> EncoderResult:
         # OpenEXR ships no type stubs; treat the module as Any to keep pyright
@@ -445,9 +477,11 @@ class MediaEncoderImpl:
                 exr_file.write(str(frame_path))
                 global_idx += 1
                 if on_progress is not None:
-                    # Per-frame progress; total unknown so report monotonic
-                    # fraction capped below 1.0 until proxy completes.
-                    pct = min(0.9, global_idx / max(1, global_idx + 4))
+                    # Per-frame progress mapped to encode budget [0, _ENCODE_FRACTION].
+                    if total_frames and total_frames > 0:
+                        pct = min(_ENCODE_FRACTION, global_idx / total_frames * _ENCODE_FRACTION)
+                    else:
+                        pct = min(_ENCODE_FRACTION, global_idx / max(1, global_idx + 4) * _ENCODE_FRACTION)
                     on_progress(pct)
         # Partial-output cleanup on ANY failure is owned by ``encode()`` (§0A.J).
 
@@ -456,12 +490,14 @@ class MediaEncoderImpl:
         )
 
         if proxy_path:
+            if on_progress is not None:
+                on_progress(_ENCODE_FRACTION)  # encode done → proxy stage
             self._proxy_from_exr(
                 exr_dir=out_dir,
                 fps=int(fps),
                 proxy_path=proxy_path,
                 audio=audio,
-                on_progress=on_progress,
+                on_progress=self._proxy_progress_wrapper(on_progress),
             )
 
         if on_progress is not None:

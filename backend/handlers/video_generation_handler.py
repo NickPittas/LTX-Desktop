@@ -41,7 +41,7 @@ from server_utils.media_validation import (
 )
 from services.interfaces import LTXAPIClient
 from services.ltx_api_client.ltx_api_client import LTXAPIClientError
-from services.ltx_pipeline_common import make_primary_output_path, make_proxy_output_path
+from services.ltx_pipeline_common import make_encode_progress_callback, make_primary_output_path, make_proxy_output_path
 from services.media_encoder.media_encoder import MediaEncoder
 from state.app_state_types import AppState
 from state.app_settings import should_video_generate_with_ltx_api
@@ -263,6 +263,7 @@ class VideoGenerationHandler(StateHandlerBase):
                 output_format=output_format,
                 encoder=self.media_encoder,
                 proxy_path=proxy_path,
+                on_progress=make_encode_progress_callback(self._generation.update_progress),
             )
             t_inference_end = time.perf_counter()
             logger.info("[%s] Inference: %.2fs", gen_mode, t_inference_end - t_inference_start)
@@ -362,6 +363,7 @@ class VideoGenerationHandler(StateHandlerBase):
                 output_format=req.output_format or OutputFormat.MP4,
                 encoder=self.media_encoder,
                 proxy_path=proxy_path,
+                on_progress=make_encode_progress_callback(self._generation.update_progress),
             )
 
             if self._generation.is_generation_cancelled():

@@ -62,6 +62,7 @@ class MediaEncoder(Protocol):
         proxy_path: str | None,
         video_chunks_number: int,
         on_progress: Callable[[float], None] | None = None,
+        total_frames: int | None = None,
     ) -> EncoderResult:
         ...
 
