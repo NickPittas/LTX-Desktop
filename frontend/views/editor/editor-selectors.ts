@@ -473,6 +473,52 @@ export function selectClipPath(state: EditorState, clip: TimelineClip | null | u
   return selectClipPathFromAssets(selectAssets(state), clip)
 }
 
+/**
+ * Resolve the PRIMARY deliverable path for a clip (NOT the proxy).
+ * Used by EXPORT — export must build from the high-quality primary (ProRes .mov,
+ * .mp4) when available. The proxy is for playback only.
+ *
+ * For EXR-sequence primaries (a directory ending `_exr`), the export handler
+ * cannot consume a directory — callers should fall back to the proxy for those
+ * (see ``selectExportClipPath``). This function returns the raw primary path
+ * regardless; the caller decides the fallback.
+ */
+export function selectClipPrimaryPathFromAssets(assets: Asset[], clip: TimelineClip | null | undefined): string {
+  if (!clip) return ''
+  const liveAsset = selectLiveAssetForClipFromAssets(assets, clip)
+  let src = clip.asset?.path || ''
+  if (liveAsset) {
+    if (liveAsset.takes && liveAsset.takes.length > 0 && clip.takeIndex !== undefined) {
+      const idx = Math.max(0, Math.min(clip.takeIndex, liveAsset.takes.length - 1))
+      src = liveAsset.takes[idx].path
+    } else {
+      src = liveAsset.path
+    }
+  }
+  return src || ''
+}
+
+export function selectClipPrimaryPath(state: EditorState, clip: TimelineClip | null | undefined): string {
+  return selectClipPrimaryPathFromAssets(selectAssets(state), clip)
+}
+
+/**
+ * Resolve the export clip path: use the PRIMARY (quality) when it's a file
+ * (``.mov``, ``.mp4``); fall back to the proxy for EXR-sequence primaries
+ * (directories the ffmpeg export handler can't consume) or when no primary exists.
+ *
+ * EXR-dir-export-from-primary is out of scope for v1 — proxy fallback is the
+ * documented limitation.
+ */
+function selectExportClipPath(state: EditorState, clip: TimelineClip): string {
+  const primary = selectClipPrimaryPath(state, clip)
+  if (primary && !primary.endsWith('_exr')) {
+    return primary
+  }
+  // EXR dir or no primary → proxy (or path if no proxy).
+  return selectClipPath(state, clip)
+}
+
 export function selectClipDimensionsFromAssets(assets: Asset[], clip: TimelineClip): ClipDimensions | null {
   if (clip.type === 'audio') return null
   const liveAsset = selectLiveAssetForClipFromAssets(assets, clip)
@@ -757,7 +803,7 @@ export function selectExportClipData(state: EditorState): ExportClipData[] {
     .filter(clip => clip.type === 'video' || clip.type === 'image' || clip.type === 'audio')
     .filter(clip => tracks[clip.trackIndex]?.enabled !== false)
     .map(clip => ({
-      path: selectClipPath(state, clip),
+      path: selectExportClipPath(state, clip),
       type: clip.type,
       startTime: clip.startTime,
       duration: clip.duration,
