@@ -234,6 +234,8 @@ def resolve_image_input_path(path: str) -> str:
     """Resolve an image-conditioning input path for the model domain.
 
     NON-EXR: returns ``path`` UNCHANGED (pure-suffix check — no I/O).
+    CM-1c NOTE: sRGB image → BT.709 cross-transfer is deferred for v1 (§8
+    assumption: sRGB ≈ Rec.709 within model tolerance). CM-1c is video-only.
     EXR: decodes → transfers linear → Rec.709 gamma → writes ONE temp PNG and
     returns its path, so the existing external image reader (which expects a
     readable raster path) consumes a normal sRGB/Rec.709-domain PNG unchanged.
@@ -349,11 +351,62 @@ def resolve_video_input_path(path: str, *, fps: int = 24) -> str:
     return tmp.name
 
 
+# ---------------------------------------------------------------------------
+# CM-1c: tagged non-bt709 VIDEO input → Rec.709 correction
+# ---------------------------------------------------------------------------
+
+def iter_video_frames_to_model_domain(
+    path: str,
+    *,
+    frame_cap: int | None,
+    device: Any,
+) -> Generator[torch.Tensor, None, None]:
+    """Decode video frames and correct to the Rec.709 model domain if needed.
+
+    HARD INVARIANT: for bt709-tagged or untagged video (Rec.709-assumed) → EXACT
+    passthrough (``yield from decode_video_by_frame`` — byte-identical, zero
+    per-frame work). This is the identity fast path; no transform object, no
+    per-frame math. The validated inpaint MP4 path is an exact no-op.
+
+    For tagged non-bt709 video (BT.601/smpte170m, Rec.2020, etc.) → for each
+    frame, apply ``color_to_model_space(frame, src=detected_CS)`` (linearize via
+    the CS transfer → matrix to Rec.709-linear → bt709_oetf → re-quantize to
+    uint8). This is the ONLY active path.
+
+    Output shape/dtype/device matches ``decode_video_by_frame`` exactly
+    (``(1, H, W, 3) uint8``) so downstream ``video_preprocess`` + ``normalize_latent``
+    is unchanged.
+    """
+    from ltx_pipelines.utils.media_io import decode_video_by_frame
+    from services.color_management import REC709, color_to_model_space, detect_colorspace
+
+    cs = detect_colorspace(path)
+    if cs == REC709:
+        # Identity fast path: bt709-tagged or untagged (Rec.709-assumed) →
+        # pure passthrough, byte-identical to today. No CS object, no per-frame math.
+        yield from decode_video_by_frame(path=path, frame_cap=frame_cap, device=device)
+        return
+
+    # Tagged non-bt709: apply color_to_model_space per frame (linearize → matrix →
+    # bt709_oetf → re-quantize to uint8). The model sees Rec.709-domain pixels.
+    for frame in decode_video_by_frame(path=path, frame_cap=frame_cap, device=device):
+        # frame is (1, H, W, 3) uint8 on device. Normalize to [0,1] float first.
+        framef = frame.float() / 255.0
+        corrected = color_to_model_space(framef, cs)
+        if isinstance(corrected, torch.Tensor):
+            yield (corrected.clamp(0.0, 1.0) * 255.0).round().to(torch.uint8)
+        else:
+            # numpy fallback (shouldn't happen for torch input, but be safe).
+            arr = np.clip(corrected, 0.0, 1.0)
+            yield torch.as_tensor((arr * 255.0).round().astype(np.uint8), device=device)
+
+
 __all__ = [
     "decode_exr_image",
     "decode_exr_sequence",
     "is_exr_input",
     "iter_exr_frames_as_video_tensors",
+    "iter_video_frames_to_model_domain",
     "resolve_image_input_path",
     "resolve_video_input_path",
 ]

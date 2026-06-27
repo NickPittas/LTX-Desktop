@@ -68,13 +68,13 @@ def test_prompt_encoded_before_video_loaded():
 
     method_body = source[start:]
     prompt_pos = method_body.find("self.pipeline.prompt_encoder")
-    video_pos = method_body.find("decode_video_by_frame(path=video_path")
+    video_pos = method_body.find("iter_video_frames_to_model_domain")
 
     assert prompt_pos != -1, "prompt_encoder not found in generate_inpaint"
-    assert video_pos != -1, "decode_video_by_frame not found in generate_inpaint"
+    assert video_pos != -1, "iter_video_frames_to_model_domain not found in generate_inpaint"
     assert prompt_pos < video_pos, (
         f"prompt_encoder at offset {prompt_pos} must appear before "
-        f"decode_video_by_frame at offset {video_pos} — "
+        f"video decode at offset {video_pos} — "
         "prompt encoding moved before video loading to reduce peak VRAM"
     )
 

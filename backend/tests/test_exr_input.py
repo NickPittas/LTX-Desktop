@@ -24,6 +24,7 @@ from services.exr_input import (
     decode_exr_sequence,
     is_exr_input,
     iter_exr_frames_as_video_tensors,
+    iter_video_frames_to_model_domain,
     resolve_image_input_path,
     resolve_video_input_path,
 )
@@ -374,3 +375,122 @@ def test_exr_missing_channels_raise(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="missing required channel"):
         decode_exr_image(str(exr))
+
+
+# ---------------------------------------------------------------------------
+# CM-1c: tagged non-bt709 VIDEO input → Rec.709 correction
+# ---------------------------------------------------------------------------
+
+def _write_tagged_mp4(path: str, primaries: str, transfer: str, matrix: str, color: str = "0x8040C0") -> None:
+    """Generate a tiny tagged mp4 via ffmpeg lavfi. Default color is non-gray
+    (purple) so matrix corrections fire for tagged non-bt709 tests."""
+    import imageio_ffmpeg
+
+    ff = imageio_ffmpeg.get_ffmpeg_exe()
+    subprocess.run(
+        [ff, "-y", "-f", "lavfi", "-i", f"color=c={color}:s=16x16:d=0.5",
+         "-frames:v", "3", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+         "-color_primaries", primaries, "-color_trc", transfer, "-colorspace", matrix,
+         path],
+        capture_output=True, check=True,
+    )
+
+
+def test_bt709_video_input_byte_identical(tmp_path: Path) -> None:
+    """THE inpaint-protection gate: bt709/untagged video → byte-identical passthrough."""
+    from ltx_pipelines.utils.media_io import decode_video_by_frame
+
+    device = torch.device("cpu")
+    frames = np.stack([
+        np.full((16, 16, 3), 50, dtype=np.uint8),
+        np.full((16, 16, 3), 200, dtype=np.uint8),
+    ])
+
+    # Untagged mp4 (Rec.709-assumed by detect_colorspace).
+    untagged = tmp_path / "untagged.mp4"
+    _write_mp4(untagged, frames)
+    legacy = [t.cpu() for t in decode_video_by_frame(path=str(untagged), frame_cap=2, device=device)]
+    wrapped = [t.cpu() for t in iter_video_frames_to_model_domain(str(untagged), frame_cap=2, device=device)]
+    assert len(legacy) == len(wrapped) == 2
+    for a, b in zip(legacy, wrapped):
+        assert torch.equal(a, b), "untagged video must be byte-identical (CM-1c passthrough)"
+
+    # Explicitly bt709-tagged mp4.
+    bt709_mp4 = str(tmp_path / "bt709.mp4")
+    _write_tagged_mp4(bt709_mp4, "bt709", "bt709", "bt709")
+    legacy2 = [t.cpu() for t in decode_video_by_frame(path=bt709_mp4, frame_cap=3, device=device)]
+    wrapped2 = [t.cpu() for t in iter_video_frames_to_model_domain(bt709_mp4, frame_cap=3, device=device)]
+    assert len(legacy2) == len(wrapped2)
+    for a, b in zip(legacy2, wrapped2):
+        assert torch.equal(a, b), "bt709-tagged video must be byte-identical (CM-1c passthrough)"
+
+
+def test_smpte170m_video_input_corrected(tmp_path: Path) -> None:
+    """smpte170m (BT.601) video → correction applied, matches color_to_model_space."""
+    from services.color_management import BT601_525, color_to_model_space, detect_colorspace
+
+    mp4 = str(tmp_path / "smpte170m.mp4")
+    _write_tagged_mp4(mp4, "smpte170m", "smpte170m", "smpte170m")
+
+    # Detection must return BT.601 (NOT bt709 — §9.7).
+    cs = detect_colorspace(mp4)
+    assert cs == BT601_525, f"expected BT601_525, got {cs.name}"
+
+    device = torch.device("cpu")
+    wrapped = list(iter_video_frames_to_model_domain(mp4, frame_cap=3, device=device))
+
+    # Get raw frames for comparison.
+    from ltx_pipelines.utils.media_io import decode_video_by_frame
+    raw = [t.cpu() for t in decode_video_by_frame(path=mp4, frame_cap=3, device=device)]
+
+    assert len(wrapped) == len(raw) > 0
+    # Corrected frames differ from raw (correction applied).
+    assert not torch.equal(wrapped[0], raw[0]), "smpte170m frames must be corrected (not passthrough)"
+
+    # And match color_to_model_space(raw, BT601_525) re-quantized to uint8.
+    framef = raw[0].float() / 255.0
+    expected = color_to_model_space(framef, BT601_525)
+    if isinstance(expected, torch.Tensor):
+        expected_uint8 = (expected.clamp(0.0, 1.0) * 255.0).round().to(torch.uint8)
+    else:
+        expected_uint8 = torch.from_numpy(
+            (np.clip(expected, 0, 1) * 255).round().astype(np.uint8)
+        )
+    assert torch.equal(wrapped[0], expected_uint8), (
+        "corrected frame must match color_to_model_space(raw, BT601_525)"
+    )
+
+
+def test_production_inpaint_video_branch_identity_still_holds(tmp_path: Path) -> None:
+    """The production inpaint branch (now via iter_video_frames_to_model_domain) is
+    still byte-identical for bt709/untagged video — the hard identity gate."""
+    from ltx_pipelines.utils.media_io import decode_video_by_frame, video_preprocess
+
+    device = torch.device("cpu")
+    dtype = torch.float32
+    frames = np.stack([
+        np.full((16, 16, 3), 30, dtype=np.uint8),
+        np.full((16, 16, 3), 120, dtype=np.uint8),
+        np.full((16, 16, 3), 220, dtype=np.uint8),
+    ])
+    mp4 = tmp_path / "inpaint_cm1c.mp4"
+    _write_mp4(mp4, frames)
+
+    # Legacy conditioning tensor.
+    legacy = video_preprocess(
+        decode_video_by_frame(path=str(mp4), frame_cap=3, device=device),
+        16, 16, dtype, device,
+    )
+
+    # The EXACT production branch expression (generate_inpaint, now CM-1c).
+    branched_gen = (
+        iter_exr_frames_as_video_tensors(str(mp4), frame_cap=3, device=device)
+        if is_exr_input(str(mp4))
+        else iter_video_frames_to_model_domain(str(mp4), frame_cap=3, device=device)
+    )
+    branched = video_preprocess(branched_gen, 16, 16, dtype, device)
+
+    assert is_exr_input(str(mp4)) is False
+    assert torch.equal(legacy, branched), (
+        "production inpaint branch must yield byte-identical conditioning tensor (CM-1c)"
+    )
