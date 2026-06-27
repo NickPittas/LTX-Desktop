@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from 'react'
-import { ApiClient } from '../lib/api-client'
+import { ApiClient, type ApiRequestBodyOf } from '../lib/api-client'
 import { logger } from '../lib/logger'
+import type { OutputFormat } from '../lib/output-formats'
 
 export type RetakeMode = 'replace_audio_and_video' | 'replace_video' | 'replace_audio'
 
@@ -10,11 +11,15 @@ export interface RetakeSubmitParams {
   duration: number
   prompt: string
   mode: RetakeMode
+  outputFormat?: OutputFormat
 }
 
 export interface RetakeResult {
   videoPath: string
+  proxyPath: string | null
 }
+
+type RetakeBody = ApiRequestBodyOf<'retake'>
 
 interface UseRetakeState {
   isRetaking: boolean
@@ -45,13 +50,18 @@ export function useRetake() {
       result: null,
     })
 
-    const result = await ApiClient.retake({
+    const body: Record<string, unknown> = {
       video_path: params.videoPath,
       start_time: params.startTime,
       duration: params.duration,
       prompt: params.prompt,
       mode: params.mode,
-    })
+    }
+    if (params.outputFormat && params.outputFormat !== 'mp4') {
+      body.output_format = params.outputFormat
+    }
+
+    const result = await ApiClient.retake(body as RetakeBody)
 
     if (!result.ok) {
       logger.error(`Retake error: ${result.error.message}`)
@@ -79,6 +89,7 @@ export function useRetake() {
     if ('video_path' in payload) {
       const res: RetakeResult = {
         videoPath: payload.video_path,
+        proxyPath: payload.proxy_path ?? null,
       }
       // Fire onComplete before local setState — runs ProjectContext mutations
       // even if GenSpace has unmounted (Bug A fix)

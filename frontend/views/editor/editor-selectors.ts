@@ -457,13 +457,13 @@ export function selectLiveAssetForClip(state: EditorState, clip: TimelineClip | 
 export function selectClipPathFromAssets(assets: Asset[], clip: TimelineClip | null | undefined): string {
   if (!clip) return ''
   const liveAsset = selectLiveAssetForClipFromAssets(assets, clip)
-  let src = clip.asset?.path || ''
+  let src = clip.asset?.proxyPath || clip.asset?.path || ''
   if (liveAsset) {
     if (liveAsset.takes && liveAsset.takes.length > 0 && clip.takeIndex !== undefined) {
       const idx = Math.max(0, Math.min(clip.takeIndex, liveAsset.takes.length - 1))
-      src = liveAsset.takes[idx].path
+      src = liveAsset.takes[idx].proxyPath || liveAsset.takes[idx].path
     } else {
-      src = liveAsset.path
+      src = liveAsset.proxyPath || liveAsset.path
     }
   }
   return src || ''

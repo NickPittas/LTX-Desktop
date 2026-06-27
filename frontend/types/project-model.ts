@@ -74,6 +74,7 @@ export const generationParamsSchema = z.object({
 
 export const assetTakeSchema = z.object({
   path: z.string(),
+  proxyPath: z.string().optional(),
   bigThumbnailPath: z.string().optional(),
   smallThumbnailPath: z.string().optional(),
   width: z.number().optional(),
@@ -264,6 +265,7 @@ export const assetSchema = z.object({
   id: z.string(),
   type: z.enum(assetTypeValues),
   path: z.string(),
+  proxyPath: z.string().optional(),
   bigThumbnailPath: z.string().optional(),
   smallThumbnailPath: z.string().optional(),
   width: z.number().optional(),

@@ -643,7 +643,7 @@ export const VideoEditorAssetsPanel = forwardRef<VideoEditorAssetsPanelHandle, V
                     >
                       {takesAsset.type === 'video' ? (
                         <VideoThumbnailCard
-                          videoUrl={pathToFileUrl(take.path)}
+                          videoUrl={pathToFileUrl(take.proxyPath ?? take.path)}
                           thumbnailUrl={take.smallThumbnailPath ? pathToFileUrl(take.smallThumbnailPath) : undefined}
                         />
                       ) : (
@@ -826,7 +826,7 @@ export const VideoEditorAssetsPanel = forwardRef<VideoEditorAssetsPanelHandle, V
                     )}
                     {asset.type === 'video' ? (
                       <VideoThumbnailCard
-                        videoUrl={pathToFileUrl(asset.path)}
+                        videoUrl={pathToFileUrl(asset.proxyPath ?? asset.path)}
                         thumbnailUrl={asset.smallThumbnailPath ? pathToFileUrl(asset.smallThumbnailPath) : undefined}
                       />
                     ) : asset.type === 'audio' ? (

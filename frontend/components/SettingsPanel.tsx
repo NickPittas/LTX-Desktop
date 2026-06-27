@@ -6,6 +6,7 @@ import {
   sanitizeVideoGenerationSettings,
   type VideoGenerationModelSpecItem,
 } from '../lib/video-generation-model-specs'
+import type { OutputFormat } from '../lib/output-formats'
 
 export type GenerationMode = 'text-to-video' | 'image-to-video' | 'text-to-image'
 
@@ -17,6 +18,7 @@ export interface GenerationSettings {
   audio: boolean
   cameraMotion: string
   aspectRatio?: string
+  outputFormat?: OutputFormat
   // Image-specific settings
   imageResolution: string
   imageAspectRatio: string

@@ -381,7 +381,7 @@ export const VideoEditorSourceMonitor = React.forwardRef<VideoEditorSourceMonito
             {sourceAsset.type === 'video' ? (
               <video
                 ref={sourceVideoRef}
-                src={pathToFileUrl(sourceAsset.path)}
+                src={pathToFileUrl(sourceAsset.proxyPath ?? sourceAsset.path)}
                 className="max-w-full max-h-full object-contain"
                 onLoadedMetadata={() => {
                   const pending = pendingSeekRef.current

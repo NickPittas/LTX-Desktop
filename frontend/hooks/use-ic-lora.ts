@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from 'react'
 import { ApiClient, type ApiRequestBodyOf } from '../lib/api-client'
 import { logger } from '../lib/logger'
+import type { OutputFormat } from '../lib/output-formats'
 
 export type IcLoraConditioningType = 'canny' | 'depth'
 
@@ -20,10 +21,12 @@ export interface IcLoraSubmitParams {
   height?: number
   numFrames?: number
   images?: { path: string; frame?: number; strength?: number }[]
+  outputFormat?: OutputFormat
 }
 
 export interface IcLoraResult {
   videoPath: string
+  proxyPath: string | null
 }
 
 interface UseIcLoraState {
@@ -60,6 +63,9 @@ export function useIcLora() {
       lora_strength: params.loraStrength ?? undefined,
       prompt: params.prompt,
       frame_rate: params.frameRate ?? 24,
+    }
+    if (params.outputFormat && params.outputFormat !== 'mp4') {
+      body.output_format = params.outputFormat
     }
     if (params.videoPath) {
       body.video_path = params.videoPath
@@ -108,6 +114,7 @@ export function useIcLora() {
     if (payload.status === 'complete') {
       const res: IcLoraResult = {
         videoPath: payload.video_path,
+        proxyPath: payload.proxy_path ?? null,
       }
       // Fire onComplete before local setState — runs ProjectContext mutations
       // even if GenSpace has unmounted (Bug A fix)

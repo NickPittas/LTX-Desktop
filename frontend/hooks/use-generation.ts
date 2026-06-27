@@ -9,6 +9,7 @@ interface GenerationState {
   progress: number
   statusMessage: string
   videoPath: string | null
+  proxyPath: string | null
   imagePath: string | null
   imagePaths: string[]
   error: GenerationError | null
@@ -89,6 +90,7 @@ export function useGeneration(): UseGenerationReturn {
     progress: 0,
     statusMessage: '',
     videoPath: null,
+    proxyPath: null,
     imagePath: null,
     imagePaths: [],
     error: null,
@@ -111,6 +113,7 @@ export function useGeneration(): UseGenerationReturn {
       progress: 0,
       statusMessage: statusMsg,
       videoPath: null,
+      proxyPath: null,
       imagePath: null,
       imagePaths: [],
       error: null,
@@ -132,6 +135,9 @@ export function useGeneration(): UseGenerationReturn {
         cameraMotion: settings.cameraMotion,
         negativePrompt: (settings as { negativePrompt?: string }).negativePrompt ?? '',
         aspectRatio: settings.aspectRatio || '16:9',
+      }
+      if (settings.outputFormat && settings.outputFormat !== 'mp4') {
+        body.output_format = settings.outputFormat
       }
       if (imagePath) {
         body.imagePath = imagePath
@@ -205,6 +211,7 @@ export function useGeneration(): UseGenerationReturn {
           progress: 100,
           statusMessage: 'Complete!',
           videoPath: payload.video_path,
+          proxyPath: payload.proxy_path ?? null,
           imagePath: null,
           imagePaths: [],
           error: null,
@@ -296,6 +303,7 @@ export function useGeneration(): UseGenerationReturn {
       progress: 0,
       statusMessage: numImages > 1 ? `Generating ${numImages} images...` : 'Generating image...',
       videoPath: null,
+      proxyPath: null,
       imagePath: null,
       imagePaths: [],
       error: null,
@@ -368,6 +376,7 @@ export function useGeneration(): UseGenerationReturn {
           progress: 100,
           statusMessage: 'Complete!',
           videoPath: null,
+          proxyPath: null,
           imagePath: rawPaths[0],
           imagePaths: rawPaths,
           error: null,
@@ -405,6 +414,7 @@ export function useGeneration(): UseGenerationReturn {
       progress: 0,
       statusMessage: '',
       videoPath: null,
+      proxyPath: null,
       imagePath: null,
       imagePaths: [],
       error: null,

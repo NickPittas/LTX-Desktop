@@ -101,9 +101,9 @@ function resolveClipPathFromAssets(assets: Asset[], clip: TimelineClip): string 
   if (!liveAsset) return ''
   if (liveAsset.takes && liveAsset.takes.length > 0 && clip.takeIndex !== undefined) {
     const idx = Math.max(0, Math.min(clip.takeIndex, liveAsset.takes.length - 1))
-    return liveAsset.takes[idx].path || ''
+    return liveAsset.takes[idx].proxyPath || liveAsset.takes[idx].path || ''
   }
-  return liveAsset.path || ''
+  return liveAsset.proxyPath || liveAsset.path || ''
 }
 
 function createMonitorVideoElement(src: string): HTMLVideoElement {

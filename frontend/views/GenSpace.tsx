@@ -19,6 +19,11 @@ import { GenerationErrorDialog } from '../components/GenerationErrorDialog'
 import { addVisualAssetToProject } from '../lib/asset-copy'
 import { pathToFileUrl } from '../lib/file-url'
 import {
+  OUTPUT_FORMAT_OPTIONS,
+  isProResOrExrFormat,
+  type OutputFormat,
+} from '../lib/output-formats'
+import {
   areVideoGenerationSettingsEquivalent,
   getVideoGenerationModelSpecs,
   resolveVideoGenerationOptions,
@@ -118,7 +123,7 @@ function AssetCard({
           {isHovered && (
             <video
               ref={hoverVideoRef}
-              src={pathToFileUrl(asset.path)}
+              src={pathToFileUrl(asset.proxyPath ?? asset.path)}
               className="absolute inset-0 w-full h-full object-contain"
               muted={isMuted}
               loop
@@ -128,7 +133,7 @@ function AssetCard({
               onTimeUpdate={handleTimeUpdate}
               onCanPlay={() => setHoverVideoReady(true)}
               onLoadedData={() => setHoverVideoReady(true)}
-              onError={(e) => { setHoverVideoReady(false); console.error('[GenSpace] Asset card hover video failed:', asset.path, (e.target as HTMLVideoElement)?.error) }}
+              onError={(e) => { setHoverVideoReady(false); console.error('[GenSpace] Asset card hover video failed:', asset.proxyPath ?? asset.path, (e.target as HTMLVideoElement)?.error) }}
             />
           )}
         </div>
@@ -271,7 +276,7 @@ function SettingsDropdown({
   title 
 }: { 
   trigger: React.ReactNode
-  options: { value: string; label: string; disabled?: boolean; tooltip?: string; icon?: React.ReactNode }[]
+  options: { value: string; label: string; disabled?: boolean; tooltip?: string; icon?: React.ReactNode; group?: string }[]
   value: string
   onChange: (value: string) => void
   title: string
@@ -304,37 +309,46 @@ function SettingsDropdown({
         <div className="absolute bottom-full left-0 mb-2 bg-zinc-800 border border-zinc-700 rounded-md p-2 min-w-[160px] shadow-xl z-[9999]">
           <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-2">{title}</div>
           <div className="space-y-1">
-            {options.map(option => (
-              <div key={option.value} className="relative group/option">
-                <button
-                  onClick={() => { if (!option.disabled) { onChange(option.value); setIsOpen(false) } }}
-                  className={`w-full flex items-center justify-between px-2 py-2 rounded-md transition-colors text-left ${
-                    option.disabled
-                      ? 'cursor-not-allowed'
-                      : value === option.value ? 'bg-white/20 hover:bg-white/25' : 'hover:bg-zinc-700'
-                  }`}
-                >
-                  <span className={`flex items-center gap-2.5 text-sm ${
-                    option.disabled 
-                      ? 'text-zinc-600' 
-                      : value === option.value ? 'text-white' : 'text-zinc-400'
-                  }`}>
-                    {option.icon && <span className="flex-shrink-0">{option.icon}</span>}
-                    {option.label}
-                  </span>
-                  {value === option.value && !option.disabled && (
-                    <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                    </svg>
+            {options.map((option, index) => {
+              const prevGroup = index > 0 ? options[index - 1]?.group : undefined
+              const showGroupHeader = option.group && option.group !== prevGroup
+              return (
+                <div key={option.value} className="relative group/option">
+                  {showGroupHeader && (
+                    <div className="px-2 pt-1.5 pb-0.5 text-[10px] font-semibold text-zinc-500 uppercase tracking-wider">
+                      {option.group}
+                    </div>
                   )}
-                </button>
-                {option.disabled && option.tooltip && (
-                  <div className="absolute left-full ml-2 top-1/2 -translate-y-1/2 px-2 py-1 bg-zinc-700 rounded text-xs text-zinc-300 whitespace-nowrap opacity-0 group-hover/option:opacity-100 pointer-events-none z-[10000] transition-opacity">
-                    {option.tooltip}
-                  </div>
-                )}
-              </div>
-            ))}
+                  <button
+                    onClick={() => { if (!option.disabled) { onChange(option.value); setIsOpen(false) } }}
+                    className={`w-full flex items-center justify-between px-2 py-2 rounded-md transition-colors text-left ${
+                      option.disabled
+                        ? 'cursor-not-allowed'
+                        : value === option.value ? 'bg-white/20 hover:bg-white/25' : 'hover:bg-zinc-700'
+                    }`}
+                  >
+                    <span className={`flex items-center gap-2.5 text-sm ${
+                      option.disabled 
+                        ? 'text-zinc-600' 
+                        : value === option.value ? 'text-white' : 'text-zinc-400'
+                    }`}>
+                      {option.icon && <span className="flex-shrink-0">{option.icon}</span>}
+                      {option.label}
+                    </span>
+                    {value === option.value && !option.disabled && (
+                      <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                      </svg>
+                    )}
+                  </button>
+                  {option.disabled && option.tooltip && (
+                    <div className="absolute left-full ml-2 top-1/2 -translate-y-1/2 px-2 py-1 bg-zinc-700 rounded text-xs text-zinc-300 whitespace-nowrap opacity-0 group-hover/option:opacity-100 pointer-events-none z-[10000] transition-opacity">
+                      {option.tooltip}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
           </div>
         </div>
       )}
@@ -398,6 +412,7 @@ function PromptBar({
   onLoraStrengthChange,
   showIcLoraOutputSettings,
   onFpsChange,
+  isApiMode,
 }: {
   mode: 'image' | 'video' | 'retake' | 'ic-lora'
   onModeChange: (mode: 'image' | 'video' | 'retake' | 'ic-lora') => void
@@ -422,6 +437,7 @@ function PromptBar({
     imageResolution: string
     variations: number
     audio?: boolean
+    outputFormat?: OutputFormat
   }
   onSettingsChange: (settings: any) => void
   videoModelSpecs: VideoGenerationModelSpecItem[]
@@ -434,6 +450,7 @@ function PromptBar({
   onLoraStrengthChange?: (strength: number) => void
   showIcLoraOutputSettings?: boolean
   onFpsChange?: (fps: number) => void
+  isApiMode: boolean
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const audioInputRef = useRef<HTMLInputElement>(null)
@@ -452,6 +469,31 @@ function PromptBar({
     resolvedVideoOptions
     && resolvedVideoOptions.hasCompatibleOptions
     && resolvedVideoOptions.fpsOptions.length > 1,
+  )
+
+  const formatValue = settings.outputFormat || 'mp4'
+  const formatOptions = OUTPUT_FORMAT_OPTIONS.map((option) => ({
+    value: option.value,
+    label: option.label,
+    disabled: isApiMode && option.value !== 'mp4',
+    tooltip: isApiMode && option.value !== 'mp4' ? 'Local generation only' : undefined,
+  }))
+  const formatDropdown = (
+    <SettingsDropdown
+      title="FORMAT"
+      value={formatValue}
+      onChange={(v) => onSettingsChange({ ...settings, outputFormat: v as OutputFormat })}
+      options={formatOptions}
+      trigger={
+        <>
+          <span className="text-zinc-500 text-[10px]">FMT</span>
+          <span className="text-zinc-300 font-medium">
+            {OUTPUT_FORMAT_OPTIONS.find((o) => o.value === formatValue)?.label}
+          </span>
+          <ChevronUp className="h-3 w-3 text-zinc-500" />
+        </>
+      }
+    />
   )
 
   const handleDrop = (e: React.DragEvent) => {
@@ -640,7 +682,10 @@ function PromptBar({
         <div className="flex-1" />
         
         {isRetake ? (
-          <div className="text-[10px] text-zinc-500 pr-2">Trim in the panel above, then retake</div>
+          <>
+            {formatDropdown}
+            <div className="text-[10px] text-zinc-500 pr-2">Trim in the panel above, then retake</div>
+          </>
         ) : isIcLora ? (
           <>
             <SettingsDropdown
@@ -700,6 +745,8 @@ function PromptBar({
                 </>
               }
             />
+            <div className="w-px h-4 bg-zinc-700 mx-0.5" />
+            {formatDropdown}
           {showIcLoraOutputSettings && (() => {
             // ponytail: direct call for Ingredients; can't reuse resolvedVideoOptions (null in ic-lora)
             const ico = resolveVideoGenerationOptions({ settings, modelSpecs: videoModelSpecs, hasAudio: false })
@@ -834,14 +881,18 @@ function PromptBar({
                         {resolvedVideoOptions.modelOptions.find((item) => item.pipeline === resolvedVideoOptions.selectedModel)?.spec.display_name
                           ?? settings.model}
                       </span>
-                    </>
-                  }
-                />
+                </>
+              }
+            />
 
-                <div className="w-px h-4 bg-zinc-700 mx-0.5" />
+            <div className="w-px h-4 bg-zinc-700 mx-0.5" />
 
-                <SettingsDropdown
-                  title="DURATION"
+            {formatDropdown}
+
+            <div className="w-px h-4 bg-zinc-700 mx-0.5" />
+
+            <SettingsDropdown
+              title="DURATION"
                   value={String(resolvedVideoOptions.selectedDuration ?? settings.duration)}
                   onChange={(v) => onSettingsChange({ ...settings, duration: parseInt(v) })}
                   options={resolvedVideoOptions.durationOptions.map((value) => ({ value: String(value), label: `${value} Sec` }))}
@@ -987,6 +1038,7 @@ const DEFAULT_VIDEO_SETTINGS = {
   imageResolution: '1080p',
   variations: 1,
   audio: true,
+  outputFormat: 'mp4' as OutputFormat,
 }
 
 export function GenSpace() {
@@ -1046,6 +1098,12 @@ export function GenSpace() {
     [inputAudio, mode, videoModelSpecs],
   )
   
+  useEffect(() => {
+    if (shouldVideoGenerateWithLtxApi && isProResOrExrFormat(settings.outputFormat)) {
+      setSettings((prev) => ({ ...prev, outputFormat: 'mp4' }))
+    }
+  }, [shouldVideoGenerateWithLtxApi, settings.outputFormat])
+
   const {
     generate,
     generateImage,
@@ -1053,6 +1111,7 @@ export function GenSpace() {
     progress,
     statusMessage,
     videoPath,
+    proxyPath,
     imagePaths,
     error,
     reset,
@@ -1218,9 +1277,13 @@ export function GenSpace() {
       try {
         const copied = await addVisualAssetToProject(videoPath, currentProjectId, 'video')
         if (!copied) throw new Error('Could not persist generated video to project storage')
+        const copiedProxy = proxyPath
+          ? await addVisualAssetToProject(proxyPath, currentProjectId, 'video')
+          : null
         addAsset(currentProjectId, {
           type: 'video',
           path: copied.path,
+          proxyPath: copiedProxy?.path,
           bigThumbnailPath: copied.bigThumbnailPath,
           smallThumbnailPath: copied.smallThumbnailPath,
           width: copied.width,
@@ -1244,6 +1307,7 @@ export function GenSpace() {
           },
           takes: [{
             path: copied.path,
+            proxyPath: copiedProxy?.path,
             bigThumbnailPath: copied.bigThumbnailPath,
             smallThumbnailPath: copied.smallThumbnailPath,
             width: copied.width,
@@ -1258,7 +1322,7 @@ export function GenSpace() {
         logger.error(`Failed to persist generated video asset: ${err}`)
       }
     })()
-  }, [videoPath, currentProjectId, isGenerating, sanitizeVideoSettings, settings, inputImage, inputAudio, lastPrompt, addAsset, reset])
+  }, [videoPath, proxyPath, currentProjectId, isGenerating, sanitizeVideoSettings, settings, inputImage, inputAudio, lastPrompt, addAsset, reset])
 
   // When image generation/editing completes, add all images to project assets
   useEffect(() => {
@@ -1346,6 +1410,7 @@ export function GenSpace() {
         laplacianBlendGrow: icLoraInput.laplacianBlendGrow,
         finalMaskBlurPx: icLoraInput.finalMaskBlurPx,
         frameRate: fpsForIcLora,
+        outputFormat: settings.outputFormat,
         ...(icLoraInput.adapterId === 'ingredients'
           ? { width: icWidth, height: icHeight, numFrames: icNumFrames }
           : {}),
@@ -1359,6 +1424,9 @@ export function GenSpace() {
           resetIcLora()
           return
         }
+        const copiedProxy = result.proxyPath
+          ? await addVisualAssetToProject(result.proxyPath, currentProjectId!, 'video')
+          : null
 
         if (activeIcLoraSource?.assetId) {
           const sourceAsset = activeProject?.assets?.find(a => a.id === activeIcLoraSource.assetId)
@@ -1366,6 +1434,7 @@ export function GenSpace() {
             const newTakeIndex = sourceAsset.takes ? sourceAsset.takes.length : 1
             addTakeToAsset(currentProjectId!, sourceAsset.id, {
               path: copied.path,
+              proxyPath: copiedProxy?.path,
               bigThumbnailPath: copied.bigThumbnailPath,
               smallThumbnailPath: copied.smallThumbnailPath,
               width: copied.width,
@@ -1384,6 +1453,7 @@ export function GenSpace() {
           addAsset(currentProjectId!, {
             type: 'video',
             path: copied.path,
+            proxyPath: copiedProxy?.path,
             bigThumbnailPath: copied.bigThumbnailPath,
             smallThumbnailPath: copied.smallThumbnailPath,
             width: copied.width,
@@ -1405,6 +1475,7 @@ export function GenSpace() {
             },
             takes: [{
               path: copied.path,
+              proxyPath: copiedProxy?.path,
               bigThumbnailPath: copied.bigThumbnailPath,
               smallThumbnailPath: copied.smallThumbnailPath,
               width: copied.width,
@@ -1433,6 +1504,7 @@ export function GenSpace() {
         duration: retakeInput.duration,
         prompt: trimmedPrompt,
         mode: 'replace_audio_and_video',
+        outputFormat: settings.outputFormat,
       }, async (result) => {
         // ponytail: runs async in the hook's closure, survives GenSpace unmount (Bug A)
         const usedPrompt = trimmedPrompt
@@ -1450,6 +1522,9 @@ export function GenSpace() {
           resetRetake()
           return
         }
+        const copiedProxy = result.proxyPath
+          ? await addVisualAssetToProject(result.proxyPath, currentProjectId!, 'video')
+          : null
 
         if (activeRetakeSource?.assetId) {
           const sourceAsset = activeProject?.assets?.find(a => a.id === activeRetakeSource.assetId)
@@ -1457,6 +1532,7 @@ export function GenSpace() {
             const newTakeIndex = sourceAsset.takes ? sourceAsset.takes.length : 1
             addTakeToAsset(currentProjectId!, sourceAsset.id, {
               path: copied.path,
+              proxyPath: copiedProxy?.path,
               bigThumbnailPath: copied.bigThumbnailPath,
               smallThumbnailPath: copied.smallThumbnailPath,
               width: copied.width,
@@ -1475,6 +1551,7 @@ export function GenSpace() {
           addAsset(currentProjectId!, {
             type: 'video',
             path: copied.path,
+            proxyPath: copiedProxy?.path,
             bigThumbnailPath: copied.bigThumbnailPath,
             smallThumbnailPath: copied.smallThumbnailPath,
             width: copied.width,
@@ -1498,6 +1575,7 @@ export function GenSpace() {
             },
             takes: [{
               path: copied.path,
+              proxyPath: copiedProxy?.path,
               bigThumbnailPath: copied.bigThumbnailPath,
               smallThumbnailPath: copied.smallThumbnailPath,
               width: copied.width,
@@ -1586,7 +1664,7 @@ export function GenSpace() {
     setPrompt(videoAsset.prompt || videoAsset.generationParams?.prompt || prompt)
     setActiveRetakeSource(null)
     setRetakeInitial({
-      videoPath: videoAsset.path,
+      videoPath: videoAsset.proxyPath ?? videoAsset.path,
       duration: videoAsset.duration,
     })
     setRetakePanelKey((prev) => prev + 1)
@@ -1597,7 +1675,7 @@ export function GenSpace() {
     setMode('ic-lora')
     setPrompt('')
     setActiveIcLoraSource(null)
-    setIcLoraInitial({ videoPath: videoAsset.path })
+    setIcLoraInitial({ videoPath: videoAsset.proxyPath ?? videoAsset.path })
     setIcLoraPanelKey((prev) => prev + 1)
   }
 
@@ -1829,7 +1907,7 @@ export function GenSpace() {
             onConditioningTypeChange={setIcLoraCondType}
             conditioningStrength={icLoraStrength}
             onConditioningStrengthChange={setIcLoraStrength}
-            outputVideoPath={icLoraResult?.videoPath || null}
+            outputVideoPath={(icLoraResult?.proxyPath ?? icLoraResult?.videoPath) || null}
             onChange={setIcLoraInput}
           />
         </div>
@@ -1872,6 +1950,7 @@ export function GenSpace() {
           onLoraStrengthChange={setLoraStrength}
           showIcLoraOutputSettings={isIngredients}
           onFpsChange={(fps) => setSettings((prev) => ({ ...prev, fps }))}
+          isApiMode={shouldVideoGenerateWithLtxApi}
         />
       </div>
       
@@ -1925,11 +2004,11 @@ export function GenSpace() {
             {selectedAsset.type === 'video' ? (
               <video
                 key={selectedAsset.id}
-                src={pathToFileUrl(selectedAsset.path)}
+                src={pathToFileUrl(selectedAsset.proxyPath ?? selectedAsset.path)}
                 controls
                 autoPlay
                 className="w-full rounded-xl object-contain max-h-[75vh]"
-                onError={(e) => console.error('[GenSpace] Detail video failed:', selectedAsset.path, (e.target as HTMLVideoElement)?.error)}
+                onError={(e) => console.error('[GenSpace] Detail video failed:', selectedAsset.proxyPath ?? selectedAsset.path, (e.target as HTMLVideoElement)?.error)}
               />
             ) : (
               <img
