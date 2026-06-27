@@ -14,6 +14,7 @@ from services.services_utils import AudioOrNone, TilingConfigType, device_suppor
 
 if TYPE_CHECKING:
     from services.media_encoder.media_encoder import MediaEncoder
+    from services.color_management import ColorSpace
 
 
 class LTXa2vPipeline:
@@ -159,6 +160,7 @@ class LTXa2vPipeline:
         encoder: MediaEncoder | None = None,
         proxy_path: str | None = None,
         on_progress: Callable[[float], None] | None = None,
+        input_colorspace: ColorSpace | None = None,
     ) -> None:
         tiling_config = default_tiling_config()
         video, audio = self._run_inference(
@@ -181,5 +183,6 @@ class LTXa2vPipeline:
             video=video, audio=audio, fps=int(frame_rate), output_path=output_path,
             video_chunks_number_value=chunks, output_format=output_format,
             encoder=encoder, proxy_path=proxy_path,
-            on_progress=on_progress, total_frames=num_frames,
+            on_progress=on_progress,
+            input_colorspace=input_colorspace, total_frames=num_frames,
         )

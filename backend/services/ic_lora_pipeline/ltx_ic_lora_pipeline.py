@@ -16,6 +16,7 @@ from services.services_utils import AudioOrNone, TilingConfigType, device_suppor
 
 if TYPE_CHECKING:
     from services.media_encoder.media_encoder import MediaEncoder
+    from services.color_management import ColorSpace
 
 _fp8_lora_fuse_patched = False
 
@@ -409,6 +410,7 @@ class LTXIcLoraPipeline:
         encoder: MediaEncoder | None = None,
         proxy_path: str | None = None,
         on_progress: Callable[[float], None] | None = None,
+        input_colorspace: ColorSpace | None = None,
     ) -> None:
         tiling_config = default_tiling_config()
         result = self._run_inference(
@@ -445,7 +447,8 @@ class LTXIcLoraPipeline:
             video=video, audio=audio, fps=int(frame_rate), output_path=output_path,
             video_chunks_number_value=chunks, output_format=output_format,
             encoder=encoder, proxy_path=proxy_path,
-            on_progress=on_progress, total_frames=num_frames,
+            on_progress=on_progress,
+            input_colorspace=input_colorspace, total_frames=num_frames,
         )
 
     # ------------------------------------------------------------------ #
@@ -473,6 +476,7 @@ class LTXIcLoraPipeline:
         encoder: MediaEncoder | None = None,
         proxy_path: str | None = None,
         on_progress: Callable[[float], None] | None = None,
+        input_colorspace: ColorSpace | None = None,
     ) -> None:
         """Official two-stage IC-LoRA inpaint pipeline.
 
@@ -861,6 +865,7 @@ class LTXIcLoraPipeline:
             encoder=encoder,
             proxy_path=proxy_path,
             on_progress=on_progress,
+            input_colorspace=input_colorspace,
             total_frames=num_actual_frames,
         )
         logger.info("[inpaint] Done — %s", output_path)

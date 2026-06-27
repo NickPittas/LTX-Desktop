@@ -38,6 +38,8 @@ from runtime_config.model_download_specs import (
 from runtime_config.runtime_config import RuntimeConfig
 from state.conditioning_cache import ConditioningCacheEntry, ConditioningCacheKey
 from services.interfaces import VideoProcessor
+from services.exr_input import is_exr_input
+from services.color_management import detect_colorspace
 from services.ltx_pipeline_common import make_encode_progress_callback, make_primary_output_path, make_proxy_output_path
 from services.media_encoder.media_encoder import MediaEncoder
 from services.services_utils import FrameArray
@@ -593,6 +595,8 @@ class IcLoraHandler(StateHandlerBase):
             height = _align_up(input_height, align_to)
 
             output_format = req.output_format or OutputFormat.MP4
+            # CM-2: detect source CS for EXR inputs (output-CS preservation).
+            input_colorspace = detect_colorspace(req.video_path) if (req.video_path and is_exr_input(req.video_path)) else None
             output_path = make_primary_output_path(
                 str(self.config.outputs_dir), "ic_lora", output_format, uuid.uuid4().hex[:8]
             )
@@ -619,6 +623,7 @@ class IcLoraHandler(StateHandlerBase):
                     encoder=self.media_encoder,
                     proxy_path=proxy_path,
                     on_progress=make_encode_progress_callback(self._generation.update_progress),
+                    input_colorspace=input_colorspace,
                 )
             else:
                 ic_state.pipeline.generate(
@@ -638,6 +643,7 @@ class IcLoraHandler(StateHandlerBase):
                     encoder=self.media_encoder,
                     proxy_path=proxy_path,
                     on_progress=make_encode_progress_callback(self._generation.update_progress),
+                    input_colorspace=input_colorspace,
                 )
             t_inference_end = time.perf_counter()
             logger.info("[ic-lora] Inference: %.2fs", t_inference_end - t_inference_start)

@@ -674,3 +674,97 @@ def test_mp4_encode_no_progress(tmp_path: Path) -> None:
     assert len(progress) == 0, (
         "MP4 must not call on_progress (external encode_video has no hook)"
     )
+
+
+# ---------------------------------------------------------------------------
+# CM-2: output-CS preservation (tagged EXR input → EXR output)
+# ---------------------------------------------------------------------------
+
+def _encode_exr_with_inputcs(
+    tmp_path: Path, input_cs: Any | None, gray: float = 0.5
+) -> tuple[Any, str]:
+    """Encode a 1-frame EXR with the given input_colorspace; return (OpenEXR.File, primary_dir)."""
+    import OpenEXR
+
+    encoder = MediaEncoderImpl()
+    primary = tmp_path / f"cm2_{id(input_cs)}"
+    video = _make_gray_frames(1, 16, 16, gray=gray)
+    encoder.encode(
+        video=video, audio=None, fps=24, primary_path=str(primary),
+        output_format=OutputFormat.EXR_ZIP_HALF, proxy_path=None,
+        video_chunks_number=1, input_colorspace=input_cs,
+    )
+    frame = sorted(primary.glob("frame_*.exr"))[0]
+    return OpenEXR.File(str(frame), separate_channels=True), str(primary)
+
+
+@pytest.mark.parametrize("input_cs,name", [
+    ("ACES_AP0", "aces_ap0"),
+    ("LINEAR_REC2020", "lin_rec2020"),
+])
+def test_exr_out_preserves_tagged_input_cs(tmp_path: Path, input_cs: str, name: str) -> None:
+    """CM-2: tagged EXR input → output EXR in the input's colorspace."""
+    from services.color_management import ACES_AP0, LINEAR_REC2020, primaries_to_exr_chromaticities
+
+    cs_map = {"ACES_AP0": ACES_AP0, "LINEAR_REC2020": LINEAR_REC2020}
+    cs = cs_map[input_cs]
+    f, _ = _encode_exr_with_inputcs(tmp_path, cs)
+    h = f.header()
+
+    # Chromaticities match the input CS primaries.
+    expected_chroma = primaries_to_exr_chromaticities(cs.primaries)
+    actual_chroma = h["chromaticities"]
+    assert isinstance(actual_chroma, tuple) and len(actual_chroma) == 8
+    np.testing.assert_allclose(
+        np.array(actual_chroma, dtype=np.float32),
+        np.array(expected_chroma, dtype=np.float32), atol=5e-4,
+    )
+
+    # colorSpace attribute matches the input CS name.
+    assert h["colorSpace"] == name
+
+
+def test_exr_out_default_when_no_inputcs(tmp_path: Path) -> None:
+    """input_colorspace=None → BT.709/D65 + lin_rec709_scene (today's behavior)."""
+    from services.media_encoder.color import BT709_CHROMATICITIES, LINEAR_REC709_SCENE_COLORSPACE
+
+    f, _ = _encode_exr_with_inputcs(tmp_path, None)
+    h = f.header()
+
+    np.testing.assert_allclose(
+        np.array(h["chromaticities"], dtype=np.float32),
+        np.array(BT709_CHROMATICITIES, dtype=np.float32), atol=1e-4,
+    )
+    assert h["colorSpace"] == LINEAR_REC709_SCENE_COLORSPACE
+
+
+def test_exr_out_default_for_linear_rec709_input(tmp_path: Path) -> None:
+    """input_colorspace=LINEAR_REC709 → still BT.709/D65 default (no-op preservation)."""
+    from services.color_management import LINEAR_REC709
+    from services.media_encoder.color import BT709_CHROMATICITIES, LINEAR_REC709_SCENE_COLORSPACE
+
+    f, _ = _encode_exr_with_inputcs(tmp_path, LINEAR_REC709)
+    h = f.header()
+
+    np.testing.assert_allclose(
+        np.array(h["chromaticities"], dtype=np.float32),
+        np.array(BT709_CHROMATICITIES, dtype=np.float32), atol=1e-4,
+    )
+    assert h["colorSpace"] == LINEAR_REC709_SCENE_COLORSPACE
+
+
+def test_prores_ignores_input_colorspace(tmp_path: Path) -> None:
+    """ProRes with input_colorspace=ACES_AP0 → still Rec.709-tagged output (CM-1c deferral)."""
+    from services.color_management import ACES_AP0
+
+    encoder = MediaEncoderImpl()
+    primary = tmp_path / "cm2_prores.mov"
+    video = _make_gray_frames(2, 16, 16, gray=0.5)
+    encoder.encode(
+        video=video, audio=None, fps=24, primary_path=str(primary),
+        output_format=OutputFormat.PRORES_422_HQ, proxy_path=None,
+        video_chunks_number=1, input_colorspace=ACES_AP0,
+    )
+    vs = _ffprobe_video_stream(str(primary))
+    assert vs.get("color_space") == "bt709", "ProRes must stay Rec.709 (CM-1c deferral)"
+    assert vs.get("color_transfer") == "bt709"

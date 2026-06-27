@@ -623,6 +623,21 @@ ADOPTED_NEUTRAL_D65: np.ndarray = np.array(
 )
 
 
+# ---------------------------------------------------------------------------
+# EXR-format converters (ColorSpace → OpenEXR header values)
+# ---------------------------------------------------------------------------
+
+def primaries_to_exr_chromaticities(primaries: Primaries) -> tuple[float, ...]:
+    """Convert 4 xy pairs ``(r,g,b,w)`` to the OpenEXR 8-tuple
+    ``(rx,ry,gx,gy,bx,by,wx,wy)`` used by the ``chromaticities`` header attr."""
+    return tuple(float(v) for p in primaries for v in p)
+
+
+def white_to_adopted_neutral(white: XY) -> np.ndarray:
+    """Convert an xy white point to the OpenEXR ``adoptedNeutral`` float32 array."""
+    return np.array([float(white[0]), float(white[1])], dtype=np.float32)
+
+
 __all__ = [
     "ACES_AP0",
     "ACES_CG",
@@ -653,9 +668,11 @@ __all__ = [
     "hlg_oetf",
     "pq_eotf",
     "pq_oetf",
+    "primaries_to_exr_chromaticities",
     "rgb_to_rgb_matrix",
     "rgb_to_xyz_matrix",
     "srgb_eotf",
     "srgb_oetf",
+    "white_to_adopted_neutral",
     "xy_to_xyz",
 ]

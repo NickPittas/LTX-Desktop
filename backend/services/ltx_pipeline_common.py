@@ -13,6 +13,7 @@ from services.services_utils import AudioOrNone, TilingConfigType, device_suppor
 
 if TYPE_CHECKING:
     from ltx_core.components.guiders import MultiModalGuiderParams
+    from services.color_management import ColorSpace
     from services.media_encoder.media_encoder import MediaEncoder
 
 
@@ -111,6 +112,7 @@ def encode_video_output(
     encoder: "MediaEncoder | None" = None,
     on_progress: "Callable[[float], None] | None" = None,
     total_frames: int | None = None,
+    input_colorspace: "ColorSpace | None" = None,
 ) -> None:
     """Dispatch decoded VAE frames to the media encoder.
 
@@ -140,6 +142,7 @@ def encode_video_output(
         video_chunks_number=video_chunks_number_value,
         on_progress=on_progress,
         total_frames=total_frames,
+        input_colorspace=input_colorspace,
     )
 
 

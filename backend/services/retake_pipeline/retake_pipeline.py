@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
     from services.ltx_components import CheckpointPath, ResolvedLtxComponents
     from services.media_encoder.media_encoder import MediaEncoder
+    from services.color_management import ColorSpace
     import torch
     from ltx_core.components.guiders import MultiModalGuiderParams
     from ltx_core.loader import LoraPathStrengthAndSDOps
@@ -51,4 +52,5 @@ class RetakePipeline(Protocol):
         encoder: MediaEncoder | None = None,
         proxy_path: str | None = None,
         on_progress: Callable[[float], None] | None = None,
+        input_colorspace: ColorSpace | None = None,
     ) -> None: ...

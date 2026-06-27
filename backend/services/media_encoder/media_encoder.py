@@ -13,12 +13,15 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import torch
 
 from api_types import OutputFormat
 from services.services_utils import AudioOrNone
+
+if TYPE_CHECKING:
+    from services.color_management import ColorSpace
 
 
 @dataclass(frozen=True)
@@ -63,6 +66,7 @@ class MediaEncoder(Protocol):
         video_chunks_number: int,
         on_progress: Callable[[float], None] | None = None,
         total_frames: int | None = None,
+        input_colorspace: ColorSpace | None = None,
     ) -> EncoderResult:
         ...
 

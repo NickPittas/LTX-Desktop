@@ -34,6 +34,7 @@ from services.retake_pipeline.retake_pipeline import RetakePipeline
 
 if TYPE_CHECKING:
     from services.media_encoder.media_encoder import MediaEncoder
+    from services.color_management import ColorSpace
 
 
 
@@ -353,6 +354,7 @@ class LTXRetakePipeline:
         encoder: MediaEncoder | None = None,
         proxy_path: str | None = None,
         on_progress: Callable[[float], None] | None = None,
+        input_colorspace: ColorSpace | None = None,
     ) -> None:
         # CM-1b: resolve EXR source → temp MP4 BEFORE the metadata read (an EXR
         # dir/file would crash get_videostream_metadata). Non-EXR returns the
@@ -395,6 +397,7 @@ class LTXRetakePipeline:
                 encoder=encoder,
                 proxy_path=proxy_path,
                 on_progress=on_progress,
+            input_colorspace=input_colorspace,
                 total_frames=num_frames,
             )
         finally:

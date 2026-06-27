@@ -48,6 +48,7 @@ from services.services_utils import AudioOrNone
 
 if TYPE_CHECKING:
     from ltx_core.types import Audio
+    from services.color_management import ColorSpace
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +135,7 @@ class MediaEncoderImpl:
         video_chunks_number: int,  # noqa: ARG002 tqdm total only — unused by real impl
         on_progress: Callable[[float], None] | None = None,
         total_frames: int | None = None,
+        input_colorspace: ColorSpace | None = None,
     ) -> EncoderResult:
         try:
             if output_format == OutputFormat.MP4:
@@ -165,6 +167,7 @@ class MediaEncoderImpl:
                     on_progress=on_progress,
                     total_frames=total_frames,
                     audio=audio,
+                    input_colorspace=input_colorspace,
                 )
             raise ValueError(f"Unsupported output_format: {output_format!r}")
         except Exception:
@@ -429,6 +432,7 @@ class MediaEncoderImpl:
         on_progress: Callable[[float], None] | None,
         total_frames: int | None,
         audio: AudioOrNone,
+        input_colorspace: ColorSpace | None = None,
     ) -> EncoderResult:
         # OpenEXR ships no type stubs; treat the module as Any to keep pyright
         # strict clean without losing real type coverage elsewhere. API form
@@ -437,6 +441,14 @@ class MediaEncoderImpl:
         # chromaticities (8-tuple of floats) + adoptedNeutral (float32 array)
         # + framesPerSecond (fractions.Fraction) value forms.
         import OpenEXR
+        from services.color_management import (
+            LINEAR_REC709,
+            REC709,
+            ColorSpace as _CS,
+            ColorTransform,
+            primaries_to_exr_chromaticities,
+            white_to_adopted_neutral,
+        )
 
         openexr: Any = OpenEXR
 
@@ -448,12 +460,39 @@ class MediaEncoderImpl:
 
         fps_rational = Fraction(int(round(float(fps) * 1000)), 1000).limit_denominator(1_000_000)
 
+        # CM-2: output-CS preservation. When the source was a tagged EXR with a
+        # genuinely different colorspace (not LINEAR_REC709), write the output
+        # EXR in the input's primaries/white/name — preserving the round-trip.
+        # EXR is ALWAYS linear (§9.3) — force transfer="linear" for the preserve
+        # target so from_model_domain does NOT apply a nonlinear OETF.
+        preserve = input_colorspace is not None and input_colorspace != LINEAR_REC709
+
+        if preserve:
+            assert input_colorspace is not None  # narrowed by `preserve`
+            preserve_cs = _CS(
+                name=input_colorspace.name,
+                primaries=input_colorspace.primaries,
+                white=input_colorspace.white,
+                transfer="linear",
+            )
+            exr_chromaticities: tuple[float, ...] = primaries_to_exr_chromaticities(
+                preserve_cs.primaries
+            )
+            exr_adopted_neutral: np.ndarray = white_to_adopted_neutral(preserve_cs.white)
+            exr_colorspace_name: str = preserve_cs.name
+            _transform = ColorTransform(src=REC709, dst=preserve_cs)
+        else:
+            exr_chromaticities = BT709_CHROMATICITIES
+            exr_adopted_neutral = ADOPTED_NEUTRAL_D65
+            exr_colorspace_name = LINEAR_REC709_SCENE_COLORSPACE
+            _transform = None
+
         header_template: dict[str, Any] = {
             "compression": openexr.ZIP_COMPRESSION,
             "type": openexr.scanlineimage,
-            "chromaticities": BT709_CHROMATICITIES,
-            "adoptedNeutral": ADOPTED_NEUTRAL_D65,
-            "colorSpace": LINEAR_REC709_SCENE_COLORSPACE,
+            "chromaticities": exr_chromaticities,
+            "adoptedNeutral": exr_adopted_neutral,
+            "colorSpace": exr_colorspace_name,
             "framesPerSecond": fps_rational,
         }
 
@@ -462,9 +501,18 @@ class MediaEncoderImpl:
         for chunk in chunk_iter:
             is_uint8 = chunk.dtype == torch.uint8
             chunkf = (chunk.float() / 255.0) if is_uint8 else chunk.float()
-            # BT.709 EOTF (Rec.709 gamma → linear) per §9.1/§9.3 — EXR is
-            # always linear-light. Clamp to [0,1] domain first.
-            linear = bt709_eotf(chunkf.clamp(0.0, 1.0)).cpu().numpy()
+            chunkf = chunkf.clamp(0.0, 1.0)
+            if _transform is not None:
+                # CM-2 preservation: from_model_domain does bt709_eotf → matrix
+                # → inputCS-linear. EXR stays LINEAR (§9.3).
+                transferred = _transform.from_model_domain(chunkf)
+                if isinstance(transferred, torch.Tensor):
+                    linear = transferred.cpu().numpy()
+                else:
+                    linear = np.asarray(transferred, dtype=np.float32)
+            else:
+                # Default: BT.709 EOTF (Rec.709 gamma → linear) per §9.1/§9.3.
+                linear = bt709_eotf(chunkf).cpu().numpy()
             for frame in linear:
                 frame_name = _EXR_FRAME_PATTERN.format(global_idx)
                 frame_path = out_dir / frame_name

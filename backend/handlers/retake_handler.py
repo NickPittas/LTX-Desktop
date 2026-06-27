@@ -25,6 +25,8 @@ from handlers.text_handler import TextHandler
 from runtime_config.runtime_config import RuntimeConfig
 from services.ltx_api_client.ltx_api_client import LTXAPIClientError
 from services.interfaces import LTXAPIClient
+from services.exr_input import is_exr_input
+from services.color_management import detect_colorspace
 from services.ltx_pipeline_common import make_encode_progress_callback, make_primary_output_path, make_proxy_output_path
 from services.media_encoder.media_encoder import MediaEncoder
 from state.app_state_types import AppState
@@ -168,6 +170,8 @@ class RetakeHandler(StateHandlerBase):
             str(self.config.outputs_dir), "retake", output_format, generation_id
         )
         proxy_path = make_proxy_output_path(output_path, output_format)
+        # CM-2: detect source CS for EXR inputs (output-CS preservation).
+        input_colorspace = detect_colorspace(str(video_file)) if is_exr_input(str(video_file)) else None
         regenerate_video, regenerate_audio = self._resolve_retake_mode(mode)
 
         try:
@@ -195,6 +199,7 @@ class RetakeHandler(StateHandlerBase):
                 encoder=self.media_encoder,
                 proxy_path=proxy_path,
                 on_progress=make_encode_progress_callback(self._generation.update_progress),
+                input_colorspace=input_colorspace,
             )
 
             if self._generation.is_generation_cancelled():
