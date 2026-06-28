@@ -143,14 +143,43 @@ class DownloadProgressCompleteResponse(BaseModel):
     status: Literal["complete"]
 
 
+# Single source of truth for structured download error codes.
+DownloadErrorCode: TypeAlias = Literal[
+    "DOWNLOAD_LOCKED",
+    "INSUFFICIENT_DISK_SPACE",
+    "NETWORK_ERROR",
+    "UNKNOWN_ERROR",
+]
+
+
 class DownloadProgressErrorResponse(BaseModel):
     status: Literal["error"]
     error: str
+    error_code: DownloadErrorCode = "UNKNOWN_ERROR"
+
+
+class DownloadProgressCancelledResponse(BaseModel):
+    status: Literal["cancelled"]
 
 
 DownloadProgressResponse: TypeAlias = (
-    DownloadProgressRunningResponse | DownloadProgressCompleteResponse | DownloadProgressErrorResponse
+    DownloadProgressRunningResponse
+    | DownloadProgressCompleteResponse
+    | DownloadProgressErrorResponse
+    | DownloadProgressCancelledResponse
 )
+
+
+class DownloadCancelCancellingResponse(BaseModel):
+    status: Literal["cancelling"]
+    sessionId: str
+
+
+class DownloadCancelNoActiveResponse(BaseModel):
+    status: Literal["no_active_download"]
+
+
+DownloadCancelResponse: TypeAlias = DownloadCancelCancellingResponse | DownloadCancelNoActiveResponse
 
 
 class SuggestGapPromptResponse(BaseModel):

@@ -12,6 +12,7 @@ from api_types import (
     AdapterStatusResponse,
     CheckModelAccessRequest,
     CheckModelAccessResponse,
+    DownloadCancelResponse,
     DownloadProgressResponse,
     ImageGenRecommendationResponse,
     LtxIcLoraRecommendationResponse,
@@ -120,6 +121,15 @@ def route_model_download(
         message="Model download started",
         sessionId=session_id,
     )
+
+
+@router.post("/models/download/cancel", response_model=DownloadCancelResponse)
+def route_model_download_cancel(
+    request: Request,
+    handler: AppHandler = Depends(get_state_service),
+) -> DownloadCancelResponse:
+    guard_admin_permission(request)
+    return handler.downloads.cancel_download()
 
 
 @router.delete("/models/delete", response_model=StatusResponse)

@@ -398,6 +398,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/models/download/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Route Model Download Cancel */
+        post: operations["route_model_download_cancel_api_models_download_cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/models/download/progress": {
         parameters: {
             query?: never;
@@ -731,6 +748,32 @@ export interface components {
                 [key: string]: "authorized" | "not_authorized";
             };
         };
+        /** DownloadCancelCancellingResponse */
+        DownloadCancelCancellingResponse: {
+            /** Sessionid */
+            sessionId: string;
+            /**
+             * Status
+             * @constant
+             */
+            status: "cancelling";
+        };
+        /** DownloadCancelNoActiveResponse */
+        DownloadCancelNoActiveResponse: {
+            /**
+             * Status
+             * @constant
+             */
+            status: "no_active_download";
+        };
+        /** DownloadProgressCancelledResponse */
+        DownloadProgressCancelledResponse: {
+            /**
+             * Status
+             * @constant
+             */
+            status: "cancelled";
+        };
         /** DownloadProgressCompleteResponse */
         DownloadProgressCompleteResponse: {
             /**
@@ -743,6 +786,12 @@ export interface components {
         DownloadProgressErrorResponse: {
             /** Error */
             error: string;
+            /**
+             * Error Code
+             * @default UNKNOWN_ERROR
+             * @enum {string}
+             */
+            error_code: "DOWNLOAD_LOCKED" | "INSUFFICIENT_DISK_SPACE" | "NETWORK_ERROR" | "UNKNOWN_ERROR";
             /**
              * Status
              * @constant
@@ -2738,6 +2787,44 @@ export interface operations {
             };
         };
     };
+    route_model_download_cancel_api_models_download_cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DownloadCancelCancellingResponse"] | components["schemas"]["DownloadCancelNoActiveResponse"];
+                };
+            };
+            /** @description Client Error */
+            "4XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPErrorResponse"];
+                };
+            };
+            /** @description Server Error */
+            "5XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPErrorResponse"];
+                };
+            };
+        };
+    };
     route_download_progress_api_models_download_progress_get: {
         parameters: {
             query: {
@@ -2755,7 +2842,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["DownloadProgressRunningResponse"] | components["schemas"]["DownloadProgressCompleteResponse"] | components["schemas"]["DownloadProgressErrorResponse"];
+                    "application/json": components["schemas"]["DownloadProgressRunningResponse"] | components["schemas"]["DownloadProgressCompleteResponse"] | components["schemas"]["DownloadProgressErrorResponse"] | components["schemas"]["DownloadProgressCancelledResponse"];
                 };
             };
             /** @description Client Error */

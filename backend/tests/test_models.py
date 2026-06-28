@@ -242,6 +242,8 @@ class TestDownloadProgress:
         assert failed.status_code == 200
         assert failed.json()["status"] == "error"
         assert failed.json()["error"] == "network error"
+        # Structured error code defaults to UNKNOWN_ERROR when not specified.
+        assert failed.json()["error_code"] == "UNKNOWN_ERROR"
 
 
 class TestModelDownloads:
@@ -339,12 +341,48 @@ class TestModelDownloads:
         """Session-owned staging is cleaned; .downloading/ dir may persist."""
         test_state.model_downloader.fail_next = RuntimeError("network error")
         test_state.downloads.start_model_download(download_type="download", cp_ids={IMG_GEN_MODEL_CP_ID})
-        assert len(test_state.task_runner.errors) == 1
+        # Worker finalizes errors internally (Phase 3B); no task-runner error.
+        assert len(test_state.task_runner.errors) == 0
         # Session's staged file should be cleaned
         staging_path = resolve_downloading_target_path(
             test_state.config.default_models_dir, IMG_GEN_MODEL_CP_ID
         )
         assert not staging_path.exists()
+
+
+class TestDownloadCancel:
+    def test_cancel_requires_admin(self, client):
+        response = client.post("/api/models/download/cancel")
+        assert_http_error(response, status_code=403, code="HTTP_403", message="Admin token required")
+
+    def test_cancel_no_active_returns_no_active_download(self, client, test_state):
+        response = client.post("/api/models/download/cancel", headers=_ADMIN_HEADERS)
+        assert response.status_code == 200
+        assert response.json() == {"status": "no_active_download"}
+
+    def test_cancel_active_returns_cancelling_and_progress_cancelled(self, client, test_state):
+        session_id = test_state.downloads.start_download({IMG_GEN_MODEL_CP_ID})
+        response = client.post("/api/models/download/cancel", headers=_ADMIN_HEADERS)
+        assert response.status_code == 200
+        assert response.json()["status"] == "cancelling"
+        assert response.json()["sessionId"] == str(session_id)
+
+        # Progress for that session reports cancelled while cleanup is pending.
+        progress = client.get(
+            "/api/models/download/progress", params={"sessionId": str(session_id)}
+        )
+        assert progress.status_code == 200
+        assert progress.json()["status"] == "cancelled"
+
+    def test_repeated_cancel_returns_cancelling_with_same_session_id(self, client, test_state):
+        session_id = test_state.downloads.start_download({IMG_GEN_MODEL_CP_ID})
+        first = client.post("/api/models/download/cancel", headers=_ADMIN_HEADERS)
+        second = client.post("/api/models/download/cancel", headers=_ADMIN_HEADERS)
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert first.json()["status"] == "cancelling"
+        assert second.json()["status"] == "cancelling"
+        assert first.json()["sessionId"] == second.json()["sessionId"] == str(session_id)
 
 
 class TestCheckpointDeletion:

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import requests as http_requests
 from _routes._errors import HTTPError
 from api_types import ModelLibraryArtifact
 from runtime_config.model_download_specs import (
@@ -32,6 +33,7 @@ from services.model_downloader.download_transaction import (
     safe_atomic_promote,
     should_skip_download,
 )
+from state.app_state_types import DownloadSessionId
 from tests.conftest import TEST_ADMIN_TOKEN
 from tests.http_error_assertions import assert_http_error
 
@@ -477,10 +479,14 @@ class TestLockContentionHandler:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path.write_text("other-session")
 
-        test_state.downloads.start_model_download(download_type="download", cp_ids={cp_id})
+        session_id = test_state.downloads.start_model_download(download_type="download", cp_ids={cp_id})
 
-        # Worker failed
-        assert len(test_state.task_runner.errors) == 1
+        # Worker finalized as error internally (lock contention handled by the
+        # worker, not the generic task-runner error handler).
+        progress = test_state.downloads.get_download_progress(str(session_id))
+        assert progress.status == "error"
+        assert progress.error_code == "DOWNLOAD_LOCKED"
+        assert len(test_state.task_runner.errors) == 0
         # Pre-existing lock NOT deleted
         assert lock_path.exists()
 
@@ -494,9 +500,12 @@ class TestLockContentionHandler:
     def test_lock_cleaned_on_failure(self, test_state):
         test_state.model_downloader.fail_next = RuntimeError("boom")
         cp_id = IMG_GEN_MODEL_CP_ID
-        test_state.downloads.start_model_download(download_type="download", cp_ids={cp_id})
+        session_id = test_state.downloads.start_model_download(download_type="download", cp_ids={cp_id})
 
-        assert len(test_state.task_runner.errors) == 1
+        # Worker finalized as error internally (no task-runner propagation).
+        progress = test_state.downloads.get_download_progress(str(session_id))
+        assert progress.status == "error"
+        assert len(test_state.task_runner.errors) == 0
         models_dir: Path = test_state.config.default_models_dir
         assert not download_lock_path(models_dir, cp_id).exists()
 
@@ -515,8 +524,8 @@ class TestLockContentionHandler:
 
         test_state.downloads.start_model_download(download_type="download", cp_ids={cp_id})
 
-        # Worker failed due to lock contention
-        assert len(test_state.task_runner.errors) == 1
+        # Worker finalized as error internally due to lock contention.
+        assert len(test_state.task_runner.errors) == 0
         # Pre-existing lock NOT deleted by the losing session
         assert lock_path.exists()
         # Pre-existing staging NOT deleted (this worker owns nothing)
@@ -664,6 +673,303 @@ class TestStartupCleanupHandler:
         test_state.downloads.cleanup_downloading_dir()
 
         assert downloading_dir.exists()
+
+
+# ============================================================
+# Handler-level tests: cancellation (Phase 3B)
+# ============================================================
+
+
+class TestDownloadCancellation:
+    def test_cancel_no_active_session(self, test_state):
+        """No active session → no_active_download."""
+        result = test_state.downloads.cancel_download()
+        assert result.status == "no_active_download"
+
+    def test_cancel_active_session_returns_cancelling(self, test_state):
+        session_id = test_state.downloads.start_download({IMG_GEN_MODEL_CP_ID})
+        result = test_state.downloads.cancel_download()
+        assert result.status == "cancelling"
+        assert result.sessionId == str(session_id)
+        # cancellation_requested flag set on active session.
+        assert test_state.state.downloading_session is not None
+        assert test_state.state.downloading_session.cancellation_requested is True
+
+    def test_cancel_then_progress_reports_cancelled(self, test_state):
+        session_id = test_state.downloads.start_download({IMG_GEN_MODEL_CP_ID})
+        test_state.downloads.cancel_download()
+        progress = test_state.downloads.get_download_progress(str(session_id))
+        assert progress.status == "cancelled"
+
+    def test_worker_cancellation_preserves_phase3a_cleanup(self, test_state, monkeypatch):
+        """Cancellation triggered mid-worker: no lock leak, session-owned
+        staging removed, no promote after cancellation observed."""
+        models_dir: Path = test_state.config.default_models_dir
+        cp_id = IMG_GEN_MODEL_CP_ID
+
+        # Trigger cancellation after the staging download completes but
+        # before the worker's post-download commit checkpoint.
+        real_download = test_state.downloads._download_to_staging
+
+        def cancelling_download(*args: Any, **kwargs: Any) -> None:
+            real_download(*args, **kwargs)
+            with test_state.downloads._lock:
+                session = test_state.state.downloading_session
+                if session is not None:
+                    session.cancellation_requested = True
+
+        monkeypatch.setattr(test_state.downloads, "_download_to_staging", cancelling_download)
+
+        session_id = test_state.downloads.start_model_download(
+            download_type="download", cp_ids={cp_id}
+        )
+
+        # Worker finalized as cancelled (not error, not complete).
+        progress = test_state.downloads.get_download_progress(str(session_id))
+        assert progress.status == "cancelled"
+
+        # No lock leak: worker released its lock.
+        assert not download_lock_path(models_dir, cp_id).exists()
+        # Session-owned staging removed.
+        assert not resolve_downloading_target_path(models_dir, cp_id).exists()
+        # No promote after cancellation observed: final file not created.
+        assert not resolve_model_path(models_dir, cp_id).exists()
+        # No background error surfaced (cancellation handled internally).
+        assert len(test_state.task_runner.errors) == 0
+
+    def test_worker_cancellation_no_error_in_task_runner(self, test_state, monkeypatch):
+        """DownloadCancelled is caught inside the worker, never reaches the
+        generic task-runner error handler."""
+        from handlers.download_handler import DownloadCancelled
+
+        def cancel_immediately(session_id: DownloadSessionId) -> None:
+            raise DownloadCancelled(session_id)
+
+        # Cancel before the worker touches the first CP.
+        monkeypatch.setattr(
+            test_state.downloads,
+            "_raise_if_download_cancelled",
+            cancel_immediately,
+        )
+        session_id = test_state.downloads.start_model_download(
+            download_type="download", cp_ids={IMG_GEN_MODEL_CP_ID}
+        )
+        progress = test_state.downloads.get_download_progress(str(session_id))
+        assert progress.status == "cancelled"
+        assert len(test_state.task_runner.errors) == 0
+
+    def test_active_session_present_during_cancellation_cleanup(self, test_state, monkeypatch):
+        """The active session must stay present (blocking new downloads) until
+        cleanup/lock-release finishes; finalization clears it only afterwards."""
+        models_dir: Path = test_state.config.default_models_dir
+        cp_id = IMG_GEN_MODEL_CP_ID
+        session_present_during_cleanup: list[bool] = []
+
+        # Observe whether the active session is still set when cleanup runs.
+        real_cleanup = test_state.downloads._cleanup_session_staging
+
+        def observing_cleanup(*args: Any, **kwargs: Any) -> None:
+            with test_state.downloads._lock:
+                session_present_during_cleanup.append(
+                    test_state.state.downloading_session is not None
+                )
+            return real_cleanup(*args, **kwargs)
+
+        monkeypatch.setattr(test_state.downloads, "_cleanup_session_staging", observing_cleanup)
+
+        # Trigger cancellation after staging completes, before the commit checkpoint.
+        real_download = test_state.downloads._download_to_staging
+
+        def cancelling_download(*args: Any, **kwargs: Any) -> None:
+            real_download(*args, **kwargs)
+            with test_state.downloads._lock:
+                session = test_state.state.downloading_session
+                if session is not None:
+                    session.cancellation_requested = True
+
+        monkeypatch.setattr(test_state.downloads, "_download_to_staging", cancelling_download)
+
+        session_id = test_state.downloads.start_model_download(
+            download_type="download", cp_ids={cp_id}
+        )
+
+        # The active session was still present during cleanup (before release).
+        assert session_present_during_cleanup == [True]
+        # After the worker finishes, the session is cleared (finalized cancelled).
+        assert test_state.state.downloading_session is None
+        progress = test_state.downloads.get_download_progress(str(session_id))
+        assert progress.status == "cancelled"
+
+    def test_cancel_accepted_during_cleanup_finalizes_cancelled(self, test_state, monkeypatch):
+        """If cancel_download() is accepted during cleanup (while the session
+        is still active), the terminal outcome must be ``cancelled`` even
+        though the worker's precomputed outcome was ``complete``."""
+        cp_id = IMG_GEN_MODEL_CP_ID
+
+        # Monkeypatch cleanup to request cancellation mid-cleanup while the
+        # active session is still present (before finalization).
+        real_cleanup = test_state.downloads._cleanup_session_staging
+
+        def cleanup_that_cancels(*args: Any, **kwargs: Any) -> None:
+            test_state.downloads.cancel_download()
+            return real_cleanup(*args, **kwargs)
+
+        monkeypatch.setattr(test_state.downloads, "_cleanup_session_staging", cleanup_that_cancels)
+
+        session_id = test_state.downloads.start_model_download(
+            download_type="download", cp_ids={cp_id}
+        )
+
+        # Download work completed successfully (would normally be "complete"),
+        # but cancel arrived during cleanup → terminal must be cancelled.
+        progress = test_state.downloads.get_download_progress(str(session_id))
+        assert progress.status == "cancelled"
+        # Session was finalized and cleared.
+        assert test_state.state.downloading_session is None
+
+    def test_finish_download_with_cancellation_requested_finalizes_cancelled(self, test_state):
+        """finish_download(session_id) must write cancelled (not complete) when
+        the active matching session has cancellation_requested=True — the
+        cancellation check and terminal write are atomic under the lock."""
+        session_id = test_state.downloads.start_download({"ltx-2.3-22b-distilled"})
+        test_state.downloads.cancel_download()
+
+        test_state.downloads.finish_download(session_id)
+
+        assert test_state.state.downloading_session is None
+        progress = test_state.downloads.get_download_progress(str(session_id))
+        assert progress.status == "cancelled"
+
+    def test_fail_download_with_cancellation_requested_finalizes_cancelled(self, test_state):
+        """fail_download(..., session_id) must write cancelled (not error) when
+        the active matching session has cancellation_requested=True — the
+        cancellation check and terminal write are atomic under the lock."""
+        session_id = test_state.downloads.start_download({"ltx-2.3-22b-distilled"})
+        test_state.downloads.cancel_download()
+
+        test_state.downloads.fail_download("boom", "UNKNOWN_ERROR", session_id)
+
+        assert test_state.state.downloading_session is None
+        progress = test_state.downloads.get_download_progress(str(session_id))
+        assert progress.status == "cancelled"
+
+
+# ============================================================
+# Handler-level tests: structured error codes (Phase 3B)
+# ============================================================
+
+
+class TestDownloadErrorCodes:
+    def test_lock_contention_reports_download_locked(self, test_state):
+        models_dir: Path = test_state.config.default_models_dir
+        cp_id = IMG_GEN_MODEL_CP_ID
+        # Pre-create lock (another session).
+        lock_path = download_lock_path(models_dir, cp_id)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text("other-session")
+
+        session_id = test_state.downloads.start_model_download(
+            download_type="download", cp_ids={cp_id}
+        )
+        progress = test_state.downloads.get_download_progress(str(session_id))
+        assert progress.status == "error"
+        assert progress.error_code == "DOWNLOAD_LOCKED"
+
+    def test_network_failure_reports_network_error(self, test_state):
+        test_state.model_downloader.fail_next = http_requests.ConnectionError("connection refused")
+        session_id = test_state.downloads.start_model_download(
+            download_type="download", cp_ids={IMG_GEN_MODEL_CP_ID}
+        )
+        progress = test_state.downloads.get_download_progress(str(session_id))
+        assert progress.status == "error"
+        assert progress.error_code == "NETWORK_ERROR"
+
+    def test_generic_failure_reports_unknown_error(self, test_state):
+        test_state.model_downloader.fail_next = RuntimeError("boom")
+        session_id = test_state.downloads.start_model_download(
+            download_type="download", cp_ids={IMG_GEN_MODEL_CP_ID}
+        )
+        progress = test_state.downloads.get_download_progress(str(session_id))
+        assert progress.status == "error"
+        assert progress.error_code == "UNKNOWN_ERROR"
+
+    def test_os_error_maps_to_unknown_error(self, test_state):
+        """OSError (filesystem/promote) must NOT be treated as NETWORK_ERROR."""
+        test_state.model_downloader.fail_next = OSError("disk read error")
+        session_id = test_state.downloads.start_model_download(
+            download_type="download", cp_ids={IMG_GEN_MODEL_CP_ID}
+        )
+        progress = test_state.downloads.get_download_progress(str(session_id))
+        assert progress.status == "error"
+        assert progress.error_code == "UNKNOWN_ERROR"
+
+
+# ============================================================
+# Handler-level tests: session-id-aware state transitions (Phase 3B)
+# ============================================================
+
+
+class TestSessionIdAwareTransitions:
+    def test_stale_worker_finish_does_not_overwrite_newer_session(self, test_state):
+        """A stale worker (session A) cannot finalize a newer session (B)."""
+        session_a = test_state.downloads.start_download({"ltx-2.3-22b-distilled"})
+        # Simulate A going stale: a newer session B is now active.
+        session_b = test_state.downloads.start_download({"ltx-2.3-spatial-upscaler-x2-1.0"})
+
+        # Stale worker A tries to finish — must no-op.
+        test_state.downloads.finish_download(session_a)
+
+        # Session B is still the active session.
+        assert test_state.state.downloading_session is not None
+        assert test_state.state.downloading_session.id == session_b
+        # A was not recorded as complete by the stale worker.
+        assert session_a not in test_state.state.completed_download_sessions
+
+    def test_stale_worker_fail_does_not_overwrite_newer_session(self, test_state):
+        session_a = test_state.downloads.start_download({"ltx-2.3-22b-distilled"})
+        session_b = test_state.downloads.start_download({"ltx-2.3-spatial-upscaler-x2-1.0"})
+
+        test_state.downloads.fail_download("boom", "UNKNOWN_ERROR", session_a)
+
+        assert test_state.state.downloading_session is not None
+        assert test_state.state.downloading_session.id == session_b
+        assert session_a not in test_state.state.completed_download_sessions
+
+    def test_stale_worker_cancel_finalize_does_not_overwrite_newer_session(self, test_state):
+        session_a = test_state.downloads.start_download({"ltx-2.3-22b-distilled"})
+        session_b = test_state.downloads.start_download({"ltx-2.3-spatial-upscaler-x2-1.0"})
+
+        test_state.downloads._finalize_cancelled(session_a)
+
+        assert test_state.state.downloading_session is not None
+        assert test_state.state.downloading_session.id == session_b
+        assert session_a not in test_state.state.completed_download_sessions
+
+    def test_terminal_cancelled_progress_after_worker_finalizes(self, test_state):
+        """Once the worker finalizes a cancelled session, progress reports
+        cancelled from the terminal result."""
+        session_id = test_state.downloads.start_download({"ltx-2.3-22b-distilled"})
+        test_state.downloads._finalize_cancelled(session_id)
+        # Active session is now cleared.
+        assert test_state.state.downloading_session is None
+        progress = test_state.downloads.get_download_progress(str(session_id))
+        assert progress.status == "cancelled"
+
+    def test_background_safety_net_error_cannot_clobber_newer_session(self, test_state):
+        """An escaped background error from a stale worker (session A) must be
+        session-aware and must NOT fail a newer active session (B)."""
+        session_a = test_state.downloads.start_download({"ltx-2.3-22b-distilled"})
+        # Simulate A going stale: a newer session B is now active.
+        session_b = test_state.downloads.start_download({"ltx-2.3-spatial-upscaler-x2-1.0"})
+
+        # Stale worker A's escaped error reaches the session-aware safety net.
+        test_state.downloads._on_background_download_error(RuntimeError("stale boom"), session_a)
+
+        # Newer session B is untouched / still active.
+        assert test_state.state.downloading_session is not None
+        assert test_state.state.downloading_session.id == session_b
+        # A was not recorded as a terminal error by the stale safety net.
+        assert session_a not in test_state.state.completed_download_sessions
 
 
 # ============================================================

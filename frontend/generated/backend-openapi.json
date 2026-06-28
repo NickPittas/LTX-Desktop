@@ -559,6 +559,53 @@
         "title": "CheckModelAccessResponse",
         "type": "object"
       },
+      "DownloadCancelCancellingResponse": {
+        "properties": {
+          "sessionId": {
+            "title": "Sessionid",
+            "type": "string"
+          },
+          "status": {
+            "const": "cancelling",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "sessionId"
+        ],
+        "title": "DownloadCancelCancellingResponse",
+        "type": "object"
+      },
+      "DownloadCancelNoActiveResponse": {
+        "properties": {
+          "status": {
+            "const": "no_active_download",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "DownloadCancelNoActiveResponse",
+        "type": "object"
+      },
+      "DownloadProgressCancelledResponse": {
+        "properties": {
+          "status": {
+            "const": "cancelled",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "DownloadProgressCancelledResponse",
+        "type": "object"
+      },
       "DownloadProgressCompleteResponse": {
         "properties": {
           "status": {
@@ -577,6 +624,17 @@
         "properties": {
           "error": {
             "title": "Error",
+            "type": "string"
+          },
+          "error_code": {
+            "default": "UNKNOWN_ERROR",
+            "enum": [
+              "DOWNLOAD_LOCKED",
+              "INSUFFICIENT_DISK_SPACE",
+              "NETWORK_ERROR",
+              "UNKNOWN_ERROR"
+            ],
+            "title": "Error Code",
             "type": "string"
           },
           "status": {
@@ -4561,6 +4619,55 @@
         ]
       }
     },
+    "/api/models/download/cancel": {
+      "post": {
+        "operationId": "route_model_download_cancel_api_models_download_cancel_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/DownloadCancelCancellingResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/DownloadCancelNoActiveResponse"
+                    }
+                  ],
+                  "title": "Response Route Model Download Cancel Api Models Download Cancel Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPErrorResponse"
+                }
+              }
+            },
+            "description": "Client Error"
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPErrorResponse"
+                }
+              }
+            },
+            "description": "Server Error"
+          }
+        },
+        "summary": "Route Model Download Cancel",
+        "tags": [
+          "models"
+        ]
+      }
+    },
     "/api/models/download/progress": {
       "get": {
         "operationId": "route_download_progress_api_models_download_progress_get",
@@ -4589,6 +4696,9 @@
                     },
                     {
                       "$ref": "#/components/schemas/DownloadProgressErrorResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/DownloadProgressCancelledResponse"
                     }
                   ],
                   "title": "Response Route Download Progress Api Models Download Progress Get"

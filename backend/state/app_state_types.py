@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NewType, Protocol
 
-from api_types import ModelCheckpointID, ModelProfilePayload
+from api_types import DownloadErrorCode, ModelCheckpointID, ModelProfilePayload
 from state.conditioning_cache import ConditioningCache
 
 if TYPE_CHECKING:
@@ -38,10 +38,16 @@ class DownloadSessionComplete:
 @dataclass(frozen=True)
 class DownloadSessionError:
     error_message: str
+    error_code: DownloadErrorCode = "UNKNOWN_ERROR"
     status: str = "error"
 
 
-DownloadSessionResult = DownloadSessionComplete | DownloadSessionError
+@dataclass(frozen=True)
+class DownloadSessionCancelled:
+    status: str = "cancelled"
+
+
+DownloadSessionResult = DownloadSessionComplete | DownloadSessionError | DownloadSessionCancelled
 
 
 def _default_completed_download_sessions() -> dict[DownloadSessionId, DownloadSessionResult]:
@@ -63,6 +69,7 @@ class DownloadingSession:
     files_to_download: set[ModelCheckpointID]
     completed_files: set[ModelCheckpointID]
     completed_bytes: int
+    cancellation_requested: bool = False
 
 
 # ============================================================
