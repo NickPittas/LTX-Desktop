@@ -5,19 +5,18 @@ lists of unknown and partial files. The scanner is a pure function: it accepts a
 :class:`~pathlib.Path` and returns a typed result without mutating the
 filesystem — no moves, deletes, downloads, or folder creation.
 
-Canonical expectations are derived from current runtime/downloader semantics in
-:mod:`runtime_config.model_download_specs`:
+Canonical expectations are **subfolder-only** — no known artifact is ever
+canonical at the models root:
 
 - **Checkpoint specs**: canonical path = ``models_dir / spec.relative_path``
-  (mirrors :func:`resolve_model_path`).
-- **Adapters**: canonical path = ``models_dir / adapter.filename`` (mirrors
-  :func:`ModelsHandler.resolve_adapter_path` root fallback).
+  (mirrors :func:`resolve_model_path`); every spec now carries a subfolder.
+- **Adapters**: canonical path = ``models_dir / adapters / <filename>``.
+- **Scanner-only known files** (VAE, text projection, alternate transformer
+  builds, GGUF text encoder): recognized with their own subfolder canonicals
+  but have no download CP spec.
 
-Files discovered in non-canonical subfolders (e.g. ``adapters/``,
-``diffusion_models/``) are reported as ``wrong_folder_usable`` — the scanner
-never silently "fixes" them. When the runtime resolver evolves to expect
-subfolders (later phases), these canonical expectations will be updated to
-match.
+Files discovered at the models root or in a non-canonical subfolder are reported
+as ``wrong_folder_usable`` — the scanner never silently "fixes" them.
 """
 
 from __future__ import annotations
@@ -60,6 +59,9 @@ _PARTIAL_SUFFIXES: tuple[str, ...] = (".part", ".tmp")
 
 #: Adapters that remain workflow-gated even when installed (see plan §8).
 _GATED_ADAPTER_IDS: frozenset[AdapterID] = frozenset({"hdr", "hdr_scene_embeddings"})
+
+#: Canonical subfolder for adapter (IC-LoRA / distilled-LoRA / scene-embedding) files.
+_ADAPTER_CANONICAL_SUBFOLDER = "adapters"
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,13 +107,93 @@ def _adapter_kind_to_artifact_kind(kind: AdapterKind) -> ArtifactKind:
     return "lora"  # lora, distilled_lora
 
 
+#: Scanner-only known artifacts (no download CP spec) that must be recognized
+#: when present on disk so they do not show as unknown files. Canonical paths
+#: are subfolder-only, consistent with all other known artifacts.
+_EXTRA_KNOWN_ARTIFACTS: list[_CanonicalArtifact] = [
+    _CanonicalArtifact(
+        filename="ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v3.safetensors",
+        artifact_kind="diffusion_model",
+        component_role="base_diffusion_model_fp8",
+        canonical_relative_path="diffusion_models/ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v3.safetensors",
+        repo_id="Lightricks/LTX-2.3",
+        expected_size_bytes=0,
+        is_folder=False,
+        gated=False,
+        cp_id=None,
+        adapter_id=None,
+    ),
+    _CanonicalArtifact(
+        filename="LTX-2.3-22B-distilled-1.1-Q4_K_M.gguf",
+        artifact_kind="gguf",
+        component_role="base_diffusion_model_gguf",
+        canonical_relative_path="gguf/QuantStack/LTX-2.3-GGUF/LTX-2.3-distilled-1.1/LTX-2.3-22B-distilled-1.1-Q4_K_M.gguf",
+        repo_id="QuantStack/LTX-2.3-GGUF",
+        expected_size_bytes=0,
+        is_folder=False,
+        gated=False,
+        cp_id=None,
+        adapter_id=None,
+    ),
+    _CanonicalArtifact(
+        filename="ltx-2.3_text_projection_bf16.safetensors",
+        artifact_kind="text_encoder",
+        component_role="text_projection_file",
+        canonical_relative_path="text_encoders/ltx-2.3_text_projection_bf16.safetensors",
+        repo_id="Lightricks/LTX-2.3",
+        expected_size_bytes=0,
+        is_folder=False,
+        gated=False,
+        cp_id=None,
+        adapter_id=None,
+    ),
+    _CanonicalArtifact(
+        filename="LTX23_video_vae_bf16.safetensors",
+        artifact_kind="vae",
+        component_role="video_vae",
+        canonical_relative_path="vae/LTX23_video_vae_bf16.safetensors",
+        repo_id="Lightricks/LTX-2.3",
+        expected_size_bytes=0,
+        is_folder=False,
+        gated=False,
+        cp_id=None,
+        adapter_id=None,
+    ),
+    _CanonicalArtifact(
+        filename="LTX23_audio_vae_bf16.safetensors",
+        artifact_kind="vae",
+        component_role="audio_vae",
+        canonical_relative_path="vae/LTX23_audio_vae_bf16.safetensors",
+        repo_id="Lightricks/LTX-2.3",
+        expected_size_bytes=0,
+        is_folder=False,
+        gated=False,
+        cp_id=None,
+        adapter_id=None,
+    ),
+    _CanonicalArtifact(
+        filename="gemma-3-12b-it-qat-GGUF",
+        artifact_kind="text_encoder",
+        component_role="gemma_gguf",
+        canonical_relative_path="text_encoders/unsloth/gemma-3-12b-it-qat-GGUF",
+        repo_id="unsloth/gemma-3-12b-it-qat-GGUF",
+        expected_size_bytes=0,
+        is_folder=True,
+        gated=False,
+        cp_id=None,
+        adapter_id=None,
+    ),
+]
+
+
 def _build_canonical_artifacts() -> list[_CanonicalArtifact]:
     """Build scanner-local canonical expectations from current runtime specs.
 
-    Checkpoint canonical paths use ``spec.relative_path`` (matches
-    :func:`resolve_model_path`). Adapter canonical paths use the bare filename
-    at the models root (matches :func:`ModelsHandler.resolve_adapter_path`
-    root fallback).
+    Checkpoint canonical paths use ``spec.relative_path`` (subfolder-only,
+    matches :func:`resolve_model_path`). Adapter canonical paths use
+    ``adapters/<filename>`` (never bare at root). Extra known files (VAE,
+    text projection, alternate transformer builds, GGUF text encoder) are
+    appended with their own subfolder canonicals.
     """
     artifacts: list[_CanonicalArtifact] = []
     seen_filenames: set[str] = set()
@@ -142,7 +224,7 @@ def _build_canonical_artifacts() -> list[_CanonicalArtifact]:
             filename=filename,
             artifact_kind=_adapter_kind_to_artifact_kind(adapter.kind),
             component_role=adapter_id,
-            canonical_relative_path=filename,
+            canonical_relative_path=f"{_ADAPTER_CANONICAL_SUBFOLDER}/{filename}",
             repo_id=adapter.repo_id,
             expected_size_bytes=adapter.expected_size_bytes,
             is_folder=False,
@@ -150,6 +232,12 @@ def _build_canonical_artifacts() -> list[_CanonicalArtifact]:
             cp_id=ADAPTER_TO_CP_ID.get(adapter_id),
             adapter_id=adapter_id,
         ))
+
+    # Scanner-only known artifacts (no download CP).
+    for extra in _EXTRA_KNOWN_ARTIFACTS:
+        if extra.filename not in seen_filenames:
+            seen_filenames.add(extra.filename)
+            artifacts.append(extra)
 
     return artifacts
 

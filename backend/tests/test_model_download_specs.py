@@ -98,12 +98,20 @@ def test_downloading_path_is_derived_from_spec():
     models_dir = Path("/tmp/models")
     downloading_dir = resolve_downloading_dir(models_dir)
 
-    assert resolve_downloading_path(models_dir, "ltx-2.3-22b-distilled") == downloading_dir
+    # File CPs: downloading_path includes the parent subfolder from the spec.
+    assert (
+        resolve_downloading_path(models_dir, "ltx-2.3-22b-distilled")
+        == downloading_dir / "diffusion_models"
+    )
+    # Folder CPs: downloading_path includes the full relative path.
     assert (
         resolve_downloading_path(models_dir, "gemma-3-12b-it-qat-q4_0-unquantized")
-        == downloading_dir / "gemma-3-12b-it-qat-q4_0-unquantized"
+        == downloading_dir / "text_encoders" / "gemma-3-12b-it-qat-q4_0-unquantized"
     )
-    assert resolve_downloading_target_path(models_dir, "ltx-2.3-22b-distilled") == downloading_dir / "ltx-2.3-22b-distilled.safetensors"
+    assert (
+        resolve_downloading_target_path(models_dir, "ltx-2.3-22b-distilled")
+        == downloading_dir / "diffusion_models" / "ltx-2.3-22b-distilled.safetensors"
+    )
 
 
 def test_official_ic_lora_adapter_cp_specs_match_registry():

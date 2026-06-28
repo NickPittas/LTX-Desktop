@@ -155,7 +155,8 @@ class ModelsHandler(StateHandlerBase):
         profile_path = self._active_profile_adapter_path(adapter_id)
         if profile_path is not None:
             return profile_path
-        models_dir_path = self.models_dir / adapter.filename
+        # Canonical adapter location is adapters/<filename> (never root).
+        models_dir_path = self.models_dir / "adapters" / adapter.filename
         return models_dir_path if models_dir_path.is_file() else None
 
     def get_adapter_status(self, pipeline: AdapterPipeline | None = None) -> AdapterStatusResponse:

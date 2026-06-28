@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from api_types import CURRENT_MODEL_PROFILE_SCHEMA_VERSION
+from runtime_config.model_download_specs import resolve_model_path
 from tests.conftest import TEST_ADMIN_TOKEN
 from tests.http_error_assertions import assert_http_error
 
@@ -31,6 +32,23 @@ def _make_official_payload(profile_id: str = "test-official", **overrides: objec
     }
     payload.update(overrides)
     return payload
+
+
+def _scanner_known_components(test_state) -> dict[str, str]:
+    """Write scanner-recognized base diffusion + upscaler at canonical paths
+    under the effective models root and return components pointing at them."""
+    models_dir: Path = test_state.config.default_models_dir
+    transformer = resolve_model_path(models_dir, "ltx-2.3-22b-distilled")
+    upsampler = resolve_model_path(models_dir, "ltx-2.3-spatial-upscaler-x2-1.0")
+    transformer.parent.mkdir(parents=True, exist_ok=True)
+    transformer.write_bytes(b"model")
+    upsampler.parent.mkdir(parents=True, exist_ok=True)
+    upsampler.write_bytes(b"upsampler")
+    return {
+        "transformer": str(transformer),
+        "upsampler": str(upsampler),
+        "text_encoder_format": "api",
+    }
 
 
 class TestModelProfiles:
@@ -116,21 +134,14 @@ class TestModelProfiles:
         fields = [issue["field"] for issue in response.json()["issues"]]
         assert "components.transformer" in fields
 
-    def test_activate_valid_profile(self, client, tmp_path):
-        model_file = tmp_path / "model.safetensors"
-        upscaler_file = tmp_path / "upsampler.safetensors"
-        model_file.write_bytes(b"model")
-        upscaler_file.write_bytes(b"upscaler")
+    def test_activate_valid_profile(self, client, test_state):
+        components = _scanner_known_components(test_state)
 
         response = client.post(
             "/api/model-profiles",
             json=_make_official_payload(
                 profile_id="valid-profile",
-                components={
-                    "transformer": str(model_file),
-                    "upsampler": str(upscaler_file),
-                    "text_encoder_format": "api",
-                },
+                components=components,
             ),
             headers=_ADMIN_HEADERS,
         )
@@ -224,19 +235,12 @@ class TestModelProfiles:
         response = client.get("/api/model-profiles", headers=_ADMIN_HEADERS)
         assert len(response.json()["profiles"]) == 0
 
-    def test_delete_deactivates_if_active(self, client, tmp_path):
-        model_file = tmp_path / "model.safetensors"
-        upscaler_file = tmp_path / "upsampler.safetensors"
-        model_file.write_bytes(b"model")
-        upscaler_file.write_bytes(b"upscaler")
+    def test_delete_deactivates_if_active(self, client, test_state):
+        components = _scanner_known_components(test_state)
 
         profile = _make_official_payload(
             profile_id="active-delete",
-            components={
-                "transformer": str(model_file),
-                "upsampler": str(upscaler_file),
-                "text_encoder_format": "api",
-            },
+            components=components,
         )
         client.post("/api/model-profiles", json=profile, headers=_ADMIN_HEADERS)
         client.post("/api/model-profiles/active-delete/activate", headers=_ADMIN_HEADERS)
@@ -255,19 +259,12 @@ class TestModelProfiles:
 class TestCreateEmptyId:
     """Regression: creating a profile with empty/blank ID gets an assigned ID."""
 
-    def test_empty_id_gets_assigned_and_usable(self, client, tmp_path):
-        model_file = tmp_path / "model.safetensors"
-        upscaler_file = tmp_path / "upsampler.safetensors"
-        model_file.write_bytes(b"model")
-        upscaler_file.write_bytes(b"upscaler")
+    def test_empty_id_gets_assigned_and_usable(self, client, test_state):
+        components = _scanner_known_components(test_state)
 
         payload = _make_official_payload(
             profile_id="",
-            components={
-                "transformer": str(model_file),
-                "upsampler": str(upscaler_file),
-                "text_encoder_format": "api",
-            },
+            components=components,
         )
         response = client.post("/api/model-profiles", json=payload, headers=_ADMIN_HEADERS)
         assert response.status_code == 200
@@ -278,7 +275,7 @@ class TestCreateEmptyId:
         validate_r = client.post(f"/api/model-profiles/{assigned_id}/validate", headers=_ADMIN_HEADERS)
         assert validate_r.status_code == 200
 
-        # activate works by assigned id (profile valid → 200, invalid → 409, both fine)
+        # activate works by assigned id (scanner-recognized transformer → 200)
         activate_r = client.post(f"/api/model-profiles/{assigned_id}/activate", headers=_ADMIN_HEADERS)
         assert activate_r.status_code == 200
 
@@ -374,21 +371,14 @@ class TestLoadRepair:
 
 
 class TestRecommendationWithProfile:
-    def test_ltx_recommendation_ok_when_valid_official_profile_active(self, client, tmp_path):
-        model_file = tmp_path / "model.safetensors"
-        upscaler_file = tmp_path / "upsampler.safetensors"
-        model_file.write_bytes(b"model")
-        upscaler_file.write_bytes(b"upscaler")
+    def test_ltx_recommendation_ok_when_valid_official_profile_active(self, client, test_state):
+        components = _scanner_known_components(test_state)
 
         client.post(
             "/api/model-profiles",
             json=_make_official_payload(
                 profile_id="official-ready",
-                components={
-                    "transformer": str(model_file),
-                    "upsampler": str(upscaler_file),
-                    "text_encoder_format": "api",
-                },
+                components=components,
             ),
             headers=_ADMIN_HEADERS,
         )
@@ -576,3 +566,125 @@ class TestProfileSchemaMigration:
         # Server-owned fields preserved
         assert data["created_by"] == "wizard"
         assert data["schema_version"] == CURRENT_MODEL_PROFILE_SCHEMA_VERSION
+
+
+class TestProfileActivationSafety:
+    """Phase 5: activation hardening (generation gate + resolver gating)."""
+
+    def test_activate_profile_rejects_while_generation_running(self, client, test_state):
+        from state.app_state_types import (
+            ApiGeneration,
+            GenerationProgress,
+            GenerationRunning,
+        )
+
+        components = _scanner_known_components(test_state)
+        client.post(
+            "/api/model-profiles",
+            json=_make_official_payload(profile_id="gen-blocked", components=components),
+            headers=_ADMIN_HEADERS,
+        )
+
+        # Simulate an active running generation.
+        test_state.state.active_generation = ApiGeneration(
+            state=GenerationRunning(
+                id="gen-1",
+                progress=GenerationProgress(phase="encoding", progress=0, current_step=None, total_steps=None),
+            )
+        )
+
+        response = client.post("/api/model-profiles/gen-blocked/activate", headers=_ADMIN_HEADERS)
+        assert response.status_code == 409
+        assert response.json()["code"] == "MODEL_PROFILE_ACTIVATION_GENERATION_RUNNING"
+        # Profile was not activated.
+        assert test_state.state.active_model_profile_id is None
+
+    def test_activate_profile_rejects_missing_required_transformer(self, client, test_state):
+        # Profile points at a path that is not scanner-recognized.
+        client.post(
+            "/api/model-profiles",
+            json=_make_official_payload(
+                profile_id="missing-base",
+                components={
+                    "transformer": str(test_state.config.default_models_dir / "nonexistent.safetensors"),
+                    "upsampler": str(test_state.config.default_models_dir / "also-missing.safetensors"),
+                    "text_encoder_format": "api",
+                },
+            ),
+            headers=_ADMIN_HEADERS,
+        )
+
+        response = client.post("/api/model-profiles/missing-base/activate", headers=_ADMIN_HEADERS)
+        assert response.status_code == 409
+        assert response.json()["code"] == "MODEL_PROFILE_REQUIRED_ARTIFACTS_MISSING"
+        assert test_state.state.active_model_profile_id is None
+
+    def test_activate_profile_allows_scanned_wrong_folder_transformer_when_profile_points_to_it(
+        self, client, test_state
+    ):
+        # Place the base diffusion model in a non-canonical subfolder so the
+        # scanner reports it as wrong_folder_usable.
+        models_dir: Path = test_state.config.default_models_dir
+        wrong_folder = models_dir / "diffusion_models" / "ltx-2.3-22b-distilled.safetensors"
+        wrong_folder.parent.mkdir(parents=True, exist_ok=True)
+        wrong_folder.write_bytes(b"model")
+
+        client.post(
+            "/api/model-profiles",
+            json=_make_official_payload(
+                profile_id="wrong-folder",
+                components={
+                    "transformer": str(wrong_folder),
+                    "text_encoder_format": "api",
+                },
+            ),
+            headers=_ADMIN_HEADERS,
+        )
+
+        response = client.post("/api/model-profiles/wrong-folder/activate", headers=_ADMIN_HEADERS)
+        assert response.status_code == 200
+        assert response.json()["active_model_profile_id"] == "wrong-folder"
+
+    def test_activate_profile_does_not_promote_candidate_to_validated(self, client, test_state):
+        components = _scanner_known_components(test_state)
+        client.post(
+            "/api/model-profiles",
+            json=_make_official_payload(
+                profile_id="candidate-activate",
+                components=components,
+                validation_status="candidate",
+            ),
+            headers=_ADMIN_HEADERS,
+        )
+
+        response = client.post("/api/model-profiles/candidate-activate/activate", headers=_ADMIN_HEADERS)
+        assert response.status_code == 200
+
+        # Activation must not change validation_status to validated.
+        profiles = client.get("/api/model-profiles", headers=_ADMIN_HEADERS).json()["profiles"]
+        profile = next(p for p in profiles if p["id"] == "candidate-activate")
+        assert profile["validation_status"] == "candidate"
+
+    def test_activate_profile_rejects_catalog_fallback_without_explicit_transformer(self, client, test_state):
+        """Canonical transformer exists in models root, but the profile omits
+        components.transformer — activation must reject (no catalog fallback)."""
+        # Write a scanner-known transformer at the canonical path, but do NOT
+        # point the profile at it.
+        models_dir: Path = test_state.config.default_models_dir
+        transformer = resolve_model_path(models_dir, "ltx-2.3-22b-distilled")
+        transformer.parent.mkdir(parents=True, exist_ok=True)
+        transformer.write_bytes(b"model")
+
+        client.post(
+            "/api/model-profiles",
+            json=_make_official_payload(
+                profile_id="no-transformer",
+                components={"text_encoder_format": "api"},
+            ),
+            headers=_ADMIN_HEADERS,
+        )
+
+        response = client.post("/api/model-profiles/no-transformer/activate", headers=_ADMIN_HEADERS)
+        assert response.status_code == 409
+        assert response.json()["code"] == "MODEL_PROFILE_REQUIRED_ARTIFACTS_MISSING"
+        assert test_state.state.active_model_profile_id is None

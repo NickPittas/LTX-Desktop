@@ -579,6 +579,7 @@ class TestRollbackHandler:
         models_dir: Path = test_state.config.default_models_dir
         # Pre-existing file NOT in rollback list
         preexisting = resolve_model_path(models_dir, "ltx-2.3-spatial-upscaler-x2-1.0")
+        preexisting.parent.mkdir(parents=True, exist_ok=True)
         preexisting.write_bytes(b"pre-existing")
 
         # Rollback empty list → nothing deleted
@@ -596,6 +597,7 @@ class TestRollbackHandler:
         (committed_path / "model.safetensors").write_bytes(b"session-committed")
 
         preexisting_path = resolve_model_path(models_dir, preexisting_cp)
+        preexisting_path.parent.mkdir(parents=True, exist_ok=True)
         preexisting_path.write_bytes(b"pre-existing")
 
         test_state.downloads._rollback_committed_checkpoints([committed_cp])

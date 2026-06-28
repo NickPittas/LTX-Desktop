@@ -4,6 +4,7 @@ import { ApiClient } from '../lib/api-client'
 import type { ModelComponentPaths, ModelProfilePayload, ModelProfileValidationResponse } from '../types/model-profile'
 import { Button } from './ui/button'
 import { ModelComponentPicker, MODEL_FILE_FILTERS } from './ModelComponentPicker'
+import type { ActivationError } from '../hooks/use-model-profiles'
 
 // ── types ──────────────────────────────────────────────────────────────
 
@@ -11,12 +12,39 @@ export interface ModelProfileWizardProps {
   isOpen: boolean
   onClose: () => void
   onCreated?: (profileId: string) => void
+  generationRunning?: boolean
 }
 
 type Capability = NonNullable<ModelProfilePayload['capabilities']>[number]
 
 // Keep in sync with backend CURRENT_MODEL_PROFILE_SCHEMA_VERSION (api_types.py).
 const CURRENT_MODEL_PROFILE_SCHEMA_VERSION = 1
+
+function parseActivationError(error: { code?: string; message: string }): ActivationError {
+  const code = error.code ?? 'UNKNOWN'
+  const knownCodes: string[] = [
+    'MODEL_PROFILE_ACTIVATION_GENERATION_RUNNING',
+    'MODEL_PROFILE_REQUIRED_ARTIFACTS_MISSING',
+    'MODEL_PROFILE_CHANGED_DURING_ACTIVATION',
+  ]
+  if (knownCodes.includes(code)) {
+    return { code: code as ActivationError['code'], message: error.message }
+  }
+  return { code: 'UNKNOWN', message: error.message }
+}
+
+function formatActivationError(error: ActivationError): string {
+  switch (error.code) {
+    case 'MODEL_PROFILE_ACTIVATION_GENERATION_RUNNING':
+      return 'A generation is currently running. Wait for it to finish, then activate this profile.'
+    case 'MODEL_PROFILE_REQUIRED_ARTIFACTS_MISSING':
+      return 'Some required model files are missing. Use the Library tab to check what is installed and download missing items.'
+    case 'MODEL_PROFILE_CHANGED_DURING_ACTIVATION':
+      return 'The profile changed while activating. Rescan and try again.'
+    default:
+      return error.message
+  }
+}
 
 // ── component field definitions ────────────────────────────────────────
 
@@ -172,7 +200,7 @@ function visibleFields(source: ModelProfilePayload['source']): (keyof ModelCompo
 
 // ── wizard ─────────────────────────────────────────────────────────────
 
-export function ModelProfileWizard({ isOpen, onClose, onCreated }: ModelProfileWizardProps) {
+export function ModelProfileWizard({ isOpen, onClose, onCreated, generationRunning = false }: ModelProfileWizardProps) {
   const [step, setStep] = useState(0)
   const [name, setName] = useState('')
   const [family, setFamily] = useState<ModelProfilePayload['family']>('ltx-2.3')
@@ -374,7 +402,7 @@ export function ModelProfileWizard({ isOpen, onClose, onCreated }: ModelProfileW
       onCreated?.(createdProfileId)
       onClose()
     } else {
-      setActivateError(result.error.message)
+      setActivateError(formatActivationError(parseActivationError(result.error)))
     }
     setIsActivating(false)
   }, [createdProfileId, onCreated, onClose])
@@ -707,12 +735,14 @@ export function ModelProfileWizard({ isOpen, onClose, onCreated }: ModelProfileW
                     </div>
                   )}
 
-                  <Button onClick={handleActivate} disabled={isActivating} className="w-full">
+                  <Button onClick={handleActivate} disabled={isActivating || generationRunning} className="w-full">
                     {isActivating ? (
                       <>
                         <Loader2 className="h-4 w-4 mr-2 animate-spin" />
                         Activating...
                       </>
+                    ) : generationRunning ? (
+                      'Wait for generation'
                     ) : (
                       'Activate Profile'
                     )}

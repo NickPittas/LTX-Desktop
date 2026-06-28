@@ -11,6 +11,90 @@ import { useModelProfiles } from '../hooks/use-model-profiles'
 import { useOfficialAdapters } from '../hooks/use-official-adapters'
 import { ModelLibraryPanel } from './ModelLibraryPanel'
 import { ModelProfileWizard } from './ModelProfileWizard'
+import type { ActivationError } from '../hooks/use-model-profiles'
+import type { ModelProfilePayload } from '../types/model-profile'
+
+function formatActivationError(error: ActivationError): string {
+  switch (error.code) {
+    case 'MODEL_PROFILE_ACTIVATION_GENERATION_RUNNING':
+      return 'A generation is currently running. Wait for it to finish, then try again.'
+    case 'MODEL_PROFILE_REQUIRED_ARTIFACTS_MISSING':
+      return 'Some required model files are missing. Use the Library tab to check what is installed and download missing items.'
+    case 'MODEL_PROFILE_CHANGED_DURING_ACTIVATION':
+      return 'The profile changed while activating. Rescan and try again.'
+    default:
+      return error.message
+  }
+}
+
+function useGenerationRunning(enabled: boolean): boolean {
+  const [isRunning, setIsRunning] = useState(false)
+
+  useEffect(() => {
+    if (!enabled) {
+      setIsRunning(false)
+      return
+    }
+
+    const poll = async () => {
+      const result = await ApiClient.getGenerationProgress()
+      if (!result.ok) return
+      setIsRunning(result.data.status === 'running')
+    }
+
+    void poll()
+    const interval = setInterval(() => { void poll() }, 2000)
+    return () => clearInterval(interval)
+  }, [enabled])
+
+  return isRunning
+}
+
+function formatProfileAge(iso: string | null | undefined): string {
+  if (!iso) return ''
+  try {
+    const date = new Date(iso)
+    return date.toLocaleString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    })
+  } catch {
+    return iso
+  }
+}
+
+function validationStatusBadgeClasses(status: ModelProfilePayload['validation_status']): string {
+  switch (status) {
+    case 'validated':
+      return 'bg-emerald-500/15 text-emerald-400 border-emerald-500/20'
+    case 'deprecated':
+      return 'bg-red-500/15 text-red-400 border-red-500/20'
+    case 'candidate':
+    default:
+      return 'bg-amber-500/15 text-amber-400 border-amber-500/20'
+  }
+}
+
+function validationStatusLabel(status: ModelProfilePayload['validation_status']): string {
+  switch (status) {
+    case 'validated':
+      return 'Validated'
+    case 'deprecated':
+      return 'Deprecated'
+    case 'candidate':
+    default:
+      return 'Candidate'
+  }
+}
+
+function createdByLabel(source: ModelProfilePayload['source'], createdBy: ModelProfilePayload['created_by']): string {
+  if (createdBy === 'official_template') return 'Official template'
+  if (createdBy === 'wizard') return 'Created by wizard'
+  if (createdBy === 'user') return 'Created manually'
+  return source
+}
 
 interface SettingsModalProps {
   isOpen: boolean
@@ -65,6 +149,7 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
   const promptEnhancerAvailable = settings.hasLtxApiKey || localPromptEnhancerAvailable
   const [wizardOpen, setWizardOpen] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const generationRunning = useGenerationRunning(isOpen)
 
   // Sync active tab with initialTab prop when modal opens
   useEffect(() => {
@@ -239,10 +324,13 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
   // Models tab — action handlers
   const handleActivateProfile = async (profileId: string) => {
     setActionError(null)
-    try {
-      await profiles.activateProfile(profileId)
-    } catch (e) {
-      setActionError(e instanceof Error ? e.message : 'Activation failed')
+    if (generationRunning) {
+      setActionError('A generation is currently running. Wait for it to finish, then activate this profile.')
+      return
+    }
+    const result = await profiles.activateProfileSafe(profileId)
+    if (!result.ok) {
+      setActionError(formatActivationError(result.error))
     }
   }
 
@@ -1172,29 +1260,70 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                   <p className="text-xs text-zinc-500">No profiles yet. Create one to use local models.</p>
                 ) : (
                   <div className="space-y-2">
-                    {profiles.data.profiles.map(profile => (
-                      <div key={profile.id} className="bg-zinc-800/50 border border-zinc-700 rounded-lg p-3 space-y-2">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            <span className="text-sm font-medium text-white">{profile.name}</span>
-                            <span className="text-xs text-zinc-400">{profile.family}</span>
+                    {profiles.data.profiles.map(profile => {
+                      const isActive = profile.id === profiles.data?.active_model_profile_id
+                      const age = formatProfileAge(profile.last_scanned_at)
+                      const hasProblems = profile.problems && profile.problems.length > 0
+                      return (
+                        <div key={profile.id} className="bg-zinc-800/50 border border-zinc-700 rounded-lg p-3 space-y-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-sm font-medium text-white">{profile.name}</span>
+                              <span className="text-xs text-zinc-400">{profile.family}</span>
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded border font-medium ${validationStatusBadgeClasses(profile.validation_status)}`}>
+                                {validationStatusLabel(profile.validation_status)}
+                              </span>
+                              {isActive && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400">Active</span>
+                              )}
+                            </div>
                           </div>
-                          {profile.id === profiles.data?.active_model_profile_id && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400">Active</span>
+                          <div className="text-[10px] text-zinc-500 flex flex-wrap items-center gap-x-3 gap-y-1">
+                            <span>Source: {profile.source}</span>
+                            <span>{createdByLabel(profile.source, profile.created_by)}</span>
+                            {age && <span>Scanned {age}</span>}
+                          </div>
+                          {hasProblems && (
+                            <div className="rounded-md bg-amber-500/10 border border-amber-500/20 p-2 space-y-1">
+                              <div className="flex items-center gap-1.5 text-[10px] font-medium text-amber-400">
+                                <AlertCircle className="h-3 w-3" />
+                                {profile.problems!.length === 1 ? 'Issue found' : `${profile.problems!.length} issues found`}
+                              </div>
+                              <ul className="space-y-0.5">
+                                {profile.problems!.map((problem, i) => (
+                                  <li key={i} className="text-[10px] text-zinc-400 leading-relaxed">
+                                    {problem.message}
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
                           )}
+                          <div className="flex items-center gap-2">
+                            <Button size="sm" variant="ghost" onClick={() => handleValidateProfile(profile.id)} className="h-7 px-2 text-xs text-zinc-400 hover:text-white hover:bg-zinc-700">Validate</Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => handleActivateProfile(profile.id)}
+                              disabled={isActive || generationRunning}
+                              className="h-7 px-2 text-xs text-zinc-400 hover:text-white hover:bg-zinc-700 disabled:text-zinc-600"
+                            >
+                              {generationRunning ? 'Wait for generation' : 'Activate'}
+                            </Button>
+                            <Button size="sm" variant="ghost" onClick={() => handleDeleteProfile(profile.id)} aria-label="Delete profile" className="h-7 px-2 text-xs text-red-400 hover:text-red-300 hover:bg-red-500/10"><Trash2 className="h-3 w-3" /></Button>
+                          </div>
                         </div>
-                        <div className="flex items-center gap-2">
-                          <Button size="sm" variant="ghost" onClick={() => handleValidateProfile(profile.id)} className="h-7 px-2 text-xs text-zinc-400 hover:text-white hover:bg-zinc-700">Validate</Button>
-                          <Button size="sm" variant="ghost" onClick={() => handleActivateProfile(profile.id)} disabled={profile.id === profiles.data?.active_model_profile_id} className="h-7 px-2 text-xs text-zinc-400 hover:text-white hover:bg-zinc-700 disabled:text-zinc-600">Activate</Button>
-                          <Button size="sm" variant="ghost" onClick={() => handleDeleteProfile(profile.id)} aria-label="Delete profile" className="h-7 px-2 text-xs text-red-400 hover:text-red-300 hover:bg-red-500/10"><Trash2 className="h-3 w-3" /></Button>
-                        </div>
+                      )
+                    })}
+                    {actionError && (
+                      <div className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+                        <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                        {actionError}
                       </div>
-                    ))}
-                    {actionError && <p className="text-xs text-red-400">{actionError}</p>}
+                    )}
                   </div>
                 )}
                 <Button onClick={() => setWizardOpen(true)} className="w-full bg-blue-600 hover:bg-blue-500 text-white text-xs">Create Profile</Button>
-                <ModelProfileWizard isOpen={wizardOpen} onClose={() => { setWizardOpen(false); void profiles.refresh() }} onCreated={() => setWizardOpen(false)} />
+                <ModelProfileWizard isOpen={wizardOpen} onClose={() => { setWizardOpen(false); void profiles.refresh() }} onCreated={() => setWizardOpen(false)} generationRunning={generationRunning} />
               </div>
 
               {/* Adapter Checklist (read-only) */}

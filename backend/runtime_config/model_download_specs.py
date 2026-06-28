@@ -270,7 +270,7 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
     match cp_id:
         case "ltx-2.3-22b-distilled":
             return ModelCheckpointSpec(
-                relative_path=Path("ltx-2.3-22b-distilled.safetensors"),
+                relative_path=Path("diffusion_models/ltx-2.3-22b-distilled.safetensors"),
                 expected_size_bytes=43_000_000_000,
                 is_folder=False,
                 repo_id="Lightricks/LTX-2.3",
@@ -278,7 +278,7 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
             )
         case "ltx-2.3-spatial-upscaler-x2-1.0":
             return ModelCheckpointSpec(
-                relative_path=Path("ltx-2.3-spatial-upscaler-x2-1.0.safetensors"),
+                relative_path=Path("latent_upscale_models/ltx-2.3-spatial-upscaler-x2-1.0.safetensors"),
                 expected_size_bytes=1_900_000_000,
                 is_folder=False,
                 repo_id="Lightricks/LTX-2.3",
@@ -286,7 +286,7 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
             )
         case "ltx-2.3-22b-ic-lora-union-control-ref0.5":
             return ModelCheckpointSpec(
-                relative_path=Path("ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors"),
+                relative_path=Path("adapters/ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors"),
                 expected_size_bytes=654_465_352,
                 is_folder=False,
                 repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control",
@@ -294,7 +294,7 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
             )
         case "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5":
             return ModelCheckpointSpec(
-                relative_path=Path("ltx-2.3-22b-ic-lora-motion-track-control-ref0.5.safetensors"),
+                relative_path=Path("adapters/ltx-2.3-22b-ic-lora-motion-track-control-ref0.5.safetensors"),
                 expected_size_bytes=310_000_000,
                 is_folder=False,
                 repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Motion-Track-Control",
@@ -302,7 +302,7 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
             )
         case "ltx-2.3-22b-ic-lora-ingredients-0.9":
             return ModelCheckpointSpec(
-                relative_path=Path("ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors"),
+                relative_path=Path("adapters/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors"),
                 expected_size_bytes=624_100_000,
                 is_folder=False,
                 repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Ingredients",
@@ -310,7 +310,7 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
             )
         case "ltx-2.3-22b-ic-lora-water-simulation-0.9":
             return ModelCheckpointSpec(
-                relative_path=Path("ltx-2.3-22b-ic-lora-water-simulation-0.9.safetensors"),
+                relative_path=Path("adapters/ltx-2.3-22b-ic-lora-water-simulation-0.9.safetensors"),
                 expected_size_bytes=624_100_000,
                 is_folder=False,
                 repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Water-Simulation",
@@ -318,7 +318,7 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
             )
         case "ltx-2.3-22b-ic-lora-decompression-0.9":
             return ModelCheckpointSpec(
-                relative_path=Path("ltx-2.3-22b-ic-lora-decompression-0.9.safetensors"),
+                relative_path=Path("adapters/ltx-2.3-22b-ic-lora-decompression-0.9.safetensors"),
                 expected_size_bytes=312_100_000,
                 is_folder=False,
                 repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Decompression",
@@ -326,7 +326,7 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
             )
         case "ltx-2.3-22b-ic-lora-deblur-0.9":
             return ModelCheckpointSpec(
-                relative_path=Path("ltx-2.3-22b-ic-lora-deblur-0.9.safetensors"),
+                relative_path=Path("adapters/ltx-2.3-22b-ic-lora-deblur-0.9.safetensors"),
                 expected_size_bytes=312_100_000,
                 is_folder=False,
                 repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Deblur",
@@ -334,7 +334,7 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
             )
         case "ltx-2.3-22b-ic-lora-colorization-0.9":
             return ModelCheckpointSpec(
-                relative_path=Path("ltx-2.3-22b-ic-lora-colorization-0.9.safetensors"),
+                relative_path=Path("adapters/ltx-2.3-22b-ic-lora-colorization-0.9.safetensors"),
                 expected_size_bytes=312_100_000,
                 is_folder=False,
                 repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Colorization",
@@ -342,7 +342,7 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
             )
         case "ltx-2.3-22b-ic-lora-day-to-night-0.9":
             return ModelCheckpointSpec(
-                relative_path=Path("ltx-2.3-22b-ic-lora-day-to-night-0.9.safetensors"),
+                relative_path=Path("adapters/ltx-2.3-22b-ic-lora-day-to-night-0.9.safetensors"),
                 expected_size_bytes=312_100_000,
                 is_folder=False,
                 repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Day-To-Night",
@@ -350,7 +350,7 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
             )
         case "ltx-2.3-22b-ic-lora-in-outpainting-0.9":
             return ModelCheckpointSpec(
-                relative_path=Path("ltx-2.3-22b-ic-lora-in-outpainting-0.9.safetensors"),
+                relative_path=Path("adapters/ltx-2.3-22b-ic-lora-in-outpainting-0.9.safetensors"),
                 expected_size_bytes=624_100_000,
                 is_folder=False,
                 repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-In-Outpainting",
@@ -358,7 +358,7 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
             )
         case "ltx-2.3-22b-ic-lora-instant-shave-0.9":
             return ModelCheckpointSpec(
-                relative_path=Path("ltx-2.3-22b-ic-lora-instant-shave-0.9.safetensors"),
+                relative_path=Path("adapters/ltx-2.3-22b-ic-lora-instant-shave-0.9.safetensors"),
                 expected_size_bytes=624_100_000,
                 is_folder=False,
                 repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Instant-Shave",
@@ -366,7 +366,7 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
             )
         case "ltx-2.3-22b-ic-lora-cross-eyed-0.9":
             return ModelCheckpointSpec(
-                relative_path=Path("ltx-2.3-22b-ic-lora-cross-eyed-0.9.safetensors"),
+                relative_path=Path("adapters/ltx-2.3-22b-ic-lora-cross-eyed-0.9.safetensors"),
                 expected_size_bytes=312_100_000,
                 is_folder=False,
                 repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-Cross-Eyed",
@@ -374,7 +374,7 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
             )
         case "ltx-2.3-22b-ic-lora-hdr-0.9":
             return ModelCheckpointSpec(
-                relative_path=Path("ltx-2.3-22b-ic-lora-hdr-0.9.safetensors"),
+                relative_path=Path("adapters/ltx-2.3-22b-ic-lora-hdr-0.9.safetensors"),
                 expected_size_bytes=312_100_000,
                 is_folder=False,
                 repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-HDR",
@@ -382,7 +382,7 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
             )
         case "ltx-2.3-22b-ic-lora-hdr-scene-emb":
             return ModelCheckpointSpec(
-                relative_path=Path("ltx-2.3-22b-ic-lora-hdr-scene-emb.safetensors"),
+                relative_path=Path("adapters/ltx-2.3-22b-ic-lora-hdr-scene-emb.safetensors"),
                 expected_size_bytes=12_000_000,
                 is_folder=False,
                 repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-HDR",
@@ -390,7 +390,7 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
             )
         case "ltx-2.3-22b-ic-lora-lipdub-0.9":
             return ModelCheckpointSpec(
-                relative_path=Path("ltx-2.3-22b-ic-lora-lipdub-0.9.safetensors"),
+                relative_path=Path("adapters/ltx-2.3-22b-ic-lora-lipdub-0.9.safetensors"),
                 expected_size_bytes=2_352_400_000,
                 is_folder=False,
                 repo_id="Lightricks/LTX-2.3-22b-IC-LoRA-LipDub",
@@ -398,7 +398,7 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
             )
         case "dpt-hybrid-midas":
             return ModelCheckpointSpec(
-                relative_path=Path("dpt-hybrid-midas"),
+                relative_path=Path("depth_processors/dpt-hybrid-midas"),
                 expected_size_bytes=500_000_000,
                 is_folder=True,
                 repo_id="Intel/dpt-hybrid-midas",
@@ -406,7 +406,7 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
             )
         case "yolox-l-torchscript":
             return ModelCheckpointSpec(
-                relative_path=Path("yolox_l.torchscript.pt"),
+                relative_path=Path("detectors/yolox_l.torchscript.pt"),
                 expected_size_bytes=217_697_649,
                 is_folder=False,
                 repo_id="hr16/yolox-onnx",
@@ -414,7 +414,7 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
             )
         case "dw-ll-ucoco-384-bs5":
             return ModelCheckpointSpec(
-                relative_path=Path("dw-ll_ucoco_384_bs5.torchscript.pt"),
+                relative_path=Path("pose_processors/dw-ll_ucoco_384_bs5.torchscript.pt"),
                 expected_size_bytes=135_059_124,
                 is_folder=False,
                 repo_id="hr16/DWPose-TorchScript-BatchSize5",
@@ -422,7 +422,7 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
             )
         case "gemma-3-12b-it-qat-q4_0-unquantized":
             return ModelCheckpointSpec(
-                relative_path=Path("gemma-3-12b-it-qat-q4_0-unquantized"),
+                relative_path=Path("text_encoders/gemma-3-12b-it-qat-q4_0-unquantized"),
                 expected_size_bytes=25_000_000_000,
                 is_folder=True,
                 repo_id="Lightricks/gemma-3-12b-it-qat-q4_0-unquantized",
@@ -430,7 +430,7 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
             )
         case "z-image-turbo":
             return ModelCheckpointSpec(
-                relative_path=Path("Z-Image-Turbo"),
+                relative_path=Path("image_gen/Z-Image-Turbo"),
                 expected_size_bytes=31_000_000_000,
                 is_folder=True,
                 repo_id="Tongyi-MAI/Z-Image-Turbo",

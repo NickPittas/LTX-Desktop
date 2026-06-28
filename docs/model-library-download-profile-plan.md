@@ -43,9 +43,9 @@ These are **installed but must remain gated** (see §9 HDR gating). Presence ≠
 - `gguf/`
 - `text_encoders/`
 - `vae/`
-- `ltx-2.3-spatial-upscaler-x2-1.0.safetensors` (at root — **legacy-compatible path**; canonical future location is `latent_upscale_models/`)
+- `ltx-2.3-spatial-upscaler-x2-1.0.safetensors` (at root — **wrong-folder**; canonical location is `latent_upscale_models/`)
 
-Scanner must handle both the root-legacy upscaler and the canonical subfolder layout without "fixing" either.
+Scanner treats subfolder paths as canonical; root-level placements are `wrong_folder_usable` — never `installed`.
 
 ### 2.3 Current code facts (as of writing)
 
@@ -54,11 +54,10 @@ Scanner must handle both the root-legacy upscaler and the canonical subfolder la
 - **No recursive scanner** exists today.
 - Distilled LoRA specs exist in code, but: **no download CP IDs**, and they are **not auto-loaded**.
 - `fast` pipeline runs with `loras=[]`.
-- Retake passes `loras=[]` and **does not wire `upsampler_path`**.
 - A2V (image/audio-to-video) **does** use the upscaler.
 - **HDR workflow remains gated** regardless of installed files.
 
-Implication: the scanner must discover what exists; the resolver must decide what is *usable* in which pipeline; nothing today wires distilled LoRA or the retake upsampler — those land in Phase 6.
+Implication: the scanner must discover what exists; the resolver must decide what is *usable* in which pipeline; nothing today wires distilled LoRA — that lands in Phase 6.
 
 ---
 
@@ -109,9 +108,10 @@ Phases are ordered; each phase is independently shippable and testable. Do not r
 
 ### Phase 6 — Pipeline integration: distilled LoRA, component wiring, cache keys
 - Wire distilled LoRA **only** for dev/non-distilled base in fast/distilled mode.
-- Wire `upsampler_path` into retake (currently unwired).
 - Component ordering: Union Control first, then selected LoRA.
 - **Invalidate pipeline caches** when the active profile (or its resolved paths) change.
+
+> **Guardrail:** Retake upsample wiring is explicitly out of scope; do not add an upsampler path to retake unless a future user request reopens it.
 
 ### Phase 7 — Local capability specs from resolver
 - Replace hardcoded "only fast is exposed locally" with resolver-driven specs.
@@ -252,12 +252,11 @@ Strike items as they ship. Update this section in the same PR that lands the wor
 - [x] Phase 3: disk-space preflight + HF gated/token handling.
 - [x] Phase 3: fake downloader (no network) wired into tests.
 - [x] Phase 3: cancellable downloads with structured cancel/error progress handling (session-id-aware worker finalization).
-- [ ] Phase 4: Library UI status chips (installed/missing/wrong-folder/gated/unvalidated).
-- [ ] Phase 4: exact expected path + source URL + size/hash-when-known displayed.
-- [ ] Phase 5: candidate-profile wizard + activation validation.
-- [ ] Phase 5: activation blocked during active generation.
+- [x] Phase 4: Library UI status chips (installed/missing/wrong-folder/gated/unvalidated).
+- [x] Phase 4: exact expected path + source URL + size/hash-when-known displayed.
+- [x] Phase 5: candidate-profile wizard + activation validation.
+- [x] Phase 5: activation blocked during active generation.
 - [ ] Phase 6: distilled LoRA wired for dev/non-distilled base in fast/distilled only.
-- [ ] Phase 6: `upsampler_path` wired into retake (currently `loras=[]`, no upsampler).
 - [ ] Phase 6: Union-Control-first ordering; canny/depth default-off.
 - [ ] Phase 6: pipeline cache invalidation on active-profile change.
 - [ ] Phase 7: local specs derived from resolver (no longer "only fast" hardcoded).

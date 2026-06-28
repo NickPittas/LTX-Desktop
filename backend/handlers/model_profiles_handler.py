@@ -19,6 +19,9 @@ from api_types import (
     ModelProfilesResponse,
 )
 from handlers.base import StateHandlerBase, with_state_lock
+from services.model_resolver import ProfileCapabilityResult, resolve_profile_capabilities
+from services.model_scanner import scan_models
+from state.app_state_types import ApiGeneration, GenerationRunning, GpuGeneration
 
 if TYPE_CHECKING:
     from runtime_config.runtime_config import RuntimeConfig
@@ -55,6 +58,47 @@ _PATH_FIELDS = (
     "vocoder",
     *_SAFE_TENSORS_FIELDS[6:],
 )
+
+
+def _activation_fingerprint(profile: ModelProfilePayload) -> tuple[object, ...]:
+    """Stable tuple of profile fields that affect activation safety.
+
+    Captures the fields the resolver consults for base-diffusion resolution so
+    a concurrent patch between the pre-scan and the commit is detected.
+    """
+    c = profile.components
+    return (
+        profile.id,
+        profile.validation_status,
+        c.transformer,
+        c.transformer_format,
+        c.transformer_quantization,
+    )
+
+
+def _base_diffusion_resolvable(capabilities: ProfileCapabilityResult) -> bool:
+    """Phase 5 activation gate: the base diffusion model (transformer) must be
+    explicitly named by the profile AND scanner-recognized.
+
+    Catalog fallback alone is NOT accepted — ``normal_status == "supported"``
+    can be true even when ``components.transformer`` is empty (catalog
+    installed/duplicate fills in). Instead the resolved base artifact must:
+
+    - originate from the profile explicit path (``source == "profile"``), and
+    - have a scanned-and-usable status (``available`` or ``duplicate``).
+
+    This admits a wrong-folder transformer the profile explicitly points at
+    (the resolver marks it ``available`` / source ``profile``) and rejects a
+    bare catalog-installed artifact when the profile omits the path, an
+    unverified profile-only path, and any non-usable status.
+    """
+    base = next(
+        (a for a in capabilities.artifacts if a.component_role == "base_diffusion_model"),
+        None,
+    )
+    if base is None:
+        return False
+    return base.source == "profile" and base.status in ("available", "duplicate")
 
 
 def _migrate_raw_profile_dict(raw: dict[str, Any]) -> dict[str, Any]:
@@ -171,15 +215,68 @@ class ModelProfilesHandler(StateHandlerBase):
                 return
         raise HTTPError(404, "PROFILE_NOT_FOUND")
 
-    @with_state_lock
     def activate_profile(self, profile_id: str) -> ModelProfileActivateResponse:
-        profile = self._find_profile(profile_id)
-        validation = self.validate_profile(profile)
-        if not validation.valid:
-            raise HTTPError(409, "MODEL_PROFILE_INVALID")
-        self.state.active_model_profile_id = profile_id
-        self.save_profiles()
-        return ModelProfileActivateResponse(status="ok", active_model_profile_id=profile_id)
+        """Activate a profile with lock-safe, resolver-backed safety checks.
+
+        Three-phase locking so no scan/disk-IO happens under the state lock:
+
+        1. Brief lock: reject if generation running; find + deep-copy the
+           target profile; snapshot ``models_dir`` and an activation fingerprint.
+        2. Outside lock: scan ``models_dir`` and resolve capabilities; reject
+           if the required base diffusion model is not scanner-resolvable.
+        3. Re-lock: reject if generation is now running, or the profile /
+           models_dir changed between phases; otherwise commit. Activation may
+           activate a ``candidate`` profile but never promotes it to
+           ``validated`` (live validation is Phase 8).
+        """
+        # Phase 1 — brief lock to snapshot.
+        with self._lock:
+            if self._is_generation_running():
+                raise HTTPError(409, "MODEL_PROFILE_ACTIVATION_GENERATION_RUNNING")
+            profile = self._find_profile(profile_id)  # raises 404 if missing
+            profile_snapshot = profile.model_copy(deep=True)
+            fingerprint = _activation_fingerprint(profile)
+            models_dir = self.models_dir
+
+        # Phase 2 — scan + resolve outside the lock (disk IO).
+        catalog = scan_models(models_dir)
+        capabilities = resolve_profile_capabilities(profile_snapshot, catalog)
+        if not _base_diffusion_resolvable(capabilities):
+            raise HTTPError(409, "MODEL_PROFILE_REQUIRED_ARTIFACTS_MISSING")
+
+        # Phase 3 — re-lock to recheck and commit.
+        with self._lock:
+            if self._is_generation_running():
+                raise HTTPError(409, "MODEL_PROFILE_ACTIVATION_GENERATION_RUNNING")
+            current = next(
+                (p for p in self.state.model_profiles if p.id == profile_id), None
+            )
+            if (
+                current is None
+                or _activation_fingerprint(current) != fingerprint
+                or self.models_dir != models_dir
+            ):
+                raise HTTPError(409, "MODEL_PROFILE_CHANGED_DURING_ACTIVATION")
+            self.state.active_model_profile_id = profile_id
+            self.save_profiles()
+            return ModelProfileActivateResponse(status="ok", active_model_profile_id=profile_id)
+
+    def _is_generation_running(self) -> bool:
+        """True when a generation is currently running.
+
+        Reads shared state; the caller is responsible for holding the state
+        lock so the observation is consistent.
+        """
+        active = self.state.active_generation
+        if active is None:
+            return False
+        match active:
+            case GpuGeneration(state=generation) if self.state.gpu_slot is not None:
+                return isinstance(generation, GenerationRunning)
+            case ApiGeneration(state=generation):
+                return isinstance(generation, GenerationRunning)
+            case _:
+                return False
 
     @with_state_lock
     def validate_profile_by_id(self, profile_id: str) -> ModelProfileValidationResponse:

@@ -97,7 +97,9 @@ class TestRecommendations:
         override_path.write_bytes(b"fake")
         test_state.state.app_settings.adapter_paths["union_control"] = str(override_path)
 
-        models_dir_path = test_state.config.default_models_dir / "ltx-2.3-22b-ic-lora-hdr-0.9.safetensors"
+        # Adapter at canonical adapters/ subfolder (not root).
+        models_dir_path = test_state.config.default_models_dir / "adapters" / "ltx-2.3-22b-ic-lora-hdr-0.9.safetensors"
+        models_dir_path.parent.mkdir(parents=True, exist_ok=True)
         models_dir_path.write_bytes(b"fake")
 
         response = client.get("/api/models/adapters/status", headers=_ADMIN_HEADERS)

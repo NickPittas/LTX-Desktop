@@ -2,11 +2,21 @@ import { useCallback, useEffect, useState } from 'react'
 import { ApiClient } from '../lib/api-client'
 import type {
   ModelProfileActivateResponse,
+  ModelProfileActivationErrorCode,
   ModelProfilePatchPayload,
   ModelProfilePayload,
   ModelProfilesResponse,
   ModelProfileValidationResponse,
 } from '../types/model-profile'
+
+export interface ActivationError {
+  code: ModelProfileActivationErrorCode
+  message: string
+}
+
+type ActivationResult =
+  | { ok: true; data: ModelProfileActivateResponse }
+  | { ok: false; error: ActivationError }
 
 interface ModelProfilesState {
   data: ModelProfilesResponse | null
@@ -18,6 +28,21 @@ interface ModelProfilesState {
   deleteProfile: (profileId: string) => Promise<void>
   validateProfile: (profileId: string) => Promise<ModelProfileValidationResponse>
   activateProfile: (profileId: string) => Promise<ModelProfileActivateResponse>
+  /** Activates a profile and returns a structured error instead of throwing. */
+  activateProfileSafe: (profileId: string) => Promise<ActivationResult>
+}
+
+function parseActivationError(error: { code?: string; message: string }): ActivationError {
+  const code = error.code ?? 'UNKNOWN'
+  const knownCodes: ModelProfileActivationErrorCode[] = [
+    'MODEL_PROFILE_ACTIVATION_GENERATION_RUNNING',
+    'MODEL_PROFILE_REQUIRED_ARTIFACTS_MISSING',
+    'MODEL_PROFILE_CHANGED_DURING_ACTIVATION',
+  ]
+  if (knownCodes.includes(code as ModelProfileActivationErrorCode)) {
+    return { code: code as ModelProfileActivationErrorCode, message: error.message }
+  }
+  return { code: 'UNKNOWN', message: error.message }
 }
 
 function requireOk<T>(result: { ok: true; data: T } | { ok: false; error: { message: string } }): T {
@@ -74,6 +99,15 @@ export function useModelProfiles(enabled = true): ModelProfilesState {
     return activated
   }, [refresh])
 
+  const activateProfileSafe = useCallback(async (profileId: string) => {
+    const result = await ApiClient.activateModelProfile(profileId)
+    if (result.ok) {
+      await refresh()
+      return { ok: true as const, data: result.data }
+    }
+    return { ok: false as const, error: parseActivationError(result.error) }
+  }, [refresh])
+
   return {
     data,
     isLoading,
@@ -84,5 +118,6 @@ export function useModelProfiles(enabled = true): ModelProfilesState {
     deleteProfile,
     validateProfile,
     activateProfile,
+    activateProfileSafe,
   }
 }
