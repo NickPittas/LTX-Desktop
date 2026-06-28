@@ -2,6 +2,11 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import type { Asset, TimelineClip, Track } from '../../types/project-model'
 import { resolveOverlaps, migrateClip, type ToolType } from './video-editor-utils'
 
+// Movement slop (px, euclidean) before a clip mousedown is promoted from a pure
+// click/select into an actual drag. Below this, mouseup resolves as a click
+// (select-only, no commit, no undo step). Mirrors standard NLE click-vs-drag.
+const DRAG_SLOP_PX = 4
+
 interface DragPreviewPosition {
   startTime: number
   trackIndex: number
@@ -128,6 +133,13 @@ export function useTimelineDrag(params: UseTimelineDragParams) {
   const dragIndicatorRef = useRef<HTMLDivElement>(null)
   const dragTargetRef = useRef<{ startTime: number; snapActive: boolean; snapSourceTime: number | null } | null>(null)
 
+  // Click-vs-drag gate. On clip mousedown we record a "pending" drag (origin +
+  // the payload that will become draggingClip) instead of entering the drag
+  // immediately. Promotion to a real drag only happens once the pointer crosses
+  // DRAG_SLOP_PX (see beginPendingDrag). Kept in a ref (not state) because it is
+  // purely an interaction-phase flag that must NOT trigger renders.
+  const pendingDragRef = useRef<{ startX: number; startY: number; payload: DraggingClipState } | null>(null)
+
   const clearDragPreviewDom = useCallback(() => {
     if (dragPreviewRafRef.current !== null) {
       cancelAnimationFrame(dragPreviewRafRef.current)
@@ -144,6 +156,53 @@ export function useTimelineDrag(params: UseTimelineDragParams) {
     // Hide the snap/drop indicator immediately when a drag ends/cancels.
     const indicator = dragIndicatorRef.current
     if (indicator) indicator.style.display = 'none'
+  }, [])
+
+  // Click-vs-drag gate (see DRAG_SLOP_PX). Called from clip mousedown with the
+  // exact payload that would previously have been passed to setDraggingClip.
+  // Temporary window listeners (self-removing) decide intent:
+  //   - pointer stays within slop until mouseup  → CLICK: clear pending, no
+  //     commit (selection was already applied in handleClipMouseDown).
+  //   - pointer crosses slop                     → PROMOTE: setDraggingClip,
+  //     then the normal effect-attached handleMouseMove/handleMouseUp take over
+  //     (imperative RAF drag + single commit on mouseup).
+  //   - window blur mid-pending                   → CANCEL: clear pending.
+  // Because this only sets draggingClip AFTER real movement, a plain click never
+  // attaches the clip to the cursor or records an undo step.
+  const beginPendingDrag = useCallback((e: React.MouseEvent, payload: DraggingClipState) => {
+    pendingDragRef.current = { startX: e.clientX, startY: e.clientY, payload }
+    const cleanup = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      window.removeEventListener('blur', onBlur)
+    }
+    const onMove = (ev: MouseEvent) => {
+      const pending = pendingDragRef.current
+      if (!pending) { cleanup(); return }
+      const dx = ev.clientX - pending.startX
+      const dy = ev.clientY - pending.startY
+      // Below slop distance → still a click; do nothing (no drag, no preview).
+      if (dx * dx + dy * dy < DRAG_SLOP_PX * DRAG_SLOP_PX) return
+      // Threshold crossed → promote to a real drag. The effect-attached
+      // handleMouseMove/handleMouseUp now own the rest of the gesture.
+      pendingDragRef.current = null
+      cleanup()
+      setDraggingClip(pending.payload)
+    }
+    const onUp = () => {
+      // No promotion happened → pure click. Selection was already applied in
+      // mousedown; do NOT commit or move clips.
+      pendingDragRef.current = null
+      cleanup()
+    }
+    const onBlur = () => {
+      // Window lost focus mid-click (alt-tab etc.) — cancel the pending state.
+      pendingDragRef.current = null
+      cleanup()
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    window.addEventListener('blur', onBlur)
   }, [])
 
   // --- Ruler scrub: click + drag to scrub playhead ---
@@ -306,7 +365,7 @@ export function useTimelineDrag(params: UseTimelineDragParams) {
       clips.filter(c => forwardIds.has(c.id)).forEach(c => {
         originalPositions[c.id] = { startTime: c.startTime, trackIndex: c.trackIndex }
       })
-      setDraggingClip({
+      beginPendingDrag(e, {
         clipId: clip.id,
         startX: e.clientX,
         startY: e.clientY,
@@ -363,7 +422,8 @@ export function useTimelineDrag(params: UseTimelineDragParams) {
       
       // Set up dragging. Alt+drag duplication is deferred to first mouseMove
       // so that Alt+click (no drag) only changes selection without creating duplicates.
-      setDraggingClip({
+      // beginPendingDrag gates the drag on DRAG_SLOP_PX so a plain click selects only.
+      beginPendingDrag(e, {
         clipId: clip.id,
         startX: e.clientX,
         startY: e.clientY,

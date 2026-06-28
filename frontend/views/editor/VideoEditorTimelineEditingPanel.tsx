@@ -1108,6 +1108,68 @@ export function VideoEditorTimelineEditingPanel(props: VideoEditorTimelineEditin
     audioTrackHeight, videoTrackHeight, subtitleTrackHeight,
   })
 
+  // --- Bin→timeline drag drop indicator (HTML5 DnD) ---
+  // Asset cards in the bin are HTML5 `draggable` and set dataTransfer on
+  // dragStart (see VideoEditorAssetsPanel). The timeline content div below is the
+  // drop target (onDragOver/onDrop). dragover fires very frequently, so the
+  // indicator is a ref'd div positioned imperatively — NO React re-render per
+  // dragover event. It mirrors the within-timeline drag indicator's look and
+  // snaps the projected landing start to the same targets (clip edges, playhead,
+  // in/out points, zero) with the same zoom-aware threshold.
+  const binDragIndicatorRef = useRef<HTMLDivElement>(null)
+
+  const snapLandingTime = useCallback((rawTime: number): { time: number; snapped: boolean } => {
+    if (!snapEnabled) return { time: rawTime, snapped: false }
+    const threshold = Math.max(0.05, 10 / pixelsPerSecond)
+    let t = rawTime
+    let snapped = false
+    const trySnap = (target: number | null) => {
+      if (target !== null && Math.abs(t - target) < threshold) { t = target; snapped = true }
+    }
+    for (const c of clips) {
+      trySnap(c.startTime)
+      trySnap(c.startTime + c.duration)
+    }
+    trySnap(currentTime)
+    trySnap(inPoint)
+    trySnap(outPoint)
+    if (Math.abs(t) < threshold) { t = 0; snapped = true }
+    return { time: t, snapped }
+  }, [snapEnabled, pixelsPerSecond, clips, currentTime, inPoint, outPoint])
+
+  const updateBinDragIndicator = useCallback((clientX: number, contentLeft: number) => {
+    const el = binDragIndicatorRef.current
+    if (!el) return
+    const x = clientX - contentLeft
+    const rawTime = Math.max(0, x / pixelsPerSecond)
+    const { time, snapped } = snapLandingTime(rawTime)
+    el.style.left = `${time * pixelsPerSecond}px`
+    el.style.display = ''
+    if (snapped) {
+      el.style.width = '2px'
+      el.style.backgroundColor = '#fef9c3'
+      el.style.boxShadow = '0 0 6px 1px rgba(254,240,138,0.85)'
+    } else {
+      el.style.width = '1px'
+      el.style.backgroundColor = '#fde047'
+      el.style.boxShadow = 'none'
+    }
+  }, [pixelsPerSecond, snapLandingTime])
+
+  const hideBinDragIndicator = useCallback(() => {
+    const el = binDragIndicatorRef.current
+    if (el) el.style.display = 'none'
+  }, [])
+
+  // Backstop: dragend fires on the source when a DnD ends (drop OR cancel),
+  // including when the drop happens on a track (stopPropagation prevents the
+  // content onDrop). Ensures the indicator never lingers.
+  useEffect(() => {
+    const onDragEnd = () => hideBinDragIndicator()
+    window.addEventListener('dragend', onDragEnd)
+    return () => window.removeEventListener('dragend', onDragEnd)
+  }, [hideBinDragIndicator])
+
   const startSelectionLasso = useCallback((clientX: number, clientY: number, shiftKey: boolean) => {
     setSelectedSubtitleId(null)
     setEditingSubtitleId(null)
@@ -2206,9 +2268,21 @@ export function VideoEditorTimelineEditingPanel(props: VideoEditorTimelineEditin
                     if (e.dataTransfer.types.includes('assetid') || e.dataTransfer.types.includes('assetids') || e.dataTransfer.types.includes('asset') || e.dataTransfer.types.includes('timeline')) {
                       e.preventDefault()
                       e.dataTransfer.dropEffect = 'copy'
+                      // Position the drop indicator imperatively at the projected
+                      // landing start. No React render here — dragover fires very
+                      // frequently; we mutate the ref'd div's style directly.
+                      updateBinDragIndicator(e.clientX, e.currentTarget.getBoundingClientRect().left)
                     }
                   }}
+                  onDragLeave={(e) => {
+                    // Only hide when actually leaving the timeline content (not when
+                    // crossing into a child element, which also fires dragleave).
+                    const related = e.relatedTarget as Node | null
+                    if (related && e.currentTarget.contains(related)) return
+                    hideBinDragIndicator()
+                  }}
                   onDrop={(e) => {
+                    hideBinDragIndicator()
                     // Determine which track the drop landed on from the Y position
                     const container = trackContainerRef.current
                     if (!container) return
@@ -2338,6 +2412,17 @@ export function VideoEditorTimelineEditingPanel(props: VideoEditorTimelineEditin
                     />
                   )}
                   
+                  {/* Bin→timeline drop indicator: shown while dragging an asset
+                       from the bin over the timeline. Always mounted (display:none
+                       by default); shown + positioned imperatively from onDragOver
+                       (no React renders per dragover). Mirrors the within-timeline
+                       indicator's look; hidden on dragleave/drop/dragend. */}
+                  <div
+                    ref={binDragIndicatorRef}
+                    className="absolute top-0 bottom-0 pointer-events-none z-[45]"
+                    style={{ left: '0px', width: '1px', backgroundColor: '#fde047', display: 'none' }}
+                  />
+                  
                   {orderedTracks.map(({ track, realIndex, displayRow }) => (
                     <React.Fragment key={track.id}>
                       {/* Divider between video and audio sections */}
@@ -2379,6 +2464,7 @@ export function VideoEditorTimelineEditingPanel(props: VideoEditorTimelineEditin
                         style={{ height: track.type === 'subtitle' ? subtitleTrackHeight : track.kind === 'audio' ? audioTrackHeight : videoTrackHeight }}
                         onDrop={(e) => {
                           e.stopPropagation()
+                          hideBinDragIndicator()
                           if (track.type === 'subtitle') {
                             e.preventDefault()
                             return
