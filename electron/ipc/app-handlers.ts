@@ -113,6 +113,11 @@ export function registerAppHandlers(): void {
       || targetUrl.pathname.startsWith('/api/model-profiles/')
       || targetUrl.pathname === '/api/models/adapters/status'
       || targetUrl.pathname === '/api/models/adapters/recommendation'
+      || targetUrl.pathname === '/api/models/catalog'
+      || targetUrl.pathname === '/api/models/download'
+      || targetUrl.pathname === '/api/models/download/cancel'
+      || targetUrl.pathname === '/api/models/delete'
+      || targetUrl.pathname === '/api/models/check-access'
     )
     if (!allowed) return { status: 403, statusText: 'Forbidden', ok: false, body: 'Admin path not allowed' }
 

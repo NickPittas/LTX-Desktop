@@ -406,9 +406,13 @@ export class ApiClient {
 
   static getTextEncoderRecommendation = makeEndpointClient('/api/models/text-encoder-recommendation', 'get')
 
-  static startModelDownload = makeEndpointClient('/api/models/download', 'post')
+  static getModelCatalog = makeEndpointClient('/api/models/catalog', 'get', { admin: true })
 
-  static deleteModels = makeEndpointClient('/api/models/delete', 'delete')
+  static startModelDownload = makeEndpointClient('/api/models/download', 'post', { admin: true })
+
+  static cancelModelDownload = makeEndpointClient('/api/models/download/cancel', 'post', { admin: true })
+
+  static deleteModels = makeEndpointClient('/api/models/delete', 'delete', { admin: true })
 
   static getRuntimePolicy = makeEndpointClient('/api/runtime-policy', 'get')
 
@@ -440,7 +444,7 @@ export class ApiClient {
 
   static huggingFaceLogout = makeEndpointClient('/api/auth/huggingface/logout', 'post')
 
-  static checkModelAccess = makeEndpointClient('/api/models/check-access', 'post')
+  static checkModelAccess = makeEndpointClient('/api/models/check-access', 'post', { admin: true })
 
   static generateIcLora = makeEndpointClient('/api/ic-lora/generate', 'post')
 
