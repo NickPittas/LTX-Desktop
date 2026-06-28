@@ -246,8 +246,8 @@ Strike items as they ship. Update this section in the same PR that lands the wor
 - [x] Phase 1: read-only recursive scanner over `/mnt/ssd1/LTX_models` (incl. root upscaler as current-runtime canonical; subfolder files wrong-folder usable until later phases).
 - [x] Phase 1: catalog with `artifact_kind` + `component_role` + `scanner_confidence`.
 - [x] Phase 1: `model_profiles.json` schema migration (backward-compatible).
-- [ ] Phase 2: resolver unit suite (priority chain + capability matrix).
-- [ ] Phase 2: distilled LoRA load/no-load matrix green.
+- [x] Phase 2: resolver unit suite (priority chain + capability matrix).
+- [x] Phase 2: distilled LoRA load/no-load matrix green.
 - [ ] Phase 3: transactional downloader (atomic promote, per-item lock, no-delete-on-fail).
 - [ ] Phase 3: disk-space preflight + HF gated/token handling.
 - [ ] Phase 3: fake downloader (no network) wired into tests.
