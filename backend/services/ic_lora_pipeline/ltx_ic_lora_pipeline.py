@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -99,6 +100,81 @@ def _vae_padded_frame_count(num_frames: int) -> int:
     Official LTX pads to next valid 8n+1 frame count then crops output back.
     """
     return ((num_frames - 2) // 8 + 1) * 8 + 1
+
+
+# ── HDR scene-embedding prompt-encoder injection ──────────────────────
+#
+# The pinned ``ltx_pipelines.ic_lora.ICLoraPipeline.__call__`` does NOT accept
+# ``video_context``/``audio_context`` kwargs. It constructs them internally via
+# ``self.prompt_encoder([prompt], ...)``. For HDR we inject pre-computed scene
+# embeddings by temporarily replacing ``prompt_encoder`` with a wrapper that
+# returns the HDR tensors instead of encoding text. This preserves the pinned
+# pipeline's flow entirely — no unsupported kwargs are passed.
+
+
+class _HDRPromptContext:
+    """Minimal stand-in for ``PromptContext`` carrying HDR scene embeddings.
+
+    The pinned pipeline reads ``ctx.video_encoding`` and ``ctx.audio_encoding``
+    from the prompt-encoder return value (line 180 of ``ic_lora.py``).
+    """
+
+    __slots__ = ("video_encoding", "audio_encoding")
+
+    def __init__(self, video_encoding: torch.Tensor, audio_encoding: torch.Tensor | None) -> None:
+        self.video_encoding = video_encoding
+        self.audio_encoding = audio_encoding
+
+
+class _HDRPromptEncoderWrapper:
+    """Replaces ``pipeline.prompt_encoder`` for HDR inference.
+
+    When called (matching the ``PromptEncoder.__call__`` signature), returns a
+    single-element tuple of :class:`_HDRPromptContext` carrying the pre-loaded
+    scene-embedding tensors — moved/cast to the pipeline's device/dtype.
+    """
+
+    def __init__(
+        self,
+        video_context: torch.Tensor,
+        audio_context: torch.Tensor | None,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> None:
+        self._video = video_context.to(device=device, dtype=dtype)
+        self._audio = (
+            audio_context.to(device=device, dtype=dtype)
+            if audio_context is not None
+            else None
+        )
+
+    def __call__(self, prompts: list[str], **kwargs: Any) -> tuple[_HDRPromptContext, ...]:
+        return (_HDRPromptContext(self._video, self._audio),)
+
+
+@contextmanager
+def _swap_prompt_encoder_for_hdr(
+    pipeline: Any,
+    video_context: torch.Tensor,
+    audio_context: torch.Tensor | None,
+) -> Generator[None, None, None]:
+    """Temporarily replace ``pipeline.prompt_encoder`` with an HDR injector.
+
+    The original encoder is restored in the ``finally`` block so non-HDR calls
+    are unaffected even if the HDR inference raises.
+    """
+    original = pipeline.prompt_encoder
+    wrapper = _HDRPromptEncoderWrapper(
+        video_context,
+        audio_context,
+        pipeline.device,
+        getattr(pipeline, "dtype", torch.bfloat16),
+    )
+    pipeline.prompt_encoder = wrapper
+    try:
+        yield
+    finally:
+        pipeline.prompt_encoder = original
 
 
 class LTXIcLoraPipeline:
@@ -252,6 +328,8 @@ class LTXIcLoraPipeline:
         mask_path: str | None = None,
         conditioning_strength: float = 1.0,
         original_video_path: str | None = None,
+        hdr_video_context: torch.Tensor | None = None,
+        hdr_audio_context: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | Iterator[torch.Tensor], AudioOrNone]:
         import ltx_pipelines.ic_lora as ic_lora_module
         from ltx_pipelines.utils.args import ImageConditioningInput as _LtxImageInput
@@ -270,20 +348,57 @@ class LTXIcLoraPipeline:
             else None
         )
 
-        return self.pipeline(
-                prompt=prompt,
-                seed=seed,
-                height=height,
-                width=width,
-                num_frames=num_frames,
-                frame_rate=frame_rate,
-                images=[_LtxImageInput(img.path, img.frame_idx, img.strength) for img in images],
-                video_conditioning=video_conditioning,
-                tiling_config=tiling_config,
-                streaming_prefetch_count=self._streaming_prefetch_count,
-                conditioning_attention_mask=mask,
-                conditioning_attention_strength=conditioning_strength,
-            )
+        # Build inference kwargs for the pinned ICLoraPipeline.__call__.
+        # The pinned pipeline does NOT accept video_context/audio_context kwargs —
+        # it constructs them internally via self.prompt_encoder. For HDR we inject
+        # scene embeddings by temporarily swapping prompt_encoder (approach A).
+        inference_kwargs: dict[str, Any] = dict(
+            prompt=prompt,
+            seed=seed,
+            height=height,
+            width=width,
+            num_frames=num_frames,
+            frame_rate=frame_rate,
+            images=[_LtxImageInput(img.path, img.frame_idx, img.strength) for img in images],
+            video_conditioning=video_conditioning,
+            tiling_config=tiling_config,
+            streaming_prefetch_count=self._streaming_prefetch_count,
+            conditioning_attention_mask=mask,
+            conditioning_attention_strength=conditioning_strength,
+        )
+
+        if hdr_video_context is not None:
+            # HDR: swap prompt_encoder with scene-embedding injector so the
+            # pinned pipeline's __call__ receives the HDR contexts via its
+            # normal prompt_encoder flow — no unsupported kwargs passed.
+            with _swap_prompt_encoder_for_hdr(
+                self.pipeline, hdr_video_context, hdr_audio_context
+            ):
+                return self.pipeline(**inference_kwargs)
+        else:
+            return self.pipeline(**inference_kwargs)
+
+    @staticmethod
+    def _is_hdr_video_only_path(
+        hdr_video_context: torch.Tensor | None,
+        output_postprocess: Callable[[torch.Tensor], torch.Tensor] | None,
+    ) -> bool:
+        """True when the HDR video-only generation path is active.
+
+        HDR is strictly video-only. Both ``hdr_video_context`` (the HDR
+        scene-embedding path) and ``output_postprocess`` (the HDR LogC3 →
+        linear decode) are only ever supplied together by the HDR handler and
+        are absent for every other generation mode.
+
+        Even when ``hdr_audio_context=None`` is passed, the pinned
+        ``ICLoraPipeline.__call__`` may still build and return an audio
+        modality internally (its ``__call__`` constructs audio from whatever
+        its prompt-encoder yields). When this returns True, ``generate()``
+        intentionally discards any such ``audio`` before encoding so the HDR
+        output is video-only (linear scene-referred EXR frames, no audio
+        mux). Non-HDR generation is unaffected: audio flows through unchanged.
+        """
+        return hdr_video_context is not None or output_postprocess is not None
 
     @staticmethod
     def _composite_in_outpainting(
@@ -411,6 +526,9 @@ class LTXIcLoraPipeline:
         proxy_path: str | None = None,
         on_progress: Callable[[float], None] | None = None,
         input_colorspace: ColorSpace | None = None,
+        hdr_video_context: torch.Tensor | None = None,
+        hdr_audio_context: torch.Tensor | None = None,
+        output_postprocess: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ) -> None:
         tiling_config = default_tiling_config()
         result = self._run_inference(
@@ -426,8 +544,21 @@ class LTXIcLoraPipeline:
             mask_path=mask_path,
             conditioning_strength=conditioning_strength,
             original_video_path=original_video_path,
+            hdr_video_context=hdr_video_context,
+            hdr_audio_context=hdr_audio_context,
         )
         video, audio = result
+
+        # HDR is video-only: the pinned ICLoraPipeline.__call__ may still
+        # build and return an audio modality internally even when we passed
+        # hdr_audio_context=None (it constructs audio from whatever the
+        # prompt-encoder yields). When the HDR scene-context / output-postprocess
+        # path is active, intentionally discard any such audio so
+        # encode_video_output receives audio=None and writes no audio stream
+        # (linear scene-referred EXR frames only). Non-HDR generation is
+        # untouched: audio flows through unchanged.
+        if self._is_hdr_video_only_path(hdr_video_context, output_postprocess):
+            audio = None
 
         if original_video_path is not None and mask_path is not None:
             if isinstance(video, Iterator):
@@ -441,6 +572,14 @@ class LTXIcLoraPipeline:
                 num_frames=num_frames,
                 device=self.pipeline.device,
             )
+
+        # HDR output postprocess: apply LogC3 → linear decode (or any transform)
+        # to the decoded video tensor before encoding. Applied once, before
+        # the encoder, so EXR receives linear and proxy receives SDR-tonemapped.
+        if output_postprocess is not None:
+            if isinstance(video, Iterator):
+                video = torch.cat(list(video), dim=0)
+            video = output_postprocess(video)
 
         chunks = video_chunks_number(num_frames, tiling_config)
         encode_video_output(

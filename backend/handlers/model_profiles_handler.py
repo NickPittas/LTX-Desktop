@@ -19,6 +19,7 @@ from api_types import (
     ModelProfilesResponse,
 )
 from handlers.base import StateHandlerBase, with_state_lock
+from runtime_config.model_download_specs import UPSAMPLER_CP_ID, resolve_model_path
 from services.model_resolver import ProfileCapabilityResult, resolve_profile_capabilities
 from services.model_scanner import scan_models
 from state.app_state_types import ApiGeneration, GenerationRunning, GpuGeneration
@@ -118,6 +119,70 @@ def _migrate_raw_profile_dict(raw: dict[str, Any]) -> dict[str, Any]:
     return raw
 
 
+# Basename of the canonical 2x spatial upscaler artifact. Legacy/wizard-bug
+# profiles stored a stale root-level path; safe canonicalization rewrites
+# those under the effective models root when the canonical artifact exists.
+_UPSAMPLER_BASENAME = "ltx-2.3-spatial-upscaler-x2-1.0.safetensors"
+
+
+def _canonicalize_upsampler_path(path_str: str, models_dir: Path) -> str:
+    """Return a safe canonical upscaler path when a stale profile path is fixable.
+
+    Always normalizes doubled slashes / stray separators via :class:`Path`
+    (POSIX collapses consecutive slashes). Only rewrites to canonical when ALL
+    of the following hold:
+
+    - the path basename is ``ltx-2.3-spatial-upscaler-x2-1.0.safetensors``;
+    - the normalized path is *under* ``models_dir`` (arbitrary external paths
+      are never rewritten);
+    - the canonical path (``latent_upscale_models/...`` under ``models_dir``)
+      actually exists on disk;
+    - the normalized path differs from canonical (i.e. current path is stale
+      or missing — when the current path is already the canonical one, this is
+      a no-op).
+
+    Scanner is read-only: this never moves, deletes, or downloads model
+    files. It only rewrites the in-memory profile string. The caller is
+    responsible for persisting the change (load/save/patch/create).
+    """
+    normalized = str(Path(path_str))
+    try:
+        Path(normalized).relative_to(models_dir)
+    except ValueError:
+        # External path — never rewrite, just return normalized form.
+        return normalized
+
+    if Path(normalized).name != _UPSAMPLER_BASENAME:
+        return normalized
+
+    canonical_str = str(resolve_model_path(models_dir, UPSAMPLER_CP_ID))
+    if normalized == canonical_str:
+        return normalized
+
+    if not Path(canonical_str).exists():
+        # No canonical target to rewrite to; preserve current (normalized).
+        return normalized
+
+    # Current path is stale/missing or differs from a canonical artifact that
+    # exists under models_dir — safe to rewrite.
+    return canonical_str
+
+
+def _canonicalize_profile_paths(profile: ModelProfilePayload, models_dir: Path) -> bool:
+    """In-place canonicalize known stale component paths.
+
+    Returns ``True`` when any path was rewritten (caller persists).
+    """
+    changed = False
+    upsampler = profile.components.upsampler
+    if upsampler:
+        fixed = _canonicalize_upsampler_path(upsampler, models_dir)
+        if fixed != upsampler:
+            profile.components.upsampler = fixed
+            changed = True
+    return changed
+
+
 class ModelProfilesHandler(StateHandlerBase):
     """Persist, list, create, patch, delete, validate, and activate profiles."""
 
@@ -151,6 +216,14 @@ class ModelProfilesHandler(StateHandlerBase):
                 while profile.id in existing_ids:
                     profile.id = uuid.uuid4().hex
                 existing_ids.add(profile.id)
+                repaired = True
+
+        # Safe canonicalization of stale component paths under models_dir
+        # (e.g. legacy root-level upsampler when canonical exists). Persisted
+        # like the blank-ID repair above so future loads are idempotent.
+        models_dir = self.models_dir
+        for profile in profiles:
+            if _canonicalize_profile_paths(profile, models_dir):
                 repaired = True
 
         self.state.model_profiles = profiles
@@ -188,6 +261,7 @@ class ModelProfilesHandler(StateHandlerBase):
                 payload.id = uuid.uuid4().hex
         elif any(profile.id == payload.id for profile in self.state.model_profiles):
             raise HTTPError(409, "PROFILE_ID_ALREADY_EXISTS")
+        _canonicalize_profile_paths(payload, self.models_dir)
         self.state.model_profiles.append(payload)
         self.save_profiles()
         return payload
@@ -199,6 +273,7 @@ class ModelProfilesHandler(StateHandlerBase):
                 updated_payload = profile.model_dump()
                 updated_payload.update(patch.model_dump(exclude_unset=True))
                 updated = ModelProfilePayload(**updated_payload)
+                _canonicalize_profile_paths(updated, self.models_dir)
                 self.state.model_profiles[index] = updated
                 self.save_profiles()
                 return updated

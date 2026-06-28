@@ -1732,3 +1732,90 @@ class TestInpaintStreamingPrefetchCount:
         )
 
 
+class TestHdrVideoOnly:
+    """HDR is video-only: any audio returned by the pinned pipeline must be
+    suppressed before encoding. See LTXIcLoraPipeline._is_hdr_video_only_path.
+    """
+
+    @staticmethod
+    def _noop_postprocess() -> torch.Tensor:
+        # A real Callable sentinel (not a mock) used as output_postprocess.
+        def _fn(t: torch.Tensor) -> torch.Tensor:
+            return t
+
+        return _fn
+
+    @pytest.mark.parametrize(
+        ("hdr_video_context", "output_postprocess", "expected"),
+        [
+            (None, None, False),
+            (torch.zeros(1), None, True),
+            (None, "postprocess-set", True),
+            (torch.zeros(1), "postprocess-set", True),
+        ],
+        ids=["non-hdr", "hdr-context-only", "postprocess-only", "both"],
+    )
+    def test_is_hdr_video_only_path(
+        self, hdr_video_context, output_postprocess, expected
+    ):
+        """Helper flags the HDR path iff either HDR signal is present."""
+        post = self._noop_postprocess() if output_postprocess else None
+        assert (
+            LTXIcLoraPipeline._is_hdr_video_only_path(hdr_video_context, post)
+            is expected
+        )
+
+    def test_generate_suppresses_audio_on_hdr_before_encode(self):
+        """generate() (non-inpaint) discards audio on the HDR path and feeds
+        encode_video_output the (possibly-None) audio afterwards.
+
+        Regression for the HDR video-only contract: the pinned
+        ICLoraPipeline.__call__ can build/return audio internally even when
+        hdr_audio_context=None is passed, so generate() must explicitly drop it
+        when the HDR scene-context / output-postprocess path is active.
+        Non-HDR generation must keep forwarding audio untouched.
+        """
+        import os
+        pipe_path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "services/ic_lora_pipeline/ltx_ic_lora_pipeline.py",
+        )
+        with open(pipe_path) as f:
+            source = f.read()
+
+        # Isolate the non-inpaint generate() body (up to generate_inpaint).
+        start = source.find("def generate(")
+        assert start != -1, "generate() method not found"
+        end = source.find("def generate_inpaint(")
+        assert end != -1, "generate_inpaint() method not found"
+        generate_body = source[start:end]
+
+        # The HDR video-only guard must be present in generate().
+        guard_idx = generate_body.find("_is_hdr_video_only_path")
+        assert guard_idx != -1, (
+            "generate() must call _is_hdr_video_only_path(hdr_video_context, "
+            "output_postprocess) to gate the HDR video-only audio suppression"
+        )
+
+        # audio = None must exist inside generate() and be guarded by the helper.
+        drop_idx = generate_body.find("audio = None", guard_idx)
+        assert drop_idx != -1, (
+            "generate() must set audio = None after the _is_hdr_video_only_path "
+            "check so HDR output is encoded video-only"
+        )
+
+        # The encode call must come after the suppression so it sees audio=None.
+        encode_idx = generate_body.find("encode_video_output(", drop_idx)
+        assert encode_idx != -1, (
+            "generate() must call encode_video_output after the HDR audio "
+            "suppression so the encoder receives audio=None on the HDR path"
+        )
+
+        # The suppression must be conditional (under the HDR guard), never
+        # unconditional — otherwise non-HDR audio would be lost.
+        assert generate_body.count("audio = None") == 1, (
+            "generate() must set audio = None exactly once, and only under the "
+            "HDR video-only guard (preserve non-HDR audio passthrough)"
+        )
+

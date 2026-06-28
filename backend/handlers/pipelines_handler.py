@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from threading import RLock
 from typing import TYPE_CHECKING
 
@@ -12,9 +13,11 @@ from handlers.base import StateHandlerBase
 from handlers.text_handler import TextHandler
 from runtime_config.model_download_specs import (
     IMG_GEN_MODEL_CP_ID,
+    UPSAMPLER_CP_ID,
     get_downloaded_ltx_model_id,
     get_existing_cp_path,
     get_ltx_model_spec,
+    resolve_model_path,
 )
 from runtime_config.runtime_policy import streaming_prefetch_count_for_mode
 from services.ltx_components import ResolvedLtxComponents, checkpoint_path_arg, resolve_components
@@ -143,6 +146,15 @@ class PipelinesHandler(StateHandlerBase):
         if self._runtime_device == "mps":
             logger.info("Skipping torch.compile() for %s - not supported on MPS", state.pipeline.pipeline_kind)
             return state
+        # GGUF transformers use lazy per-forward dequant that torch.compile
+        # cannot trace. Skip silently (info, no traceback) instead of calling
+        # compile_transformer() and relying on its RuntimeError guard.
+        if not state.pipeline.supports_torch_compile():
+            logger.info(
+                "Skipping torch.compile() for %s - unsupported transformer format",
+                state.pipeline.pipeline_kind,
+            )
+            return state
 
         try:
             state.pipeline.compile_transformer()
@@ -150,6 +162,27 @@ class PipelinesHandler(StateHandlerBase):
         except Exception as exc:
             logger.warning("Failed to compile transformer: %s", exc, exc_info=True)
         return state
+
+    def _resolve_profile_upsampler_path(self) -> str:
+        """Resolve a usable upscaler path for an active profile.
+
+        Prefers the profile's explicit ``components.upsampler`` path when it
+        exists on disk. If that explicit path is stale/missing AND the
+        canonical upscaler (``latent_upscale_models/ltx-2.3-spatial-upscaler-x2-1.0.safetensors``
+        under the effective models root) exists, returns the canonical path.
+        Otherwise returns an empty string so callers can decide how to surface
+        the missing artifact (e.g. fast video fails fast with HTTP 409).
+        """
+        components = self._resolve_active_components()
+        if components is None:
+            return ""
+        explicit = components.upsampler_path or ""
+        if explicit and Path(explicit).exists():
+            return explicit
+        canonical = resolve_model_path(self.models_dir, UPSAMPLER_CP_ID)
+        if canonical.exists():
+            return str(canonical)
+        return ""
 
     def _resolve_checkpoint_paths(self):
         """Return (checkpoint_path, gemma_root, upsampler_path, cache_key)."""
@@ -159,7 +192,7 @@ class PipelinesHandler(StateHandlerBase):
             return (
                 checkpoint_path_arg(components),
                 components.gemma_root or gemma_root,
-                components.upsampler_path or "",
+                self._resolve_profile_upsampler_path(),
                 components.cache_key,
             )
         model_id = self._require_downloaded_ltx_model_id()
@@ -173,6 +206,21 @@ class PipelinesHandler(StateHandlerBase):
 
     def _create_video_pipeline(self, model_type: VideoPipelineModelType) -> VideoPipelineState:
         checkpoint_path, gemma_root, upsampler_path, cache_key = self._resolve_checkpoint_paths()
+        # Fast video pipeline always invokes the spatial upscaler during
+        # inference. Fail early with an actionable error instead of letting a
+        # FileNotFoundError surface deep inside the diffusers pipeline.
+        if not upsampler_path:
+            canonical = resolve_model_path(self.models_dir, UPSAMPLER_CP_ID)
+            raise HTTPError(
+                409,
+                (
+                    "Spatial upscaler is required for fast video generation but was not found. "
+                    "The active profile's upsampler path is missing or stale, and no canonical "
+                    f"upscaler is installed at {canonical}. "
+                    "Install 'ltx-2.3-spatial-upscaler-x2-1.0' or update the profile's upsampler path."
+                ),
+                code="UPSCALER_REQUIRED",
+            )
         components = self._resolve_active_components()
         transformer_format = components.transformer_format if components is not None else "safetensors"
 

@@ -688,3 +688,139 @@ class TestProfileActivationSafety:
         assert response.status_code == 409
         assert response.json()["code"] == "MODEL_PROFILE_REQUIRED_ARTIFACTS_MISSING"
         assert test_state.state.active_model_profile_id is None
+
+
+class TestUpsamplerPathCanonicalization:
+    """Phase 1: safe canonicalization of stale upsampler component paths.
+
+    Legacy/wizard-bug profiles stored a stale root-level upsampler path (often
+    with a doubled separator). On load the handler must rewrite it to the
+    canonical ``latent_upscale_models/...`` location *when* the canonical
+    artifact exists under the effective models root, and persist the fix.
+    """
+
+    def _write_profiles(self, handler, data: dict) -> Path:
+        path: Path = handler._profiles_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data), encoding="utf-8")
+        return path
+
+    def _profile_with_upsampler(self, profile_id: str, upsampler_path: str) -> dict:
+        return {
+            "id": profile_id,
+            "name": "Stale Upsampler",
+            "family": "ltx-2.3",
+            "source": "official",
+            "components": {
+                "upsampler": upsampler_path,
+                "text_encoder_format": "api",
+            },
+            "capabilities": ["t2v"],
+            "notes": "",
+            "created_at": "",
+            "updated_at": "",
+        }
+
+    def test_load_canonicalizes_stale_upsampler_when_canonical_exists(self, test_state):
+        """Stale root-level path with doubled separator is rewritten on load
+        when the canonical artifact exists, and the fix is persisted."""
+        models_dir: Path = test_state.config.default_models_dir
+        canonical = resolve_model_path(models_dir, "ltx-2.3-spatial-upscaler-x2-1.0")
+        canonical.parent.mkdir(parents=True, exist_ok=True)
+        canonical.write_bytes(b"upsampler")
+
+        # Stale root-level path with a doubled separator (the actual session
+        # failure signature). The root-level file does NOT exist on disk.
+        stale = str(models_dir) + "//ltx-2.3-spatial-upscaler-x2-1.0.safetensors"
+        assert not Path(stale).exists()
+
+        self._write_profiles(
+            test_state.model_profiles,
+            {
+                "active_model_profile_id": "stale-ups",
+                "profiles": [self._profile_with_upsampler("stale-ups", stale)],
+            },
+        )
+
+        test_state.model_profiles.load_profiles()
+
+        assert len(test_state.state.model_profiles) == 1
+        profile = test_state.state.model_profiles[0]
+        assert profile.components.upsampler == str(canonical)
+
+        # Persisted — file on disk now contains the canonical path.
+        raw = json.loads(test_state.model_profiles._profiles_path.read_text())
+        assert raw["profiles"][0]["components"]["upsampler"] == str(canonical)
+
+    def test_load_preserves_existing_when_canonical_missing(self, test_state):
+        """When the canonical artifact is missing and the explicit path is
+        present, the explicit path is preserved (only POSIX normalization
+        applied)."""
+        models_dir: Path = test_state.config.default_models_dir
+        explicit = models_dir / "ltx-2.3-spatial-upscaler-x2-1.0.safetensors"
+        explicit.write_bytes(b"upsampler")
+
+        # Canonical must NOT exist for this test.
+        canonical = resolve_model_path(models_dir, "ltx-2.3-spatial-upscaler-x2-1.0")
+        assert not canonical.exists()
+
+        self._write_profiles(
+            test_state.model_profiles,
+            {
+                "active_model_profile_id": None,
+                "profiles": [self._profile_with_upsampler("preserve", str(explicit))],
+            },
+        )
+
+        test_state.model_profiles.load_profiles()
+
+        profile = test_state.state.model_profiles[0]
+        assert profile.components.upsampler == str(explicit)
+
+    def test_load_does_not_rewrite_external_path(self, test_state):
+        """Paths outside models_dir are never canonicalized (only POSIX
+        normalization applied)."""
+        models_dir: Path = test_state.config.default_models_dir
+        canonical = resolve_model_path(models_dir, "ltx-2.3-spatial-upscaler-x2-1.0")
+        canonical.parent.mkdir(parents=True, exist_ok=True)
+        canonical.write_bytes(b"upsampler")
+
+        # External path that happens to share the basename — must NOT be
+        # rewritten to canonical because it lives outside models_dir.
+        external = Path("/tmp/ltx-2.3-spatial-upscaler-x2-1.0.safetensors")
+        external.write_bytes(b"other")
+
+        self._write_profiles(
+            test_state.model_profiles,
+            {
+                "active_model_profile_id": None,
+                "profiles": [self._profile_with_upsampler("external", str(external))],
+            },
+        )
+
+        test_state.model_profiles.load_profiles()
+
+        profile = test_state.state.model_profiles[0]
+        assert profile.components.upsampler == str(external)
+
+    def test_create_canonicalizes_stale_upsampler(self, client, test_state):
+        """POST /api/model-profiles canonicalizes a stale upsampler path
+        before persisting."""
+        models_dir: Path = test_state.config.default_models_dir
+        canonical = resolve_model_path(models_dir, "ltx-2.3-spatial-upscaler-x2-1.0")
+        canonical.parent.mkdir(parents=True, exist_ok=True)
+        canonical.write_bytes(b"upsampler")
+
+        stale = str(models_dir) + "//ltx-2.3-spatial-upscaler-x2-1.0.safetensors"
+        payload = _make_official_payload(
+            profile_id="create-canonical",
+            components={
+                "transformer": "/tmp/does-not-matter.safetensors",
+                "upsampler": stale,
+                "text_encoder_format": "api",
+            },
+        )
+
+        response = client.post("/api/model-profiles", json=payload, headers=_ADMIN_HEADERS)
+        assert response.status_code == 200
+        assert response.json()["components"]["upsampler"] == str(canonical)

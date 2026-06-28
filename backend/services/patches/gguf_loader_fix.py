@@ -426,12 +426,15 @@ def _install_llama_cpp_prompt_encoder_call_patch() -> None:
     """Patch ``PromptEncoder.__call__`` to run llama.cpp before PyTorch Gemma.
 
     When ``enhance_first_prompt=True`` and GGUF is configured:
-      1. Run llama.cpp enhancement standalone.
+      1. Run llama.cpp text enhancement standalone (regardless of whether an
+         ``enhance_prompt_image`` was supplied).
       2. Free llama.cpp GPU memory.
-      3. Call original ``__call__`` with ``enhance_first_prompt=False`` so the
-         dense PyTorch ``GemmaTextEncoder._enhance`` never builds.
+      3. Call original ``__call__`` with ``enhance_first_prompt=False`` and
+         ``enhance_prompt_image=None`` so the dense PyTorch
+         ``GemmaTextEncoder._enhance`` never builds and image-conditioned
+         enhancement cannot hit the GGUF-stripped Gemma vision tower.
 
-    Non-GGUF and image-based enhancement pass through unchanged.
+    Non-GGUF calls pass through unchanged.
     """
     from ltx_pipelines.utils import blocks
     from ltx_pipelines.utils.helpers import clean_response
@@ -451,8 +454,11 @@ def _install_llama_cpp_prompt_encoder_call_patch() -> None:
         streaming_prefetch_count: int | None = None,
     ) -> list[object]:
         gguf_model_path = getattr(self, "_ltx_desktop_llama_cpp_model_path", None)
-        if enhance_first_prompt and gguf_model_path is not None and enhance_prompt_image is None:
-            # Standalone llama.cpp enhancement before _text_encoder_ctx builds PyTorch Gemma.
+        if enhance_first_prompt and gguf_model_path is not None:
+            # Standalone llama.cpp text enhancement before _text_encoder_ctx
+            # builds PyTorch Gemma. We intentionally drop enhance_prompt_image
+            # so upstream image-conditioned enhancement never runs against the
+            # GGUF-stripped (Identity) Gemma vision tower.
             prompts = list(prompts)
             prompts[0] = clean_response(
                 _enhance_prompt_with_llama_cpp(
@@ -462,7 +468,8 @@ def _install_llama_cpp_prompt_encoder_call_patch() -> None:
                     seed=enhance_prompt_seed,
                 )
             )
-            # Enter _text_encoder_ctx with enhance=False to prevent PyTorch enhance.
+            # Enter _text_encoder_ctx with enhance=False / image=None to prevent
+            # PyTorch Gemma enhance (text and image-conditioned).
             return original_call(
                 self,
                 prompts,
@@ -837,7 +844,6 @@ def install_gguf_prompt_encoder_patch() -> None:
         GEMMA_MODEL_OPS,
         EmbeddingsProcessorConfigurator,
         GemmaTextEncoderConfigurator,
-        module_ops_from_gemma_root,
     )
     from ltx_pipelines.utils import blocks
 
@@ -869,7 +875,7 @@ def install_gguf_prompt_encoder_patch() -> None:
         logger.info("PromptEncoder GGUF init gemma=%s checkpoint=%s", gguf_path, checkpoint_path)
         self._dtype = dtype
         self._device = device
-        module_ops = module_ops_from_gemma_root(_resolve_gemma_tokenizer_root(gemma_root))
+        module_ops = _module_ops_from_gemma_root_slow_processor(_resolve_gemma_tokenizer_root(gemma_root))
         registry_obj = registry or DummyRegistry()
         self._text_encoder_builder = Builder(
             model_path=str(gguf_path),
@@ -1270,6 +1276,53 @@ def _resolve_gemma_tokenizer_root(gemma_root: str) -> str:
     if root.is_file() and root.suffix.lower() == ".gguf":
         return str(root.parent)
     return gemma_root
+
+
+def _module_ops_from_gemma_root_slow_processor(gemma_root: str) -> tuple[Any, ...]:
+    """Tokenizer/processor ModuleOps mirroring upstream but with ``use_fast=False``.
+
+    Upstream ``ltx_core.text_encoders.gemma.module_ops_from_gemma_root`` calls
+    ``AutoImageProcessor.from_pretrained(processor_root, local_files_only=True)``
+    without an explicit ``use_fast``, so transformers emits a slow-processor
+    fallback warning when the Gemma image processor has no fast implementation.
+    We preserve the existing slow-processor behavior but pass ``use_fast=False``
+    explicitly to opt in (silencing the warning). Tokenizer/processor semantics
+    are otherwise identical to upstream.
+    """
+    from transformers import AutoImageProcessor, Gemma3Processor
+
+    from ltx_core.loader.module_ops import ModuleOps
+    from ltx_core.text_encoders.gemma.encoders.base_encoder import GemmaTextEncoder
+    from ltx_core.text_encoders.gemma.tokenizer import LTXVGemmaTokenizer
+    from ltx_core.utils import find_matching_file
+
+    tokenizer_root = str(find_matching_file(gemma_root, "tokenizer.model").parent)
+    processor_root = str(find_matching_file(gemma_root, "preprocessor_config.json").parent)
+
+    def load_tokenizer(module: GemmaTextEncoder) -> GemmaTextEncoder:
+        module.tokenizer = LTXVGemmaTokenizer(tokenizer_root, 1024)
+        return module
+
+    def load_processor(module: GemmaTextEncoder) -> GemmaTextEncoder:
+        image_processor = AutoImageProcessor.from_pretrained(
+            processor_root, local_files_only=True, use_fast=False
+        )
+        if not module.tokenizer:
+            raise ValueError("Tokenizer model operation must be performed before processor model operation")
+        module.processor = Gemma3Processor(image_processor=image_processor, tokenizer=module.tokenizer.tokenizer)
+        return module
+
+    tokenizer_load_ops = ModuleOps(
+        "TokenizerLoad",
+        matcher=lambda module: isinstance(module, GemmaTextEncoder) and module.tokenizer is None,
+        mutator=load_tokenizer,
+    )
+    processor_load_ops = ModuleOps(
+        "ProcessorLoad",
+        matcher=lambda module: isinstance(module, GemmaTextEncoder) and module.processor is None,
+        mutator=load_processor,
+    )
+    return (tokenizer_load_ops, processor_load_ops)
 
 
 def _coerce_config_text(value: Any) -> str | None:

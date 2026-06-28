@@ -22,6 +22,19 @@ from pathlib import Path
 
 # Note: expandable_segments is not supported on all platforms
 
+# Silence the upstream pynvml deprecation FutureWarning emitted at torch import
+# time ("The pynvml package is deprecated..."). Targeted: only this message +
+# category, scoped before torch is imported so the first import is silent.
+# The ``.*`` prefix is required because ``filterwarnings`` anchors the regex at
+# the start of the message (which begins with "The pynvml ...").
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message=r".*pynvml package is deprecated",
+    category=FutureWarning,
+)
+
 import torch
 
 import services.patches.record_stream_fix as _record_stream_fix  # pyright: ignore[reportUnusedImport]  # Remove once ltx-core includes the fix

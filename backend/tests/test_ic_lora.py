@@ -920,26 +920,181 @@ class TestIcLoraWorkflowGating:
         assert_http_error(response, status_code=400, code="HTTP_400",
                           message="LipDub requires audio conditioning and lip-sync pipeline which is not wired yet")
 
-    def test_hdr_returns_400_unavailable(self, client, test_state, create_fake_model_files, create_fake_ic_lora_files):
+    def test_hdr_generates_with_proper_artifacts(self, client, test_state, create_fake_model_files):
+        """HDR adapter dispatches to the HDR path and succeeds when artifacts are present."""
         create_fake_model_files()
-        create_fake_ic_lora_files()
         test_state.state.app_settings.use_local_text_encoder = True
 
-        video_path = test_state.config.outputs_dir / "test_video.mp4"
-        video_path.write_bytes(b"\x00" * 100)
-        test_state.video_processor.register_video(str(video_path), FakeCapture(frames=["frame-a", "frame-b"]))
+        # Create HDR LoRA at canonical adapters/ path.
+        from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
+        models_dir = test_state.config.default_models_dir
+        adapters_dir = models_dir / "adapters"
+        adapters_dir.mkdir(parents=True, exist_ok=True)
+        hdr_lora = adapters_dir / OFFICIAL_LTX23_ADAPTERS["hdr"].filename
+        hdr_lora.write_bytes(b"\x00" * 1024)
+
+        # Create synthetic scene embeddings (valid safetensors with both
+        # video_context AND audio_context). HDR is video-only, so even when an
+        # audio_context is present it must NOT reach the pipeline.
+        from safetensors.torch import save_file
+        import torch as _torch
+        scene_emb = adapters_dir / OFFICIAL_LTX23_ADAPTERS["hdr_scene_embeddings"].filename
+        save_file(
+            {
+                "video_context": _torch.zeros(1, 768, dtype=_torch.float32),
+                "audio_context": _torch.zeros(1, 768, dtype=_torch.float32),
+            },
+            str(scene_emb),
+        )
 
         response = client.post(
             "/api/ic-lora/generate",
             json={
-                "video_path": str(video_path),
-                "prompt": "test prompt",
+                "prompt": "HDR test",
                 "images": [],
                 "adapter_id": "hdr",
+                "num_frames": 9,
+                "height": 512,
+                "width": 512,
+                "frame_rate": 24,
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "complete"
+        assert "_exr" in data["video_path"]  # EXR output forced
+        # SDR proxy deferred (tonemap not wired); proxy_path is None.
+        assert data["proxy_path"] is None
+
+        # Verify HDR-specific parameters reached the pipeline.
+        from tests.fakes.services import FakeIcLoraPipeline
+        singleton = FakeIcLoraPipeline._singleton
+        assert singleton is not None
+        assert len(singleton.generate_calls) == 1
+        call = singleton.generate_calls[0]
+        # Scene embeddings threaded into inference path.
+        assert "hdr_video_context" in call
+        assert call["hdr_video_context"] is not None
+        # HDR is video-only: audio_context must be dropped even though the
+        # synthetic embeddings file above contains one.
+        assert call.get("hdr_audio_context") is None
+        # LogC3 → linear postprocess applied before encode.
+        assert "output_postprocess" in call
+        assert call["output_postprocess"] is not None
+        # Linear EXR passthrough (no EOTF).
+        assert call.get("input_colorspace") is not None
+        assert call["input_colorspace"].transfer == "linear"
+
+    def test_hdr_missing_scene_embeddings_returns_400(
+        self, client, test_state, create_fake_model_files
+    ):
+        """HDR without scene embeddings returns a clear 400 error."""
+        create_fake_model_files()
+        test_state.state.app_settings.use_local_text_encoder = True
+
+        # Create HDR LoRA but NOT scene embeddings.
+        from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
+        models_dir = test_state.config.default_models_dir
+        adapters_dir = models_dir / "adapters"
+        adapters_dir.mkdir(parents=True, exist_ok=True)
+        hdr_lora = adapters_dir / OFFICIAL_LTX23_ADAPTERS["hdr"].filename
+        hdr_lora.write_bytes(b"\x00" * 1024)
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "prompt": "HDR test",
+                "images": [],
+                "adapter_id": "hdr",
+                "num_frames": 9,
+                "height": 512,
+                "width": 512,
+                "frame_rate": 24,
+            },
+        )
+        assert_http_error(
+            response, status_code=400, code="HTTP_400",
+            message="HDR scene embeddings not found. Configure hdr_scene_embeddings adapter path or install the file.",
+        )
+
+    def test_hdr_requires_prompt(self, client, test_state, create_fake_model_files):
+        """HDR adapter requires a non-blank prompt."""
+        create_fake_model_files()
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "prompt": "",
+                "images": [],
+                "adapter_id": "hdr",
+                "num_frames": 9,
+                "height": 512,
+                "width": 512,
+                "frame_rate": 24,
             },
         )
         assert_http_error(response, status_code=400, code="HTTP_400",
-                          message="HDR workflow requires HDR scene embeddings and tone-mapping pipeline which is not wired yet")
+                          message="Prompt is required for HDR adapter")
+
+    def test_hdr_works_with_kijai_gguf_profile(self, client, test_state, create_fake_model_files):
+        """HDR must work with Kijai/GGUF profiles, not only official checkpoints.
+
+        Verifies structurally that HDR reuses the same profile-aware pipeline
+        loading (load_ic_lora → ResolvedLtxComponents) as non-HDR IC-LoRA,
+        not a separate official-only path.
+        """
+        create_fake_model_files()
+
+        # Create a profile with a custom (Kijai-style) transformer path.
+        from api_types import ModelComponentPaths, ModelProfilePayload
+        from pathlib import Path as _Path
+        models_dir = test_state.config.default_models_dir
+        kijai_transformer = models_dir / "diffusion_models" / "ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v3.safetensors"
+        kijai_transformer.parent.mkdir(parents=True, exist_ok=True)
+        kijai_transformer.write_bytes(b"\x00" * 1024)
+
+        profile = ModelProfilePayload(
+            id="kijai-hdr-profile",
+            name="Kijai HDR Profile",
+            source="kijai",
+            components=ModelComponentPaths(
+                transformer=str(kijai_transformer),
+                transformer_format="official_safetensors",
+                transformer_quantization="fp8_input_scaled",
+                upsampler=str(models_dir / "latent_upscale_models" / "ltx-2.3-spatial-upscaler-x2-1.0.safetensors"),
+                text_encoder_format="api",
+            ),
+            capabilities=["t2v"],
+        )
+        test_state.state.model_profiles = [profile]
+        test_state.state.active_model_profile_id = profile.id
+
+        # Create HDR LoRA + scene embeddings at adapters/.
+        from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
+        from safetensors.torch import save_file
+        import torch as _torch
+        adapters_dir = models_dir / "adapters"
+        adapters_dir.mkdir(parents=True, exist_ok=True)
+        (adapters_dir / OFFICIAL_LTX23_ADAPTERS["hdr"].filename).write_bytes(b"\x00" * 1024)
+        save_file(
+            {"video_context": _torch.zeros(1, 768, dtype=_torch.float32)},
+            str(adapters_dir / OFFICIAL_LTX23_ADAPTERS["hdr_scene_embeddings"].filename),
+        )
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "prompt": "Kijai HDR test",
+                "images": [],
+                "adapter_id": "hdr",
+                "num_frames": 9,
+                "height": 512,
+                "width": 512,
+                "frame_rate": 24,
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["status"] == "complete"
 
     def test_hdr_scene_embeddings_returns_400_unavailable(self, client, test_state, create_fake_model_files, create_fake_ic_lora_files):
         """hdr_scene_embeddings is a support asset, not a standalone adapter."""
@@ -995,7 +1150,7 @@ class TestIcLoraEmptyPromptWorkflow:
         # Also create the in_outpainting adapter file (not included in default IC-LoRA set)
         from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
         adapter = OFFICIAL_LTX23_ADAPTERS["in_outpainting"]
-        adapter_path = test_state.config.default_models_dir / adapter.filename
+        adapter_path = test_state.config.default_models_dir / "adapters" / adapter.filename
         adapter_path.parent.mkdir(parents=True, exist_ok=True)
         adapter_path.write_bytes(b"\x00" * 1024)
 
@@ -1029,7 +1184,7 @@ class TestIcLoraEmptyPromptWorkflow:
         create_fake_ic_lora_files()
         from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
         adapter = OFFICIAL_LTX23_ADAPTERS["in_outpainting"]
-        adapter_path = test_state.config.default_models_dir / adapter.filename
+        adapter_path = test_state.config.default_models_dir / "adapters" / adapter.filename
         adapter_path.parent.mkdir(parents=True, exist_ok=True)
         adapter_path.write_bytes(b"\x00" * 1024)
 
@@ -1068,7 +1223,7 @@ class TestIcLoraEmptyPromptWorkflow:
         create_fake_ic_lora_files()
         from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
         adapter = OFFICIAL_LTX23_ADAPTERS["in_outpainting"]
-        adapter_path = test_state.config.default_models_dir / adapter.filename
+        adapter_path = test_state.config.default_models_dir / "adapters" / adapter.filename
         adapter_path.parent.mkdir(parents=True, exist_ok=True)
         adapter_path.write_bytes(b"\x00" * 1024)
 
@@ -1105,7 +1260,7 @@ class TestIcLoraEmptyPromptWorkflow:
         create_fake_ic_lora_files()
         from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
         adapter = OFFICIAL_LTX23_ADAPTERS["in_outpainting"]
-        adapter_path = test_state.config.default_models_dir / adapter.filename
+        adapter_path = test_state.config.default_models_dir / "adapters" / adapter.filename
         adapter_path.parent.mkdir(parents=True, exist_ok=True)
         adapter_path.write_bytes(b"\x00" * 1024)
 
@@ -1143,7 +1298,7 @@ class TestIcLoraEmptyPromptWorkflow:
         create_fake_ic_lora_files()
         from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
         adapter = OFFICIAL_LTX23_ADAPTERS["in_outpainting"]
-        adapter_path = test_state.config.default_models_dir / adapter.filename
+        adapter_path = test_state.config.default_models_dir / "adapters" / adapter.filename
         adapter_path.parent.mkdir(parents=True, exist_ok=True)
         adapter_path.write_bytes(b"\x00" * 1024)
 
@@ -1241,7 +1396,7 @@ class TestIcLoraEmptyPromptWorkflow:
         # Also create the in_outpainting adapter file
         from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
         adapter = OFFICIAL_LTX23_ADAPTERS["in_outpainting"]
-        adapter_path = test_state.config.default_models_dir / adapter.filename
+        adapter_path = test_state.config.default_models_dir / "adapters" / adapter.filename
         adapter_path.parent.mkdir(parents=True, exist_ok=True)
         adapter_path.write_bytes(b"\x00" * 1024)
 
@@ -1320,7 +1475,7 @@ class TestIcLoraLaplacianBlendGrow:
         create_fake_model_files()
         from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
         adapter = OFFICIAL_LTX23_ADAPTERS["in_outpainting"]
-        adapter_path = test_state.config.default_models_dir / adapter.filename
+        adapter_path = test_state.config.default_models_dir / "adapters" / adapter.filename
         adapter_path.parent.mkdir(parents=True, exist_ok=True)
         adapter_path.write_bytes(b"\x00" * 1024)
 
@@ -1360,7 +1515,7 @@ class TestIcLoraLaplacianBlendGrow:
         create_fake_model_files()
         from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
         adapter = OFFICIAL_LTX23_ADAPTERS["in_outpainting"]
-        adapter_path = test_state.config.default_models_dir / adapter.filename
+        adapter_path = test_state.config.default_models_dir / "adapters" / adapter.filename
         adapter_path.parent.mkdir(parents=True, exist_ok=True)
         adapter_path.write_bytes(b"\x00" * 1024)
 
@@ -1399,7 +1554,7 @@ class TestIcLoraLaplacianBlendGrow:
         create_fake_model_files()
         from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
         adapter = OFFICIAL_LTX23_ADAPTERS["in_outpainting"]
-        adapter_path = test_state.config.default_models_dir / adapter.filename
+        adapter_path = test_state.config.default_models_dir / "adapters" / adapter.filename
         adapter_path.parent.mkdir(parents=True, exist_ok=True)
         adapter_path.write_bytes(b"\x00" * 1024)
 
@@ -1440,7 +1595,7 @@ class TestIcLoraLaplacianBlendGrow:
         create_fake_model_files()
         from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
         adapter = OFFICIAL_LTX23_ADAPTERS["in_outpainting"]
-        adapter_path = test_state.config.default_models_dir / adapter.filename
+        adapter_path = test_state.config.default_models_dir / "adapters" / adapter.filename
         adapter_path.parent.mkdir(parents=True, exist_ok=True)
         adapter_path.write_bytes(b"\x00" * 1024)
 
@@ -1487,7 +1642,7 @@ class TestIcLoraResolution:
         create_fake_model_files()
         from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
         adapter = OFFICIAL_LTX23_ADAPTERS["in_outpainting"]
-        adapter_path = test_state.config.default_models_dir / adapter.filename
+        adapter_path = test_state.config.default_models_dir / "adapters" / adapter.filename
         adapter_path.parent.mkdir(parents=True, exist_ok=True)
         adapter_path.write_bytes(b"\x00" * 1024)
 

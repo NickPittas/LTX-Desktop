@@ -461,6 +461,7 @@ class _FakeVideoPipelineBase:
         self.raise_on_generate: Exception | None = None
         self.last_checkpoint_path: CheckpointPath | None = None
         self.last_gemma_root: str | None = None
+        self.last_upsampler_path: str | None = None
         self.last_transformer_format: str | None = None
         self.last_streaming_prefetch_count: int | None = None
 
@@ -482,6 +483,12 @@ class _FakeVideoPipelineBase:
 
     def compile_transformer(self) -> None:
         self.compile_calls += 1
+
+    def supports_torch_compile(self) -> bool:
+        # GGUF transformers are not torch.compile-able (lazy per-forward dequant).
+        # Mirrors LTXFastVideoPipeline.supports_torch_compile so the handler can
+        # skip compile silently for GGUF profiles without raising.
+        return self.last_transformer_format != "gguf"
 
 
 class FakeFastVideoPipeline(_FakeVideoPipelineBase):
@@ -508,6 +515,7 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
             raise RuntimeError("FakeFastVideoPipeline singleton is not bound")
         pipeline.last_checkpoint_path = checkpoint_path
         pipeline.last_gemma_root = gemma_root
+        pipeline.last_upsampler_path = upsampler_path
         pipeline.last_components = components
         pipeline.last_transformer_format = transformer_format
         # ponytail: match real __init__ guard — split safetensors needs streaming

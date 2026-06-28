@@ -768,3 +768,68 @@ def test_prores_ignores_input_colorspace(tmp_path: Path) -> None:
     vs = _ffprobe_video_stream(str(primary))
     assert vs.get("color_space") == "bt709", "ProRes must stay Rec.709 (CM-1c deferral)"
     assert vs.get("color_transfer") == "bt709"
+
+
+def test_exr_linear_passthrough_preserves_hdr_values(tmp_path: Path) -> None:
+    """HDR linear input (values > 1.0) must be preserved in EXR — NOT clamped.
+
+    Regression for the clamp-before-linear-branch bug that clipped HDR values.
+    With LINEAR_REC709 input_colorspace, the encoder writes values as-is without
+    clamp or EOTF.
+    """
+    import OpenEXR
+
+    from services.color_management import LINEAR_REC709
+
+    encoder = MediaEncoderImpl()
+    primary = tmp_path / "hdr_linear_exr"
+
+    # Float tensor with HDR values > 1.0 (linear scene-referred).
+    hdr_video = torch.full((1, 8, 8, 3), 2.5, dtype=torch.float32)  # 2.5 >> 1.0
+
+    encoder.encode(
+        video=hdr_video, audio=None, fps=24, primary_path=str(primary),
+        output_format=OutputFormat.EXR_ZIP_FLOAT, proxy_path=None,
+        video_chunks_number=1, input_colorspace=LINEAR_REC709,
+    )
+
+    frames = sorted(primary.glob("frame_*.exr"))
+    assert len(frames) == 1
+    f = OpenEXR.File(str(frames[0]), separate_channels=True)
+    ch = f.channels()
+    r_pixels = ch["R"].pixels
+    # HDR value 2.5 must be preserved (> 1.0), NOT clamped to 1.0.
+    assert r_pixels.max() > 1.5, f"HDR value clipped: max={r_pixels.max()}"
+    np.testing.assert_allclose(r_pixels[0, 0], 2.5, atol=0.01)
+
+
+def test_exr_default_path_still_clamps_and_applies_eotf(tmp_path: Path) -> None:
+    """Non-HDR default EXR (input_colorspace=None) must STILL clamp + apply bt709_eotf.
+
+    Regression: the clamp was moved inside the non-linear branches to fix HDR
+    clipping. This verifies the default path still clamps to [0, 1] and applies
+    BT.709 EOTF (not identity).
+    """
+    import OpenEXR
+
+    encoder = MediaEncoderImpl()
+    primary = tmp_path / "default_exr"
+
+    # uint8 gray=0.5 (128/255 ≈ 0.502 in [0,1]).
+    video = _make_gray_frames(1, 8, 8, gray=0.5)
+
+    encoder.encode(
+        video=video, audio=None, fps=24, primary_path=str(primary),
+        output_format=OutputFormat.EXR_ZIP_FLOAT, proxy_path=None,
+        video_chunks_number=1,  # no input_colorspace → default bt709_eotf path
+    )
+
+    frames = sorted(primary.glob("frame_*.exr"))
+    assert len(frames) == 1
+    f = OpenEXR.File(str(frames[0]), separate_channels=True)
+    ch = f.channels()
+    r_pixels = ch["R"].pixels
+    # bt709_eotf(0.502) ≈ 0.255 — NOT identity (would be 0.502 if no EOTF).
+    assert abs(r_pixels[0, 0] - 0.502) > 0.1, "EOTF not applied — value too close to input"
+    # All values ≤ 1.0 (clamped).
+    assert r_pixels.max() <= 1.0 + 1e-6

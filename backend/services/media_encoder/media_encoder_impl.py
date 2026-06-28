@@ -499,17 +499,24 @@ class MediaEncoderImpl:
         for chunk in chunk_iter:
             is_uint8 = chunk.dtype == torch.uint8
             chunkf = (chunk.float() / 255.0) if is_uint8 else chunk.float()
-            chunkf = chunkf.clamp(0.0, 1.0)
             if _transform is not None:
                 # CM-2 preservation: from_model_domain does bt709_eotf → matrix
                 # → inputCS-linear. EXR stays LINEAR (§9.3).
+                chunkf = chunkf.clamp(0.0, 1.0)
                 transferred = _transform.from_model_domain(chunkf)
                 if isinstance(transferred, torch.Tensor):
                     linear = transferred.cpu().numpy()
                 else:
                     linear = np.asarray(transferred, dtype=np.float32)
+            elif input_colorspace is not None and input_colorspace.transfer == "linear":
+                # Linear passthrough: input is already linear (e.g. HDR decode
+                # output). Skip EOTF AND skip clamp — HDR linear values may
+                # legitimately exceed 1.0. The clamp is only for model-domain
+                # sRGB values; HDR linear scene-referred values are written as-is.
+                linear = chunkf.cpu().numpy()
             else:
                 # Default: BT.709 EOTF (Rec.709 gamma → linear) per §9.1/§9.3.
+                chunkf = chunkf.clamp(0.0, 1.0)
                 linear = bt709_eotf(chunkf).cpu().numpy()
             for frame in linear:
                 frame_name = _EXR_FRAME_PATTERN.format(global_idx)

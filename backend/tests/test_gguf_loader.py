@@ -1148,6 +1148,59 @@ def test_resolve_gemma_tokenizer_root_directory_passes_through(tmp_path: Path) -
     assert result == str(tmp_path)
 
 
+def test_slow_processor_module_ops_passes_use_fast_false(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_module_ops_from_gemma_root_slow_processor must pass use_fast=False to
+    AutoImageProcessor.from_pretrained.
+
+    Preserves the existing slow image-processor behavior but opts in explicitly
+    so transformers does not emit its slow-processor fallback warning.
+    """
+    from ltx_core.text_encoders.gemma.encoders.base_encoder import GemmaTextEncoder
+    from services.patches.gguf_loader_fix import _module_ops_from_gemma_root_slow_processor
+
+    (tmp_path / "tokenizer.model").write_text("x")
+    (tmp_path / "preprocessor_config.json").write_text("{}")
+
+    captured: dict[str, object] = {}
+
+    def fake_from_pretrained(root: str, **kwargs: object) -> object:
+        captured["root"] = root
+        captured["kwargs"] = kwargs
+        return "fake-image-processor"
+
+    class _FakeGemma3Processor:
+        def __init__(self, **kwargs: object) -> None:
+            captured["processor_kwargs"] = kwargs
+
+    monkeypatch.setattr("transformers.AutoImageProcessor.from_pretrained", fake_from_pretrained)
+    monkeypatch.setattr("transformers.Gemma3Processor", _FakeGemma3Processor)
+
+    ops = _module_ops_from_gemma_root_slow_processor(str(tmp_path))
+    assert len(ops) == 2
+
+    # ProcessorLoad op is the second one; run its mutator with a module that
+    # already has a tokenizer (so the truthiness guard passes).
+    processor_op = ops[1]
+
+    class _FakeTok:
+        tokenizer = "fake-tok"
+
+    module = GemmaTextEncoder.__new__(GemmaTextEncoder)
+    module.tokenizer = _FakeTok()  # type: ignore[attr-defined]
+    module.processor = None  # type: ignore[attr-defined]
+
+    processor_op.mutator(module)
+
+    kwargs = captured.get("kwargs", {})
+    assert kwargs.get("use_fast") is False, f"expected use_fast=False, got {kwargs!r}"
+    assert kwargs.get("local_files_only") is True
+    # Processor wired with the image processor returned by from_pretrained.
+    assert captured.get("processor_kwargs", {}).get("image_processor") == "fake-image-processor"
+
+
 def test_patched_init_passes_tokenizer_root_not_gguf_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1169,15 +1222,16 @@ def test_patched_init_passes_tokenizer_root_not_gguf_file(
         captured_root.append(root)
         return []
 
-    # Patch the source module so the import inside install_gguf_prompt_encoder_patch
-    # picks up the fake.
+    # Patch the local helper in gguf_loader_fix (install_gguf_prompt_encoder_patch
+    # resolves it as a module global) so we can capture the root it is called with
+    # without needing real tokenizer/processor files on disk.
     monkeypatch.setattr(
-        "ltx_core.text_encoders.gemma.module_ops_from_gemma_root",
+        "services.patches.gguf_loader_fix._module_ops_from_gemma_root_slow_processor",
         fake_module_ops,
     )
 
-    # Must be called after the monkeypatch, because the function re-imports
-    # module_ops_from_gemma_root from the source module.
+    # Must be called after the monkeypatch, because the patched_init resolves
+    # the helper from its module globals at call time.
     install_gguf_prompt_encoder_patch()
 
     blocks.PromptEncoder.__init__(
@@ -1198,10 +1252,7 @@ def test_patched_init_embeddings_builder_uses_upstream_ops_for_safetensors_only(
 ) -> None:
     """patched_init uses EMBEDDINGS_PROCESSOR_KEY_OPS (not GgufEmbeddingsProcessorSDOps)
     when checkpoint_path contains only .safetensors paths (Kijai split or official)."""
-    from ltx_core.text_encoders.gemma import (
-        EMBEDDINGS_PROCESSOR_KEY_OPS,
-        module_ops_from_gemma_root,
-    )
+    from ltx_core.text_encoders.gemma import EMBEDDINGS_PROCESSOR_KEY_OPS
     from ltx_pipelines.utils import blocks
     from services.patches.gguf_loader_fix import install_gguf_prompt_encoder_patch
 
@@ -1211,7 +1262,7 @@ def test_patched_init_embeddings_builder_uses_upstream_ops_for_safetensors_only(
     safetensors_path.write_bytes(b"x")
 
     monkeypatch.setattr(
-        "ltx_core.text_encoders.gemma.module_ops_from_gemma_root",
+        "services.patches.gguf_loader_fix._module_ops_from_gemma_root_slow_processor",
         lambda root: [],
     )
 
@@ -1263,7 +1314,7 @@ def test_patched_init_embeddings_builder_uses_gguf_ops_for_gguf_path(
     gguf_path.write_text("dummy")
 
     monkeypatch.setattr(
-        "ltx_core.text_encoders.gemma.module_ops_from_gemma_root",
+        "services.patches.gguf_loader_fix._module_ops_from_gemma_root_slow_processor",
         lambda root: [],
     )
 
@@ -1820,10 +1871,16 @@ def test_gguf_call_patch_non_gguf_passthrough(
     assert result == ["hello world"]
 
 
-def test_gguf_call_patch_image_enhance_passthrough(
+def test_gguf_call_patch_image_enhance_runs_llama_cpp_and_drops_image(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """enhance_prompt_image set: original called with original flags, llama helper not called."""
+    """GGUF + enhance_prompt_image: llama.cpp runs on text, original called with enhance=False and image=None.
+
+    The GGUF vision tower is stripped to Identity, so image-conditioned PyTorch
+    Gemma enhancement must never run. The patch should still enhance the text
+    prompt via llama.cpp and forward enhance_first_prompt=False /
+    enhance_prompt_image=None to the original __call__.
+    """
     from ltx_pipelines.utils import blocks
     from services.patches.gguf_loader_fix import _install_llama_cpp_prompt_encoder_call_patch
 
@@ -1867,11 +1924,13 @@ def test_gguf_call_patch_image_enhance_passthrough(
         enhance_prompt_seed=42,
     )
 
-    assert len(llama_called) == 0
-    assert recorded["kwargs"].get("enhance_first_prompt") is True
-    assert recorded["kwargs"].get("enhance_prompt_image") == "/path/to/image.png"
-    assert recorded["prompts"][0] == "hello world"
-    assert result == ["hello world"]
+    assert len(llama_called) == 1
+    assert llama_called[0][0] == "/fake/gemma.gguf"
+    assert llama_called[0][1] == "hello world"
+    assert recorded["kwargs"].get("enhance_first_prompt") is False
+    assert recorded["kwargs"].get("enhance_prompt_image") is None
+    assert "ENHANCED:hello world" in recorded["prompts"][0]
+    assert result == ["ENHANCED:hello world"]
 
 
 def test_patched_init_empty_gemma_root_skips_find_gemma_gguf(

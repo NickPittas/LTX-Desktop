@@ -48,6 +48,9 @@ class IcLoraPipeline(Protocol):
         proxy_path: str | None = None,
         on_progress: Callable[[float], None] | None = None,
         input_colorspace: ColorSpace | None = None,
+        hdr_video_context: torch.Tensor | None = None,
+        hdr_audio_context: torch.Tensor | None = None,
+        output_postprocess: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ) -> None:
         ...
 

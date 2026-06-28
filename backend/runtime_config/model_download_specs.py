@@ -100,6 +100,10 @@ IMG_GEN_MODEL_CP_ID: ModelCheckpointID = "z-image-turbo"
 DEPTH_PROCESSOR_CP_ID: ModelCheckpointID = "dpt-hybrid-midas"
 PERSON_DETECTOR_CP_ID: ModelCheckpointID = "yolox-l-torchscript"
 POSE_PROCESSOR_CP_ID: ModelCheckpointID = "dw-ll-ucoco-384-bs5"
+# Canonical 2x spatial upscaler checkpoint id. Some legacy profiles stored a
+# stale root-level path (e.g. ``<models_dir>//ltx-2.3-spatial-upscaler-x2-1.0.safetensors``);
+# the canonical location is ``latent_upscale_models/ltx-2.3-spatial-upscaler-x2-1.0.safetensors``.
+UPSAMPLER_CP_ID: ModelCheckpointID = "ltx-2.3-spatial-upscaler-x2-1.0"
 
 
 OFFICIAL_LTX23_ADAPTERS: dict[AdapterID, AdapterComponent] = {

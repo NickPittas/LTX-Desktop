@@ -42,9 +42,15 @@ class LTXTextEncoder:
         gemma_root in __init__, which crashes.  This patch short-circuits init
         when gemma_root is falsy, creating a stub that the __call__ patch will
         intercept before any model loading.
+
+        Idempotent via a sentinel attribute on the patched function so repeated
+        ``install_patches`` calls do not re-wrap (and thus re-log) the init.
         """
         try:
             from ltx_pipelines.utils.blocks import PromptEncoder
+
+            if getattr(PromptEncoder.__init__, "_ltx_desktop_api_init_patch", False):
+                return
 
             original_init = PromptEncoder.__init__
 
@@ -65,6 +71,7 @@ class LTXTextEncoder:
                     return
                 original_init(self_encoder, checkpoint_path, gemma_root, dtype, device, registry)
 
+            patched_init._ltx_desktop_api_init_patch = True  # type: ignore[attr-defined]
             PromptEncoder.__init__ = patched_init  # type: ignore[assignment]
             logger.info("Installed PromptEncoder.__init__ patch for None gemma_root")
         except Exception as exc:
@@ -78,6 +85,10 @@ class LTXTextEncoder:
         try:
             from ltx_core.text_encoders.gemma.embeddings_processor import EmbeddingsProcessorOutput
             from ltx_pipelines.utils.blocks import PromptEncoder
+
+            if getattr(PromptEncoder.__call__, "_ltx_desktop_api_call_patch", False):
+                self._prompt_encoder_patched = True
+                return
 
             original_call = PromptEncoder.__call__
 
@@ -127,6 +138,7 @@ class LTXTextEncoder:
             PromptEncoder.__call__ = patched_call  # type: ignore[assignment]
 
             self._prompt_encoder_patched = True
+            patched_call._ltx_desktop_api_call_patch = True  # type: ignore[attr-defined]
             logger.info("Installed PromptEncoder API embeddings patch")
         except Exception as exc:
             logger.warning("Failed to patch PromptEncoder: %s", exc, exc_info=True)
@@ -138,6 +150,10 @@ class LTXTextEncoder:
 
         try:
             from ltx_pipelines.utils import helpers as ltx_utils
+
+            if getattr(ltx_utils.cleanup_memory, "_ltx_desktop_cleanup_patch", False):
+                self._cleanup_memory_patched = True
+                return
 
             original_cleanup_memory = ltx_utils.cleanup_memory
 
@@ -151,6 +167,7 @@ class LTXTextEncoder:
                         logger.warning("Failed to move cached text encoder to CPU", exc_info=True)
                 original_cleanup_memory()
 
+            patched_cleanup_memory._ltx_desktop_cleanup_patch = True  # type: ignore[attr-defined]
             setattr(ltx_utils, "cleanup_memory", patched_cleanup_memory)
 
             for module_name in (
@@ -163,12 +180,17 @@ class LTXTextEncoder:
                 "ltx_pipelines.retake",
                 "ltx_pipelines.retake_pipeline",
             ):
+                # Optional patch targets: a missing module (ModuleNotFoundError)
+                # is expected for pipelines that aren't installed/used in this
+                # process. Treat as a debug-level no-op so the log is not
+                # polluted with warning tracebacks for benign absences.
                 try:
                     module = __import__(module_name, fromlist=["cleanup_memory"])
-                    if hasattr(module, "cleanup_memory"):
-                        setattr(module, "cleanup_memory", patched_cleanup_memory)
-                except Exception:
-                    logger.warning("Failed to patch cleanup_memory for module %s", module_name, exc_info=True)
+                except ModuleNotFoundError:
+                    logger.debug("Optional module %s absent; skipping cleanup_memory patch", module_name)
+                    continue
+                if hasattr(module, "cleanup_memory"):
+                    setattr(module, "cleanup_memory", patched_cleanup_memory)
 
             self._cleanup_memory_patched = True
             logger.info("Installed cleanup_memory patch")

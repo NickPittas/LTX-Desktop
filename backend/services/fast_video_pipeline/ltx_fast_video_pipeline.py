@@ -264,3 +264,13 @@ class LTXFastVideoPipeline:
                 video_vae_path=c.video_vae_path,
                 audio_vae_path=c.audio_vae_path,
             )
+
+    def supports_torch_compile(self) -> bool:
+        """Whether torch.compile is supported for the active transformer format.
+
+        GGUF transformers use lazy per-forward dequantization (numpy/GGUF-based)
+        which is untracable by ``torch.compile``. Callers should check this
+        before invoking :meth:`compile_transformer` to skip silently (info log)
+        rather than relying on the ``RuntimeError`` guard inside compile.
+        """
+        return self._transformer_format != "gguf"

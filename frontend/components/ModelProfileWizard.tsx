@@ -85,7 +85,7 @@ const PREFILL_CANDIDATES: Record<string, string> = {
   text_projection: 'text_encoders/ltx-2.3_text_projection_bf16.safetensors',
   video_vae: 'vae/LTX23_video_vae_bf16.safetensors',
   audio_vae: 'vae/LTX23_audio_vae_bf16.safetensors',
-  upsampler: 'ltx-2.3-spatial-upscaler-x2-1.0.safetensors',
+  upsampler: 'latent_upscale_models/ltx-2.3-spatial-upscaler-x2-1.0.safetensors',
   ic_lora_union: 'adapters/ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors',
   ic_lora_motion_track: 'adapters/ltx-2.3-22b-ic-lora-motion-track-control-ref0.5.safetensors',
   ic_lora_ingredients: 'adapters/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors',

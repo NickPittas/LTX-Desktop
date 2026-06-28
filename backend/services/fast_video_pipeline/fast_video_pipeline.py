@@ -55,3 +55,6 @@ class FastVideoPipeline(Protocol):
 
     def compile_transformer(self) -> None:
         ...
+
+    def supports_torch_compile(self) -> bool:
+        ...

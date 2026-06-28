@@ -49,7 +49,9 @@ from services.sequence_input import (
     sequence_metadata,
     sequence_metadata_from_dir,
 )
-from services.color_management import detect_colorspace
+from services.color_management import detect_colorspace, LINEAR_REC709
+from services.ic_lora_pipeline.hdr_scene_embeddings import load_hdr_scene_embeddings
+from services.ic_lora_pipeline.hdr_utils import apply_hdr_decode_postprocess
 from services.ltx_pipeline_common import make_encode_progress_callback, make_primary_output_path, make_proxy_output_path
 from services.media_encoder.media_encoder import MediaEncoder
 from services.services_utils import FrameArray
@@ -91,14 +93,12 @@ _ADAPTER_WORKFLOW: dict[str, WorkflowType] = {
 
 _UNAVAILABLE_WORKFLOWS: frozenset[str] = frozenset({
     "motion_track_control",
-    "hdr",
     "hdr_scene_embeddings",
     "lipdub",
 })
 
 _UNAVAILABLE_MESSAGES: dict[str, str] = {
     "motion_track_control": "Motion Track Control requires trajectory/reference video processing which is not wired yet",
-    "hdr": "HDR workflow requires HDR scene embeddings and tone-mapping pipeline which is not wired yet",
     "hdr_scene_embeddings": "HDR scene embeddings is a support asset for the HDR workflow and cannot be used as a standalone adapter",
     "lipdub": "LipDub requires audio conditioning and lip-sync pipeline which is not wired yet",
 }
@@ -205,7 +205,7 @@ class IcLoraHandler(StateHandlerBase):
         if profile_path is not None:
             return profile_path
 
-        installed = self.models_dir / adapter.filename
+        installed = self.models_dir / "adapters" / adapter.filename
         if installed.is_file():
             return str(installed)
 
@@ -428,6 +428,148 @@ class IcLoraHandler(StateHandlerBase):
         finally:
             self._text.clear_api_embeddings()
 
+    def _resolve_hdr_scene_embeddings_path(self) -> str:
+        """Resolve HDR scene embeddings file from profile components or models dir.
+
+        Checks profile adapter map (``hdr_scene_embeddings``) then the canonical
+        models_dir adapter path. No root fallback — must be explicitly configured.
+        """
+        profile_path = self._profile_adapter_path("hdr_scene_embeddings")
+        if profile_path is not None:
+            return profile_path
+        # Check models_dir adapters/ subfolder (scanner canonical)
+        installed = self.models_dir / "adapters" / OFFICIAL_LTX23_ADAPTERS["hdr_scene_embeddings"].filename
+        if installed.is_file():
+            return str(installed)
+        raise HTTPError(400, "HDR scene embeddings not found. Configure hdr_scene_embeddings adapter path or install the file.")
+
+    def _generate_hdr(
+        self, req: IcLoraGenerateRequest, workflow: str
+    ) -> IcLoraGenerateResponse:
+        """HDR generation path: scene embeddings replace prompt encoding, EXR output.
+
+        Upstream semantics (adapted):
+        - Scene embeddings replace text prompt encoding.
+        - HDR is a video-only upscale/HDR mode: audio is of no interest and no
+          audio modality is produced or conditioned. Audio scene embeddings are
+          intentionally ignored even if present in the embeddings file (they are
+          loaded only as metadata compatibility, never threaded into inference).
+        - Primary output is EXR (linear); SDR proxy is generated if supported.
+        """
+        generation_id = uuid.uuid4().hex[:8]
+        t_total_start = time.perf_counter()
+        logger.info("[ic-lora] HDR generation started")
+
+        try:
+            # Resolve HDR LoRA and scene embeddings paths.
+            assert req.adapter_id is not None
+            hdr_lora_path = self._resolve_ic_lora_adapter_path(req.adapter_id)
+            scene_embeddings_path = self._resolve_hdr_scene_embeddings_path()
+
+            # Load + validate scene embeddings (replaces prompt encoding).
+            t_embed_start = time.perf_counter()
+            scene_embeddings = load_hdr_scene_embeddings(scene_embeddings_path)
+            t_embed_end = time.perf_counter()
+            logger.info(
+                "[ic-lora] HDR scene embeddings loaded: %.2fs (video_context shape=%s)",
+                t_embed_end - t_embed_start,
+                tuple(scene_embeddings.video_context.shape),
+            )
+
+            t_load_start = time.perf_counter()
+            ic_state = self._pipelines.load_ic_lora(
+                [hdr_lora_path],
+                None,  # no depth
+                adapter_path=hdr_lora_path,
+                lora_strength=req.lora_strength,
+            )
+            t_load_end = time.perf_counter()
+            logger.info("[ic-lora] HDR pipeline load: %.2fs", t_load_end - t_load_start)
+
+            self._generation.start_generation(generation_id)
+            self._generation.update_progress("loading_model", 5, 0, 1)
+
+            # No text encoding — scene embeddings replace prompt encoding.
+            # Clear any stale API embeddings.
+            self._text.clear_api_embeddings()
+
+            height = _align_up(req.height, 64)
+            width = _align_up(req.width, 64)
+            num_frames = _snap_frame_count(req.num_frames)
+            frame_rate = req.frame_rate
+
+            images: list[ImageConditioningInput] = [
+                ImageConditioningInput(path=img.path, frame_idx=int(img.frame), strength=float(img.strength))
+                for img in req.images
+            ]
+
+            self._generation.update_progress("inference", 15, 0, 1)
+
+            # Force EXR for HDR primary output (linear scene-referred).
+            output_format = OutputFormat.EXR_ZIP_HALF
+            output_path = make_primary_output_path(
+                str(self.config.outputs_dir), "hdr", output_format, uuid.uuid4().hex[:8]
+            )
+            # SDR proxy tonemapping (linear HDR → SDR) is deferred — the ffmpeg
+            # proxy path applies -apply_trc linear which is wrong for HDR. Do NOT
+            # generate an incorrect proxy; set to None until an explicit tonemap
+            # is wired into the encoder's proxy generation.
+            proxy_path = None
+
+            t_inference_start = time.perf_counter()
+            ic_state.pipeline.generate(
+                prompt=req.prompt,
+                seed=self._resolve_seed(),
+                height=height,
+                width=width,
+                num_frames=num_frames,
+                frame_rate=frame_rate,
+                images=images,
+                video_conditioning=[],
+                output_path=output_path,
+                mask_path=None,
+                conditioning_strength=req.conditioning_strength,
+                original_video_path=None,
+                output_format=output_format,
+                encoder=self.media_encoder,
+                proxy_path=proxy_path,
+                on_progress=make_encode_progress_callback(self._generation.update_progress),
+                input_colorspace=LINEAR_REC709,
+                hdr_video_context=scene_embeddings.video_context,
+                # HDR is video-only: audio embeddings are intentionally ignored.
+                # Passing None ensures the pinned IC-LoRA pipeline never builds an
+                # audio modality or conditions on audio, even when the scene
+                # embeddings file contains an audio_context tensor.
+                hdr_audio_context=None,
+                output_postprocess=apply_hdr_decode_postprocess,
+            )
+            t_inference_end = time.perf_counter()
+            logger.info("[ic-lora] HDR inference: %.2fs", t_inference_end - t_inference_start)
+
+            t_total_end = time.perf_counter()
+            logger.info(
+                "[ic-lora] Total HDR generation: %.2fs (embed=%.2fs, load=%.2fs, inference=%.2fs)",
+                t_total_end - t_total_start,
+                t_embed_end - t_embed_start,
+                t_load_end - t_load_start,
+                t_inference_end - t_inference_start,
+            )
+
+            self._generation.update_progress("complete", 100, 1, 1)
+            self._generation.complete_generation(output_path)
+            return IcLoraGenerateCompleteResponse(
+                status="complete", video_path=output_path, proxy_path=proxy_path
+            )
+
+        except HTTPError:
+            self._generation.fail_generation("HDR generation failed")
+            raise
+        except Exception as exc:
+            self._generation.fail_generation(str(exc))
+            if "cancelled" in str(exc).lower():
+                return IcLoraGenerateCancelledResponse(status="cancelled")
+            raise HTTPError(500, f"HDR generation error: {exc}") from exc
+
     def generate(self, req: IcLoraGenerateRequest) -> IcLoraGenerateResponse:
         if self._generation.is_generation_running():
             raise HTTPError(409, "Generation already in progress")
@@ -436,6 +578,12 @@ class IcLoraHandler(StateHandlerBase):
         workflow: str | None = _ADAPTER_WORKFLOW.get(req.adapter_id) if req.adapter_id else None
         if workflow in _UNAVAILABLE_WORKFLOWS:
             raise HTTPError(400, _UNAVAILABLE_MESSAGES[workflow])
+
+        # ponytail: dispatch HDR before video path validation (HDR is T2V like ingredients)
+        if workflow == "hdr":
+            if not (req.prompt or "").strip():
+                raise HTTPError(400, "Prompt is required for HDR adapter")
+            return self._generate_hdr(req, workflow)
 
         # ponytail: dispatch ingredients before any video path validation
         if workflow == "ingredients":
