@@ -248,9 +248,10 @@ Strike items as they ship. Update this section in the same PR that lands the wor
 - [x] Phase 1: `model_profiles.json` schema migration (backward-compatible).
 - [x] Phase 2: resolver unit suite (priority chain + capability matrix).
 - [x] Phase 2: distilled LoRA load/no-load matrix green.
-- [ ] Phase 3: transactional downloader (atomic promote, per-item lock, no-delete-on-fail).
-- [ ] Phase 3: disk-space preflight + HF gated/token handling.
-- [ ] Phase 3: fake downloader (no network) wired into tests.
+- [x] Phase 3: transactional downloader (atomic promote, per-item lock, no-delete-on-fail).
+- [x] Phase 3: disk-space preflight + HF gated/token handling.
+- [x] Phase 3: fake downloader (no network) wired into tests.
+- [x] Phase 3: cancellable downloads with structured cancel/error progress handling (session-id-aware worker finalization).
 - [ ] Phase 4: Library UI status chips (installed/missing/wrong-folder/gated/unvalidated).
 - [ ] Phase 4: exact expected path + source URL + size/hash-when-known displayed.
 - [ ] Phase 5: candidate-profile wizard + activation validation.
