@@ -243,9 +243,9 @@ Integration-first on the backend (Starlette `TestClient` + fakes, no `unittest.m
 
 Strike items as they ship. Update this section in the same PR that lands the work.
 
-- [ ] Phase 1: read-only recursive scanner over `/mnt/ssd1/LTX_models` (incl. root-legacy upscaler).
-- [ ] Phase 1: catalog with `artifact_kind` + `component_role` + `scanner_confidence`.
-- [ ] Phase 1: `model_profiles.json` schema migration (backward-compatible).
+- [x] Phase 1: read-only recursive scanner over `/mnt/ssd1/LTX_models` (incl. root upscaler as current-runtime canonical; subfolder files wrong-folder usable until later phases).
+- [x] Phase 1: catalog with `artifact_kind` + `component_role` + `scanner_confidence`.
+- [x] Phase 1: `model_profiles.json` schema migration (backward-compatible).
 - [ ] Phase 2: resolver unit suite (priority chain + capability matrix).
 - [ ] Phase 2: distilled LoRA load/no-load matrix green.
 - [ ] Phase 3: transactional downloader (atomic promote, per-item lock, no-delete-on-fail).

@@ -15,6 +15,9 @@ export interface ModelProfileWizardProps {
 
 type Capability = NonNullable<ModelProfilePayload['capabilities']>[number]
 
+// Keep in sync with backend CURRENT_MODEL_PROFILE_SCHEMA_VERSION (api_types.py).
+const CURRENT_MODEL_PROFILE_SCHEMA_VERSION = 1
+
 // ── component field definitions ────────────────────────────────────────
 
 interface ComponentFieldDef {
@@ -332,6 +335,11 @@ export function ModelProfileWizard({ isOpen, onClose, onCreated }: ModelProfileW
       updated_at: '',
       capabilities,
       components: componentPaths,
+      schema_version: CURRENT_MODEL_PROFILE_SCHEMA_VERSION,
+      created_by: 'wizard',
+      validation_status: 'candidate',
+      last_scanned_at: null,
+      problems: [],
     }
 
     const result = await ApiClient.createModelProfile(payload)

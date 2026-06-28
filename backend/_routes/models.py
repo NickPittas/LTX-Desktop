@@ -19,6 +19,7 @@ from api_types import (
     ModelDeleteRequest,
     ModelDownloadRequest,
     ModelDownloadStartResponse,
+    ModelLibraryScanResponse,
     StatusResponse,
     TextEncoderRecommendationResponse,
 )
@@ -70,6 +71,16 @@ def route_text_encoder_recommendation(
     handler: AppHandler = Depends(get_state_service),
 ) -> TextEncoderRecommendationResponse:
     return handler.models.get_text_encoder_recommendation()
+
+
+@router.get("/models/catalog", response_model=ModelLibraryScanResponse)
+def route_model_catalog(
+    request: Request,
+    handler: AppHandler = Depends(get_state_service),
+) -> ModelLibraryScanResponse:
+    """Read-only scan of the effective models root (admin-guarded, no path param)."""
+    guard_admin_permission(request)
+    return handler.models.scan_model_library()
 
 
 @router.get("/models/download/progress", response_model=DownloadProgressResponse)

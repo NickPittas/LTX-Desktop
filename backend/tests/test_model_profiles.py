@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
-
+from api_types import CURRENT_MODEL_PROFILE_SCHEMA_VERSION
 from tests.conftest import TEST_ADMIN_TOKEN
 from tests.http_error_assertions import assert_http_error
 
@@ -397,3 +397,182 @@ class TestRecommendationWithProfile:
         response = client.get("/api/models/ltx-recommendation")
         assert response.status_code == 200
         assert response.json()["status"] == "ok"
+
+
+class TestProfileSchemaMigration:
+    """Phase 1: backward-compatible model_profiles.json schema migration."""
+
+    def _write_profiles(self, handler, data: dict) -> Path:
+        path: Path = handler._profiles_path
+        path.write_text(json.dumps(data), encoding="utf-8")
+        return path
+
+    def _legacy_profile_dict(self, profile_id: str = "legacy-1") -> dict:
+        return {
+            "id": profile_id,
+            "name": "Legacy Profile",
+            "family": "ltx-2.3",
+            "source": "official",
+            "components": {"text_encoder_format": "api"},
+            "capabilities": ["t2v"],
+            "notes": "",
+            "created_at": "",
+            "updated_at": "",
+        }
+
+    def test_legacy_profile_gets_schema_defaults(self, test_state):
+        """Absent schema fields get defaults in the loaded (in-memory) profile."""
+        self._write_profiles(
+            test_state.model_profiles,
+            {
+                "active_model_profile_id": "legacy-1",
+                "profiles": [self._legacy_profile_dict()],
+            },
+        )
+        test_state.model_profiles.load_profiles()
+
+        assert len(test_state.state.model_profiles) == 1
+        profile = test_state.state.model_profiles[0]
+        assert profile.schema_version == CURRENT_MODEL_PROFILE_SCHEMA_VERSION
+        assert profile.created_by == "user"
+        assert profile.validation_status == "candidate"
+        assert profile.last_scanned_at is None
+        assert profile.problems == []
+
+    def test_legacy_profile_defaults_in_api_response(self, client, test_state):
+        """Defaults appear in the API response without any explicit save."""
+        path: Path = test_state.model_profiles._profiles_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({
+                "active_model_profile_id": None,
+                "profiles": [self._legacy_profile_dict("api-legacy")],
+            }),
+            encoding="utf-8",
+        )
+        # Reload so the handler picks up the legacy file
+        test_state.model_profiles.load_profiles()
+
+        response = client.get("/api/model-profiles", headers=_ADMIN_HEADERS)
+        assert response.status_code == 200
+        profiles = response.json()["profiles"]
+        assert len(profiles) == 1
+        p = profiles[0]
+        assert p["schema_version"] == CURRENT_MODEL_PROFILE_SCHEMA_VERSION
+        assert p["created_by"] == "user"
+        assert p["validation_status"] == "candidate"
+        assert p["last_scanned_at"] is None
+        assert p["problems"] == []
+
+    def test_no_autosave_on_migration_without_repair(self, test_state):
+        """Load does NOT rewrite the file when there are no blank IDs to repair."""
+        path = self._write_profiles(
+            test_state.model_profiles,
+            {
+                "active_model_profile_id": None,
+                "profiles": [self._legacy_profile_dict()],
+            },
+        )
+        original_text = path.read_text(encoding="utf-8")
+        test_state.model_profiles.load_profiles()
+
+        # File must be unchanged — no schema_version written
+        assert path.read_text(encoding="utf-8") == original_text
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        assert "schema_version" not in raw["profiles"][0]
+
+    def test_blank_id_repair_still_saves_with_new_fields(self, test_state):
+        """Existing blank-ID repair path saves and includes new fields."""
+        path = self._write_profiles(
+            test_state.model_profiles,
+            {
+                "active_model_profile_id": "",
+                "profiles": [self._legacy_profile_dict(profile_id="")],
+            },
+        )
+        test_state.model_profiles.load_profiles()
+
+        # Repair triggered a save → new fields are persisted
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        assert raw["profiles"][0]["schema_version"] == CURRENT_MODEL_PROFILE_SCHEMA_VERSION
+
+    def test_round_trip_on_explicit_save(self, test_state):
+        """Explicit save after load persists the new schema fields."""
+        path = self._write_profiles(
+            test_state.model_profiles,
+            {
+                "active_model_profile_id": None,
+                "profiles": [self._legacy_profile_dict("round-trip")],
+            },
+        )
+        test_state.model_profiles.load_profiles()
+
+        # Before save — legacy file
+        raw_before = json.loads(path.read_text(encoding="utf-8"))
+        assert "schema_version" not in raw_before["profiles"][0]
+
+        # Explicit save
+        test_state.model_profiles.save_profiles()
+
+        # After save — new fields persisted
+        raw_after = json.loads(path.read_text(encoding="utf-8"))
+        assert raw_after["profiles"][0]["schema_version"] == CURRENT_MODEL_PROFILE_SCHEMA_VERSION
+        assert raw_after["profiles"][0]["created_by"] == "user"
+        assert raw_after["profiles"][0]["validation_status"] == "candidate"
+        assert raw_after["profiles"][0]["problems"] == []
+
+    def test_extra_forbid_preserved_on_create(self, client):
+        """Creating a profile with an unknown field must still be rejected (422)."""
+        payload = _make_official_payload(unknown_field="should_be_rejected")
+        response = client.post("/api/model-profiles", json=payload, headers=_ADMIN_HEADERS)
+        assert response.status_code == 422
+
+    def test_extra_forbid_preserved_on_patch(self, client):
+        """Patching with server-owned fields must be rejected (422)."""
+        client.post(
+            "/api/model-profiles",
+            json=_make_official_payload(profile_id="patch-forbid"),
+            headers=_ADMIN_HEADERS,
+        )
+        response = client.request(
+            "PATCH",
+            "/api/model-profiles/patch-forbid",
+            json={"schema_version": 99},
+            headers=_ADMIN_HEADERS,
+        )
+        assert response.status_code == 422
+
+    def test_create_with_schema_fields_accepted(self, client):
+        """ModelProfilePayload can carry the new fields on create."""
+        payload = _make_official_payload(
+            profile_id="with-schema",
+            schema_version=CURRENT_MODEL_PROFILE_SCHEMA_VERSION,
+            created_by="wizard",
+            validation_status="candidate",
+        )
+        response = client.post("/api/model-profiles", json=payload, headers=_ADMIN_HEADERS)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["schema_version"] == CURRENT_MODEL_PROFILE_SCHEMA_VERSION
+        assert data["created_by"] == "wizard"
+
+    def test_patch_does_not_touch_server_owned_fields(self, client):
+        """Patching name/notes must not reset server-owned schema fields."""
+        client.post(
+            "/api/model-profiles",
+            json=_make_official_payload(profile_id="patch-preserve", created_by="wizard"),
+            headers=_ADMIN_HEADERS,
+        )
+
+        response = client.request(
+            "PATCH",
+            "/api/model-profiles/patch-preserve",
+            json={"name": "New Name"},
+            headers=_ADMIN_HEADERS,
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["name"] == "New Name"
+        # Server-owned fields preserved
+        assert data["created_by"] == "wizard"
+        assert data["schema_version"] == CURRENT_MODEL_PROFILE_SCHEMA_VERSION

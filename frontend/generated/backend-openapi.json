@@ -2275,6 +2275,244 @@
         "title": "ModelDownloadStartResponse",
         "type": "object"
       },
+      "ModelLibraryArtifact": {
+        "description": "A known catalog artifact with its scan status and provenance.",
+        "properties": {
+          "absolute_paths": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Absolute Paths",
+            "type": "array"
+          },
+          "adapter_id": {
+            "anyOf": [
+              {
+                "enum": [
+                  "distilled_lora_384",
+                  "distilled_lora_384_1_1",
+                  "union_control",
+                  "motion_track_control",
+                  "ingredients",
+                  "water_simulation",
+                  "decompression",
+                  "deblur",
+                  "colorization",
+                  "day_to_night",
+                  "in_outpainting",
+                  "instant_shave",
+                  "cross_eyed",
+                  "hdr",
+                  "hdr_scene_embeddings",
+                  "lipdub"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adapter Id"
+          },
+          "artifact_kind": {
+            "enum": [
+              "diffusion_model",
+              "vae",
+              "text_encoder",
+              "gguf",
+              "upscaler",
+              "control_adapter",
+              "lora",
+              "scene_embeddings",
+              "depth_processor",
+              "pose_processor",
+              "person_detector",
+              "image_gen_model"
+            ],
+            "title": "Artifact Kind",
+            "type": "string"
+          },
+          "canonical_relative_path": {
+            "title": "Canonical Relative Path",
+            "type": "string"
+          },
+          "component_role": {
+            "title": "Component Role",
+            "type": "string"
+          },
+          "cp_id": {
+            "anyOf": [
+              {
+                "enum": [
+                  "ltx-2.3-22b-distilled",
+                  "ltx-2.3-spatial-upscaler-x2-1.0",
+                  "ltx-2.3-22b-ic-lora-union-control-ref0.5",
+                  "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5",
+                  "ltx-2.3-22b-ic-lora-ingredients-0.9",
+                  "ltx-2.3-22b-ic-lora-water-simulation-0.9",
+                  "ltx-2.3-22b-ic-lora-decompression-0.9",
+                  "ltx-2.3-22b-ic-lora-deblur-0.9",
+                  "ltx-2.3-22b-ic-lora-colorization-0.9",
+                  "ltx-2.3-22b-ic-lora-day-to-night-0.9",
+                  "ltx-2.3-22b-ic-lora-in-outpainting-0.9",
+                  "ltx-2.3-22b-ic-lora-instant-shave-0.9",
+                  "ltx-2.3-22b-ic-lora-cross-eyed-0.9",
+                  "ltx-2.3-22b-ic-lora-hdr-0.9",
+                  "ltx-2.3-22b-ic-lora-hdr-scene-emb",
+                  "ltx-2.3-22b-ic-lora-lipdub-0.9",
+                  "dpt-hybrid-midas",
+                  "yolox-l-torchscript",
+                  "dw-ll-ucoco-384-bs5",
+                  "gemma-3-12b-it-qat-q4_0-unquantized",
+                  "z-image-turbo"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cp Id"
+          },
+          "expected_size_bytes": {
+            "title": "Expected Size Bytes",
+            "type": "integer"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "gated": {
+            "default": false,
+            "title": "Gated",
+            "type": "boolean"
+          },
+          "is_folder": {
+            "default": false,
+            "title": "Is Folder",
+            "type": "boolean"
+          },
+          "notes": {
+            "default": "",
+            "title": "Notes",
+            "type": "string"
+          },
+          "preferred_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preferred Path"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          },
+          "scanner_confidence": {
+            "enum": [
+              "exact_catalog_match",
+              "filename_match",
+              "heuristic_match",
+              "unknown"
+            ],
+            "title": "Scanner Confidence",
+            "type": "string"
+          },
+          "size_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Bytes"
+          },
+          "source_url": {
+            "title": "Source Url",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "installed",
+              "missing",
+              "wrong_folder_usable",
+              "duplicate"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "support_status": {
+            "default": "supported",
+            "enum": [
+              "supported",
+              "gated",
+              "unvalidated",
+              "not_applicable"
+            ],
+            "title": "Support Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "filename",
+          "artifact_kind",
+          "component_role",
+          "status",
+          "scanner_confidence",
+          "canonical_relative_path",
+          "expected_size_bytes",
+          "repo_id",
+          "source_url"
+        ],
+        "title": "ModelLibraryArtifact",
+        "type": "object"
+      },
+      "ModelLibraryScanResponse": {
+        "description": "Read-only scan result of the user-selected models root.",
+        "properties": {
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/ModelLibraryArtifact"
+            },
+            "title": "Artifacts",
+            "type": "array"
+          },
+          "models_dir": {
+            "title": "Models Dir",
+            "type": "string"
+          },
+          "partial_files": {
+            "items": {
+              "$ref": "#/components/schemas/PartialFile"
+            },
+            "title": "Partial Files",
+            "type": "array"
+          },
+          "scanned_at": {
+            "title": "Scanned At",
+            "type": "string"
+          },
+          "unknown_files": {
+            "items": {
+              "$ref": "#/components/schemas/UnknownFile"
+            },
+            "title": "Unknown Files",
+            "type": "array"
+          }
+        },
+        "required": [
+          "models_dir",
+          "scanned_at"
+        ],
+        "title": "ModelLibraryScanResponse",
+        "type": "object"
+      },
       "ModelProfileActivateResponse": {
         "properties": {
           "active_model_profile_id": {
@@ -2420,6 +2658,16 @@
             "title": "Created At",
             "type": "string"
           },
+          "created_by": {
+            "default": "user",
+            "enum": [
+              "user",
+              "wizard",
+              "official_template"
+            ],
+            "title": "Created By",
+            "type": "string"
+          },
           "family": {
             "default": "ltx-2.3",
             "enum": [
@@ -2435,6 +2683,17 @@
             "title": "Id",
             "type": "string"
           },
+          "last_scanned_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Scanned At"
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -2443,6 +2702,18 @@
             "default": "",
             "title": "Notes",
             "type": "string"
+          },
+          "problems": {
+            "items": {
+              "$ref": "#/components/schemas/ModelProfileProblem"
+            },
+            "title": "Problems",
+            "type": "array"
+          },
+          "schema_version": {
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
           },
           "source": {
             "default": "official",
@@ -2459,6 +2730,16 @@
             "default": "",
             "title": "Updated At",
             "type": "string"
+          },
+          "validation_status": {
+            "default": "candidate",
+            "enum": [
+              "candidate",
+              "validated",
+              "deprecated"
+            ],
+            "title": "Validation Status",
+            "type": "string"
           }
         },
         "required": [
@@ -2466,6 +2747,58 @@
           "name"
         ],
         "title": "ModelProfilePayload",
+        "type": "object"
+      },
+      "ModelProfileProblem": {
+        "additionalProperties": false,
+        "description": "Stable, typed problem object surfaced per profile/artifact.\n\n``code`` is a machine-readable stable identifier (e.g. ``missing_path``,\n``duplicate``, ``unknown_file``). ``severity`` drives UI badges.\n``path``/``field`` are optional context anchors.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "field": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Field"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          },
+          "severity": {
+            "enum": [
+              "info",
+              "warning",
+              "error"
+            ],
+            "title": "Severity",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "severity",
+          "message"
+        ],
+        "title": "ModelProfileProblem",
         "type": "object"
       },
       "ModelProfileValidationIssuePayload": {
@@ -2571,6 +2904,35 @@
         ],
         "title": "OutputFormat",
         "type": "string"
+      },
+      "PartialFile": {
+        "description": "A partial download artifact (``*.part`` / ``*.tmp``) — never installed.",
+        "properties": {
+          "absolute_path": {
+            "title": "Absolute Path",
+            "type": "string"
+          },
+          "relative_path": {
+            "title": "Relative Path",
+            "type": "string"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          },
+          "suffix": {
+            "title": "Suffix",
+            "type": "string"
+          }
+        },
+        "required": [
+          "absolute_path",
+          "relative_path",
+          "size_bytes",
+          "suffix"
+        ],
+        "title": "PartialFile",
+        "type": "object"
       },
       "RetakeCancelledResponse": {
         "properties": {
@@ -2910,6 +3272,30 @@
           "expected_size_gb"
         ],
         "title": "TextEncoderRecommendationResponse",
+        "type": "object"
+      },
+      "UnknownFile": {
+        "description": "An unrecognized file in the models root (never deleted).",
+        "properties": {
+          "absolute_path": {
+            "title": "Absolute Path",
+            "type": "string"
+          },
+          "relative_path": {
+            "title": "Relative Path",
+            "type": "string"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "absolute_path",
+          "relative_path",
+          "size_bytes"
+        ],
+        "title": "UnknownFile",
         "type": "object"
       }
     }
@@ -3975,6 +4361,48 @@
           }
         },
         "summary": "Route Adapter Status",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/models/catalog": {
+      "get": {
+        "description": "Read-only scan of the effective models root (admin-guarded, no path param).",
+        "operationId": "route_model_catalog_api_models_catalog_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelLibraryScanResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPErrorResponse"
+                }
+              }
+            },
+            "description": "Client Error"
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPErrorResponse"
+                }
+              }
+            },
+            "description": "Server Error"
+          }
+        },
+        "summary": "Route Model Catalog",
         "tags": [
           "models"
         ]

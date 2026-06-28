@@ -327,6 +327,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/models/catalog": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Route Model Catalog
+         * @description Read-only scan of the effective models root (admin-guarded, no path param).
+         */
+        get: operations["route_model_catalog_api_models_catalog_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/models/check-access": {
         parameters: {
             query?: never;
@@ -1303,6 +1323,86 @@ export interface components {
              */
             status: "started";
         };
+        /**
+         * ModelLibraryArtifact
+         * @description A known catalog artifact with its scan status and provenance.
+         */
+        ModelLibraryArtifact: {
+            /** Absolute Paths */
+            absolute_paths?: string[];
+            /** Adapter Id */
+            adapter_id?: ("distilled_lora_384" | "distilled_lora_384_1_1" | "union_control" | "motion_track_control" | "ingredients" | "water_simulation" | "decompression" | "deblur" | "colorization" | "day_to_night" | "in_outpainting" | "instant_shave" | "cross_eyed" | "hdr" | "hdr_scene_embeddings" | "lipdub") | null;
+            /**
+             * Artifact Kind
+             * @enum {string}
+             */
+            artifact_kind: "diffusion_model" | "vae" | "text_encoder" | "gguf" | "upscaler" | "control_adapter" | "lora" | "scene_embeddings" | "depth_processor" | "pose_processor" | "person_detector" | "image_gen_model";
+            /** Canonical Relative Path */
+            canonical_relative_path: string;
+            /** Component Role */
+            component_role: string;
+            /** Cp Id */
+            cp_id?: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5" | "ltx-2.3-22b-ic-lora-ingredients-0.9" | "ltx-2.3-22b-ic-lora-water-simulation-0.9" | "ltx-2.3-22b-ic-lora-decompression-0.9" | "ltx-2.3-22b-ic-lora-deblur-0.9" | "ltx-2.3-22b-ic-lora-colorization-0.9" | "ltx-2.3-22b-ic-lora-day-to-night-0.9" | "ltx-2.3-22b-ic-lora-in-outpainting-0.9" | "ltx-2.3-22b-ic-lora-instant-shave-0.9" | "ltx-2.3-22b-ic-lora-cross-eyed-0.9" | "ltx-2.3-22b-ic-lora-hdr-0.9" | "ltx-2.3-22b-ic-lora-hdr-scene-emb" | "ltx-2.3-22b-ic-lora-lipdub-0.9" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo") | null;
+            /** Expected Size Bytes */
+            expected_size_bytes: number;
+            /** Filename */
+            filename: string;
+            /**
+             * Gated
+             * @default false
+             */
+            gated: boolean;
+            /**
+             * Is Folder
+             * @default false
+             */
+            is_folder: boolean;
+            /**
+             * Notes
+             * @default
+             */
+            notes: string;
+            /** Preferred Path */
+            preferred_path?: string | null;
+            /** Repo Id */
+            repo_id: string;
+            /**
+             * Scanner Confidence
+             * @enum {string}
+             */
+            scanner_confidence: "exact_catalog_match" | "filename_match" | "heuristic_match" | "unknown";
+            /** Size Bytes */
+            size_bytes?: number | null;
+            /** Source Url */
+            source_url: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "installed" | "missing" | "wrong_folder_usable" | "duplicate";
+            /**
+             * Support Status
+             * @default supported
+             * @enum {string}
+             */
+            support_status: "supported" | "gated" | "unvalidated" | "not_applicable";
+        };
+        /**
+         * ModelLibraryScanResponse
+         * @description Read-only scan result of the user-selected models root.
+         */
+        ModelLibraryScanResponse: {
+            /** Artifacts */
+            artifacts?: components["schemas"]["ModelLibraryArtifact"][];
+            /** Models Dir */
+            models_dir: string;
+            /** Partial Files */
+            partial_files?: components["schemas"]["PartialFile"][];
+            /** Scanned At */
+            scanned_at: string;
+            /** Unknown Files */
+            unknown_files?: components["schemas"]["UnknownFile"][];
+        };
         /** ModelProfileActivateResponse */
         ModelProfileActivateResponse: {
             /** Active Model Profile Id */
@@ -1338,6 +1438,12 @@ export interface components {
              */
             created_at: string;
             /**
+             * Created By
+             * @default user
+             * @enum {string}
+             */
+            created_by: "user" | "wizard" | "official_template";
+            /**
              * Family
              * @default ltx-2.3
              * @enum {string}
@@ -1345,6 +1451,8 @@ export interface components {
             family: "ltx-2" | "ltx-2.3" | "ltxv2" | "custom";
             /** Id */
             id: string;
+            /** Last Scanned At */
+            last_scanned_at?: string | null;
             /** Name */
             name: string;
             /**
@@ -1352,6 +1460,13 @@ export interface components {
              * @default
              */
             notes: string;
+            /** Problems */
+            problems?: components["schemas"]["ModelProfileProblem"][];
+            /**
+             * Schema Version
+             * @default 1
+             */
+            schema_version: number;
             /**
              * Source
              * @default official
@@ -1363,6 +1478,35 @@ export interface components {
              * @default
              */
             updated_at: string;
+            /**
+             * Validation Status
+             * @default candidate
+             * @enum {string}
+             */
+            validation_status: "candidate" | "validated" | "deprecated";
+        };
+        /**
+         * ModelProfileProblem
+         * @description Stable, typed problem object surfaced per profile/artifact.
+         *
+         *     ``code`` is a machine-readable stable identifier (e.g. ``missing_path``,
+         *     ``duplicate``, ``unknown_file``). ``severity`` drives UI badges.
+         *     ``path``/``field`` are optional context anchors.
+         */
+        ModelProfileProblem: {
+            /** Code */
+            code: string;
+            /** Field */
+            field?: string | null;
+            /** Message */
+            message: string;
+            /** Path */
+            path?: string | null;
+            /**
+             * Severity
+             * @enum {string}
+             */
+            severity: "info" | "warning" | "error";
         };
         /** ModelProfileValidationIssuePayload */
         ModelProfileValidationIssuePayload: {
@@ -1410,6 +1554,20 @@ export interface components {
          * @enum {string}
          */
         OutputFormat: "mp4" | "prores_proxy" | "prores_lt" | "prores_422" | "prores_422_hq" | "prores_4444" | "prores_4444_xq" | "exr_zip_half" | "exr_zip_float";
+        /**
+         * PartialFile
+         * @description A partial download artifact (``*.part`` / ``*.tmp``) — never installed.
+         */
+        PartialFile: {
+            /** Absolute Path */
+            absolute_path: string;
+            /** Relative Path */
+            relative_path: string;
+            /** Size Bytes */
+            size_bytes: number;
+            /** Suffix */
+            suffix: string;
+        };
         /** RetakeCancelledResponse */
         RetakeCancelledResponse: {
             /**
@@ -1585,6 +1743,18 @@ export interface components {
             expected_size_bytes: number;
             /** Expected Size Gb */
             expected_size_gb: number;
+        };
+        /**
+         * UnknownFile
+         * @description An unrecognized file in the models root (never deleted).
+         */
+        UnknownFile: {
+            /** Absolute Path */
+            absolute_path: string;
+            /** Relative Path */
+            relative_path: string;
+            /** Size Bytes */
+            size_bytes: number;
         };
     };
     responses: never;
@@ -2382,6 +2552,44 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AdapterStatusResponse"];
+                };
+            };
+            /** @description Client Error */
+            "4XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPErrorResponse"];
+                };
+            };
+            /** @description Server Error */
+            "5XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPErrorResponse"];
+                };
+            };
+        };
+    };
+    route_model_catalog_api_models_catalog_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelLibraryScanResponse"];
                 };
             };
             /** @description Client Error */

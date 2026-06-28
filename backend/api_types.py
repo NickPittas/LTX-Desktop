@@ -325,6 +325,36 @@ ModelProfileCapability: TypeAlias = Literal[
     "t2v", "i2v", "a2v", "retake", "ic_lora", "local_text", "gguf"
 ]
 
+#: Current model profile schema version. Absent ``schema_version`` in a legacy
+#: ``model_profiles.json`` entry is treated as legacy and normalized to this
+#: value on load (in-memory only; no destructive auto-save).
+CURRENT_MODEL_PROFILE_SCHEMA_VERSION: int = 1
+
+ModelProfileCreatedBy: TypeAlias = Literal["user", "wizard", "official_template"]
+ModelProfileValidationStatus: TypeAlias = Literal["candidate", "validated", "deprecated"]
+ModelProfileProblemSeverity: TypeAlias = Literal["info", "warning", "error"]
+
+
+class ModelProfileProblem(BaseModel):
+    """Stable, typed problem object surfaced per profile/artifact.
+
+    ``code`` is a machine-readable stable identifier (e.g. ``missing_path``,
+    ``duplicate``, ``unknown_file``). ``severity`` drives UI badges.
+    ``path``/``field`` are optional context anchors.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    severity: ModelProfileProblemSeverity
+    message: str
+    path: str | None = None
+    field: str | None = None
+
+
+def _default_model_profile_problems() -> list[ModelProfileProblem]:
+    return []
+
 
 class ModelComponentPaths(BaseModel):
     transformer: str | None = None
@@ -363,6 +393,14 @@ class ModelProfilePayload(BaseModel):
     notes: str = ""
     created_at: str = ""
     updated_at: str = ""
+    # Phase 1 schema migration fields — backward-compatible defaults.
+    # These are server-owned: persisted on explicit save/patch/create, but not
+    # auto-saved on load (existing blank-ID repair behavior is unchanged).
+    schema_version: int = CURRENT_MODEL_PROFILE_SCHEMA_VERSION
+    created_by: ModelProfileCreatedBy = "user"
+    validation_status: ModelProfileValidationStatus = "candidate"
+    last_scanned_at: str | None = None
+    problems: list[ModelProfileProblem] = Field(default_factory=_default_model_profile_problems)
 
 
 class ModelProfilePatchPayload(BaseModel):
@@ -488,6 +526,108 @@ class AdapterRecommendationResponse(BaseModel):
     required: list[AdapterRequirementItem]
     missing: list[AdapterID]
     cps_to_download: list[ModelCheckpointID]
+
+
+# ============================================================
+# Model Library Scanner / Catalog Types (Phase 1 — read-only)
+# ============================================================
+
+#: Broad physical kind of a discovered artifact. Not everything is a LoRA.
+ArtifactKind: TypeAlias = Literal[
+    "diffusion_model",
+    "vae",
+    "text_encoder",
+    "gguf",
+    "upscaler",
+    "control_adapter",
+    "lora",
+    "scene_embeddings",
+    "depth_processor",
+    "pose_processor",
+    "person_detector",
+    "image_gen_model",
+]
+
+#: Semantic role within a profile/pipeline (e.g. adapter id, ``base_diffusion_model``).
+#: ``str`` (not Literal) because roles grow with the adapter registry.
+ComponentRole: TypeAlias = str
+
+#: How precisely the scanner matched a discovered file to a catalog entry.
+ScannerConfidence: TypeAlias = Literal[
+    "exact_catalog_match", "filename_match", "heuristic_match", "unknown",
+]
+
+#: Known-artifact status computed by the scanner.
+ScanArtifactStatus: TypeAlias = Literal[
+    "installed", "missing", "wrong_folder_usable", "duplicate",
+]
+
+#: Workflow/pipeline support status — independent of file presence.
+SupportStatus: TypeAlias = Literal[
+    "supported", "gated", "unvalidated", "not_applicable",
+]
+
+
+class ModelLibraryArtifact(BaseModel):
+    """A known catalog artifact with its scan status and provenance."""
+
+    filename: str
+    artifact_kind: ArtifactKind
+    component_role: ComponentRole
+    status: ScanArtifactStatus
+    scanner_confidence: ScannerConfidence
+    canonical_relative_path: str
+    expected_size_bytes: int
+    repo_id: str
+    source_url: str
+    is_folder: bool = False
+    absolute_paths: list[str] = Field(default_factory=list)
+    preferred_path: str | None = None
+    size_bytes: int | None = None
+    support_status: SupportStatus = "supported"
+    gated: bool = False
+    notes: str = ""
+    cp_id: ModelCheckpointID | None = None
+    adapter_id: AdapterID | None = None
+
+
+class UnknownFile(BaseModel):
+    """An unrecognized file in the models root (never deleted)."""
+
+    absolute_path: str
+    relative_path: str
+    size_bytes: int
+
+
+class PartialFile(BaseModel):
+    """A partial download artifact (``*.part`` / ``*.tmp``) — never installed."""
+
+    absolute_path: str
+    relative_path: str
+    size_bytes: int
+    suffix: str
+
+
+def _default_scan_artifacts() -> list[ModelLibraryArtifact]:
+    return []
+
+
+def _default_unknown_files() -> list[UnknownFile]:
+    return []
+
+
+def _default_partial_files() -> list[PartialFile]:
+    return []
+
+
+class ModelLibraryScanResponse(BaseModel):
+    """Read-only scan result of the user-selected models root."""
+
+    models_dir: str
+    scanned_at: str
+    artifacts: list[ModelLibraryArtifact] = Field(default_factory=_default_scan_artifacts)
+    unknown_files: list[UnknownFile] = Field(default_factory=_default_unknown_files)
+    partial_files: list[PartialFile] = Field(default_factory=_default_partial_files)
 
 
 # ============================================================

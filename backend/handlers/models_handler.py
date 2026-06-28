@@ -24,9 +24,11 @@ from api_types import (
     LtxUpgradeRecommendationResponse,
     LTXLocalModelId,
     ModelCheckpointID,
+    ModelLibraryScanResponse,
     TextEncoderRecommendationResponse,
 )
 from handlers.base import StateHandlerBase
+from services.model_scanner import scan_models
 from runtime_config.model_download_specs import (
     ADAPTER_TO_CP_ID,
     ALL_MODEL_CP_IDS,
@@ -385,3 +387,13 @@ class ModelsHandler(StateHandlerBase):
             raise HTTPError(409, "DELETE_PROTECTED_CHECKPOINT")
         for cp_id in cp_ids:
             delete_cp_path(self.models_dir, cp_id)
+
+    def scan_model_library(self) -> ModelLibraryScanResponse:
+        """Snapshot the effective models_dir under lock, then scan outside lock.
+
+        The scanner is read-only and potentially slow (recursive filesystem
+        walk), so the lock is held only long enough to snapshot the path.
+        """
+        with self._lock:
+            models_dir = self.models_dir
+        return scan_models(models_dir)

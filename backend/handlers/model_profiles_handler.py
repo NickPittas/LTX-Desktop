@@ -6,10 +6,11 @@ import json
 import uuid
 from pathlib import Path
 from threading import RLock
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from _routes._errors import HTTPError
 from api_types import (
+    CURRENT_MODEL_PROFILE_SCHEMA_VERSION,
     ModelProfileActivateResponse,
     ModelProfilePatchPayload,
     ModelProfilePayload,
@@ -56,6 +57,23 @@ _PATH_FIELDS = (
 )
 
 
+def _migrate_raw_profile_dict(raw: dict[str, Any]) -> dict[str, Any]:
+    """Apply schema migrations to a raw profile dict before Pydantic validation.
+
+    Phase 1: absent ``schema_version`` is treated as legacy and normalized to
+    the current version. This preserves ``extra="forbid"`` on
+    :class:`~api_types.ModelProfilePayload` by ensuring new fields are present
+    in the dict before validation rather than weakening the schema.
+
+    This function is a no-op for already-current profiles and does NOT trigger
+    a file write — the persisted ``model_profiles.json`` is only updated on
+    explicit save/patch/create (or the existing blank-ID repair path).
+    """
+    if "schema_version" not in raw:
+        return {**raw, "schema_version": CURRENT_MODEL_PROFILE_SCHEMA_VERSION}
+    return raw
+
+
 class ModelProfilesHandler(StateHandlerBase):
     """Persist, list, create, patch, delete, validate, and activate profiles."""
 
@@ -73,7 +91,8 @@ class ModelProfilesHandler(StateHandlerBase):
 
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-            profiles = [ModelProfilePayload(**profile) for profile in raw.get("profiles", [])]
+            migrated = [_migrate_raw_profile_dict(p) for p in raw.get("profiles", [])]
+            profiles = [ModelProfilePayload(**profile) for profile in migrated]
             active_id = raw.get("active_model_profile_id")
         except (json.JSONDecodeError, OSError, TypeError, ValueError):
             profiles = []
