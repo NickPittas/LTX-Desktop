@@ -16,15 +16,29 @@ export interface ProjectAssetCopyResult {
  * When ``proxyPath`` is supplied (ProRes/EXR primary), the primary is preserved
  * verbatim (no transcode) and the proxy is copied alongside — thumbnails are
  * generated from the proxy.
+ *
+ * `onProgress` (optional) receives a 0..1 fraction and the current phase label
+ * for the import (copy/transcode/finalize). It is fed by the
+ * `asset:importProgress` IPC stream filtered to a per-call `jobId`, so callers
+ * can show their own UI; a separate global toast may also listen.
  */
 export async function addVisualAssetToProject(
   srcPath: string,
   projectId: string,
   type: ProjectAssetType,
   proxyPath?: string,
+  onProgress?: (fraction: number, label: string) => void,
 ): Promise<ProjectAssetCopyResult | null> {
+  const jobId = crypto.randomUUID()
+  const unsubscribe = onProgress
+    ? window.electronAPI.onAssetImportProgress((e) => {
+        if (e.jobId !== jobId || e.done) return
+        onProgress(e.percent / 100, e.label)
+      })
+    : null
+
   try {
-    const result = await window.electronAPI.addVisualAssetToProject({ srcPath, projectId, type, proxyPath })
+    const result = await window.electronAPI.addVisualAssetToProject({ srcPath, projectId, type, proxyPath, jobId })
     if (result.success) {
       return {
         path: result.path,
@@ -38,6 +52,8 @@ export async function addVisualAssetToProject(
     logger.warn(`Failed to add asset to project folder: ${result.error}`)
   } catch (e) {
     logger.warn(`Failed to add asset to project folder: ${e}`)
+  } finally {
+    unsubscribe?.()
   }
   return null
 }

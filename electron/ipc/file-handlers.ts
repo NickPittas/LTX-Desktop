@@ -1,4 +1,5 @@
 import { dialog } from 'electron'
+import { randomUUID } from 'crypto'
 import path from 'path'
 import fs from 'fs'
 import { getAllowedRoots } from '../config'
@@ -6,9 +7,62 @@ import { logger } from '../logger'
 import { getMainWindow } from '../window'
 import { validatePath, approvePath } from '../path-validation'
 import { getProjectAssetsPath, setProjectAssetsPath } from '../app-state'
-import { extractVideoFrameToFile, findFfmpegPath, getVideoDimensions, runFfmpeg } from '../export/ffmpeg-utils'
+import { extractVideoFrameToFile, findFfmpegPath, getMediaDurationSeconds, getVideoDimensions, runFfmpeg } from '../export/ffmpeg-utils'
 import { createDownsampledThumbnail, getImageDimensions, getThumbnailPaths } from './image-utils'
 import { handle } from './typed-handle'
+
+/** A labeled phase of an asset-import job with a relative weight (0..N). */
+interface ImportPhase {
+  label: string
+  weight: number
+  /** When true, the phase reports no determinate fraction (e.g. a single-file copy). */
+  indeterminate?: boolean
+}
+
+/**
+ * Streams overall job progress (0..100, blended across weighted phases) to the
+ * renderer via the `asset:importProgress` IPC channel. Determinate phases
+ * interpolate their fraction into the overall percent; indeterminate phases
+ * emit a single marker at the phase boundary so the toast can show a pulsing
+ * bar without a known percent.
+ */
+function createImportJobTracker(jobId: string, phases: ImportPhase[]) {
+  const totalWeight = phases.reduce((sum, p) => sum + p.weight, 0) || 1
+  let phaseIdx = -1
+  let weightBeforeCurrent = 0
+
+  const emit = (e: { percent?: number; label: string; done?: boolean; indeterminate?: boolean }): void => {
+    getMainWindow()?.webContents.send('asset:importProgress', {
+      jobId,
+      percent: e.percent ?? 0,
+      label: e.label,
+      done: e.done,
+      indeterminate: e.indeterminate,
+    })
+  }
+
+  return {
+    startNext(): void {
+      phaseIdx += 1
+      const phase = phases[phaseIdx]
+      if (!phase) return
+      const pct = (weightBeforeCurrent / totalWeight) * 100
+      emit({ percent: pct, label: phase.label, indeterminate: phase.indeterminate === true })
+    },
+    /** Report a determinate fraction (0..1) within the current phase. No-op for indeterminate phases. */
+    report(fraction: number): void {
+      const phase = phases[phaseIdx]
+      if (!phase || phase.indeterminate) return
+      const clamped = Math.max(0, Math.min(1, fraction))
+      const base = weightBeforeCurrent - phase.weight
+      const pct = ((base + phase.weight * clamped) / totalWeight) * 100
+      emit({ percent: pct, label: phase.label })
+    },
+    done(): void {
+      emit({ percent: 100, label: 'Done', done: true })
+    },
+  }
+}
 
 const MIME_TYPES: Record<string, string> = {
   '.png': 'image/png',
@@ -95,6 +149,29 @@ function getUniqueDestinationPath(destDir: string, fileName: string): string {
   return candidate
 }
 
+/** Recursively list all files under `rootDir`, relative to it. */
+function listFilesRecursive(rootDir: string): string[] {
+  const out: string[] = []
+  const walk = (dir: string) => {
+    let entries: fs.Dirent[]
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        walk(full)
+      } else if (entry.isFile()) {
+        out.push(path.relative(rootDir, full))
+      }
+    }
+  }
+  walk(rootDir)
+  return out
+}
+
 function copyToProjectAssetDirectory(srcPath: string, projectId: string): string {
   const assetsRoot = getProjectAssetsPath()
   const destDir = path.join(assetsRoot, projectId)
@@ -110,6 +187,48 @@ function copyToProjectAssetDirectory(srcPath: string, projectId: string): string
   return destPath
 }
 
+/**
+ * Copy a visual asset into project storage with optional progress reporting.
+ *
+ * - Directory (EXR sequence): count files first, then copy per-file, reporting
+ *   `copied/total` as a 0..1 fraction (determinate).
+ * - Single file: report `-1` (indeterminate) before the copy and `1` after, so
+ *   the caller can show a pulsing bar while preserving the fast `copyFileSync`
+ *   path (sendfile/copy_file_range) — no read/write loop overhead.
+ */
+function copyVisualAssetWithProgress(
+  srcPath: string,
+  projectId: string,
+  onProgress?: (fraction: number) => void,
+): string {
+  const assetsRoot = getProjectAssetsPath()
+  const destDir = path.join(assetsRoot, projectId)
+  fs.mkdirSync(destDir, { recursive: true })
+  const fileName = path.basename(srcPath)
+  const destPath = getUniqueDestinationPath(destDir, fileName)
+
+  if (fs.statSync(srcPath).isDirectory()) {
+    const files = listFilesRecursive(srcPath)
+    const total = files.length || 1
+    let copied = 0
+    for (const rel of files) {
+      const srcFile = path.join(srcPath, rel)
+      const destFile = path.join(destPath, rel)
+      fs.mkdirSync(path.dirname(destFile), { recursive: true })
+      fs.copyFileSync(srcFile, destFile)
+      copied += 1
+      onProgress?.(copied / total)
+    }
+    onProgress?.(1)
+  } else {
+    // Single file → indeterminate (keep the fast sendfile-backed copy path).
+    onProgress?.(-1)
+    fs.copyFileSync(srcPath, destPath)
+    onProgress?.(1)
+  }
+  return destPath
+}
+
 function createVideoBigThumbnail(videoPath: string, bigThumbnailPath: string): void {
   extractVideoFrameToFile({
     videoPath,
@@ -119,7 +238,15 @@ function createVideoBigThumbnail(videoPath: string, bigThumbnailPath: string): v
   })
 }
 
-async function transcodeVideoInPlace(videoPath: string): Promise<void> {
+/**
+ * Transcode a project video copy to H.264/AAC for reliable browser playback.
+ *
+ * Runs ffmpeg in ISOLATED mode (not registered in `activeExportProcess`, so
+ * export-cancel cannot kill it) and streams progress via `onProgress` (0..1)
+ * derived from the input's probed duration. The caller owns progress
+ * aggregation/blending.
+ */
+async function transcodeVideoInPlace(videoPath: string, onProgress?: (pct: number) => void): Promise<void> {
   const ffmpegPath = findFfmpegPath()
   if (!ffmpegPath) {
     throw new Error('ffmpeg not found for video transcoding')
@@ -141,7 +268,14 @@ async function transcodeVideoInPlace(videoPath: string): Promise<void> {
     tmpPath,
   ]
 
-  const result = await runFfmpeg(ffmpegPath, args)
+  // Probe input duration so `out_time_us` can be converted into a 0..1 fraction.
+  const durationSec = getMediaDurationSeconds(videoPath)
+  const durationUs = durationSec != null && durationSec > 0
+    ? Math.round(durationSec * 1_000_000)
+    : undefined
+
+  // Isolated: import transcodes must NOT be killable by the global export-cancel.
+  const result = await runFfmpeg(ffmpegPath, args, { onProgress, isolated: true, durationUs })
   if (!result.success) {
     try { fs.unlinkSync(tmpPath) } catch { /* best-effort cleanup */ }
     throw new Error(`Video transcoding failed for ${videoPath}: ${result.error}`)
@@ -318,30 +452,76 @@ export function registerFileHandlers(): void {
     return searchDirectoryForFilesImpl(directory, filenames)
   })
 
-  handle('addVisualAssetToProject', async ({ srcPath, projectId, type, proxyPath }) => {
+  handle('addVisualAssetToProject', async ({ srcPath, projectId, type, proxyPath, jobId }) => {
+    const id = jobId && jobId.length > 0 ? jobId : randomUUID()
+
+    const fail = (error: unknown): { success: false; error: string } => {
+      // Ensure the toast dismisses even when we throw before tracker.done().
+      getMainWindow()?.webContents.send('asset:importProgress', {
+        jobId: id,
+        percent: 0,
+        label: 'Failed',
+        done: true,
+      })
+      logger.error(`Error adding asset to project: ${error}`)
+      return { success: false, error: String(error) }
+    }
+
     try {
       const resolvedSrc = resolveLocalSourcePath(srcPath)
-      const destPath = copyToProjectAssetDirectory(resolvedSrc, projectId)
+      const srcIsDir = fs.statSync(resolvedSrc).isDirectory()
+
+      // Build the phase plan for this import path so overall progress maps
+      // determinate phases (dir copy, transcode) into weighted sub-ranges and
+      // marks quick/unknowable phases (single-file copy, finalize) indeterminate.
+      const phases: ImportPhase[] = []
+      if (proxyPath) {
+        // ProRes/EXR primary preserved verbatim + proxy copied alongside.
+        // No transcode (Phase 3a primary-preservation).
+        phases.push({ label: 'Importing asset…', weight: 40, indeterminate: !srcIsDir })
+        phases.push({ label: 'Importing preview…', weight: 50, indeterminate: true })
+        phases.push({ label: 'Finalizing…', weight: 10, indeterminate: true })
+      } else if (type === 'video') {
+        // Legacy / no-proxy path: copy + in-place H.264 transcode (the slow op).
+        phases.push({ label: 'Importing asset…', weight: 5, indeterminate: !srcIsDir })
+        phases.push({ label: 'Transcoding preview…', weight: 90 })
+        phases.push({ label: 'Finalizing…', weight: 5, indeterminate: true })
+      } else {
+        phases.push({ label: 'Importing asset…', weight: 80, indeterminate: !srcIsDir })
+        phases.push({ label: 'Finalizing…', weight: 20, indeterminate: true })
+      }
+
+      const tracker = createImportJobTracker(id, phases)
+
+      // Phase 1: copy primary
+      tracker.startNext()
+      const destPath = copyVisualAssetWithProgress(resolvedSrc, projectId, (fraction) => {
+        // fraction < 0 === indeterminate marker; ignore (already emitted at start).
+        if (fraction >= 0) tracker.report(fraction)
+      })
 
       let projectProxyPath: string | undefined
       let thumbnailSourcePath = destPath
 
       if (proxyPath) {
-        // Proxy-supplied path (ProRes .mov / EXR dir primary): preserve the
-        // primary VERBATIM — do NOT call transcodeVideoInPlace. Copy the proxy
-        // MP4 alongside and use it for thumbnails/dimensions (browser-playable).
+        // Phase 2 (proxy path): copy proxy MP4 alongside (no transcode —
+        // primary preserved verbatim per Phase 3a).
+        tracker.startNext()
         const resolvedProxy = resolveLocalSourcePath(proxyPath)
-        projectProxyPath = copyToProjectAssetDirectory(resolvedProxy, projectId)
+        projectProxyPath = copyVisualAssetWithProgress(resolvedProxy, projectId)
         thumbnailSourcePath = projectProxyPath
       } else if (type === 'video') {
-        // Legacy / no-proxy path: transcode video project copy to H.264/AAC for
-        // reliable browser playback (current behavior, byte-for-byte unchanged).
-        await transcodeVideoInPlace(destPath)
+        // Phase 2 (legacy video path): in-place transcode (isolated, progress).
+        tracker.startNext()
+        await transcodeVideoInPlace(destPath, (pct) => tracker.report(pct))
       }
 
-      // Thumbnails/dimensions generated from the browser-playable source.
+      // Final phase: thumbnails + dimensions from the browser-playable source.
+      tracker.startNext()
       const { bigThumbnailPath, smallThumbnailPath } = createVisualThumbnails(thumbnailSourcePath, type)
       const { width, height } = getVisualAssetDimensions(thumbnailSourcePath, type)
+
+      tracker.done()
 
       return {
         success: true,
@@ -353,8 +533,7 @@ export function registerFileHandlers(): void {
         height,
       }
     } catch (error) {
-      logger.error(`Error adding asset to project: ${error}`)
-      return { success: false, error: String(error) }
+      return fail(error)
     }
   })
 

@@ -1,4 +1,4 @@
-import { electronAPISchemas, type BackendHealthStatus } from '../shared/electron-api-schema'
+import { electronAPISchemas, type AssetImportProgressEvent, type BackendHealthStatus } from '../shared/electron-api-schema'
 import { HF_GATING_ENABLED } from '../shared/feature-flags'
 
 const { contextBridge, ipcRenderer, webUtils } = require('electron')
@@ -22,6 +22,14 @@ api.onBackendHealthStatus = (cb: (data: BackendHealthStatus) => void) => {
   ipcRenderer.on('backend-health-status', listener)
   return () => {
     ipcRenderer.removeListener('backend-health-status', listener)
+  }
+}
+
+api.onAssetImportProgress = (cb: (data: AssetImportProgressEvent) => void) => {
+  const listener = (_: unknown, data: AssetImportProgressEvent) => cb(data)
+  ipcRenderer.on('asset:importProgress', listener)
+  return () => {
+    ipcRenderer.removeListener('asset:importProgress', listener)
   }
 }
 

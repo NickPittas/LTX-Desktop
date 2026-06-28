@@ -64,6 +64,21 @@ const backendAdminRequest = z.object({
 
 export type BackendHealthStatus = z.infer<typeof backendHealthStatus>
 
+/**
+ * Progress event streamed from main → renderer during a visual-asset import
+ * (copy + optional transcode + thumbnails). Emitted on the `asset:importProgress`
+ * channel. `done: true` marks completion (including failure) so listeners can
+ * dismiss; `indeterminate: true` means the percent is unknowable for this phase
+ * (e.g. a single-file copy) and the UI should render a pulsing bar.
+ */
+export interface AssetImportProgressEvent {
+  jobId: string
+  percent: number
+  label: string
+  done?: boolean
+  indeterminate?: boolean
+}
+
 export const electronAPISchemas = {
   // App info
   getBackend: {
@@ -176,7 +191,7 @@ export const electronAPISchemas = {
 
   // Project assets
   addVisualAssetToProject: {
-    input: z.object({ srcPath: z.string(), projectId: z.string(), type: z.enum(['video', 'image']), proxyPath: z.string().optional() }),
+    input: z.object({ srcPath: z.string(), projectId: z.string(), type: z.enum(['video', 'image']), proxyPath: z.string().optional(), jobId: z.string().optional() }),
     output: ipcResult({
       path: z.string(),
       proxyPath: z.string().nullable().optional(),
@@ -334,6 +349,7 @@ export type ElectronAPI = InvokeAPI & {
   onPythonSetupProgress: (cb: (data: unknown) => void) => void
   removePythonSetupProgress: () => void
   onBackendHealthStatus: (cb: (data: BackendHealthStatus) => void) => (() => void)
+  onAssetImportProgress: (cb: (data: AssetImportProgressEvent) => void) => (() => void)
   getPathForFile: (file: File) => string
   platform: string
   hfGatingEnabled: boolean

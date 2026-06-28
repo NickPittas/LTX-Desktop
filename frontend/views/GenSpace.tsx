@@ -16,6 +16,7 @@ import { useIcLora } from '../hooks/use-ic-lora'
 import type { ICLoraConditioningType } from '../components/ICLoraPanel'
 import type { Asset } from '../types/project-model'
 import { GenerationErrorDialog } from '../components/GenerationErrorDialog'
+import { ImportProgressToast } from '../components/ImportProgressToast'
 import { addVisualAssetToProject } from '../lib/asset-copy'
 import { pathToFileUrl } from '../lib/file-url'
 import {
@@ -2059,6 +2060,11 @@ export function GenSpace() {
           }}
         />
       )}
+
+      {/* Non-blocking import/transcode progress for generated-asset imports.
+          Listens globally to asset:importProgress, so all three add-asset call
+          sites (T2V/I2V/A2V, IC-LoRA, retake) get feedback automatically. */}
+      <ImportProgressToast />
     </div>
   )
 }
