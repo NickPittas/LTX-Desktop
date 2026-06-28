@@ -32,6 +32,8 @@ import services.patches.safetensors_metadata_fix as _safetensors_metadata_fix  #
 del _safetensors_metadata_fix
 import services.patches.pinned_pool_fix as _pinned_pool_fix  # pyright: ignore[reportUnusedImport]  # Remove once ltx-core restores bounded pinned pool
 del _pinned_pool_fix
+import services.patches.sequence_decode_patch as _sequence_decode_patch  # pyright: ignore[reportUnusedImport]  # Image-sequence inputs via decode_video_by_frame
+del _sequence_decode_patch
 
 from state.app_settings import AppSettings
 

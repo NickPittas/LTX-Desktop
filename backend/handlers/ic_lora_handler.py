@@ -10,6 +10,8 @@ from pathlib import Path
 from threading import RLock
 from typing import TYPE_CHECKING, Literal
 
+import torch
+
 from api_types import (
     ConditioningType,
     IcLoraExtractRequest,
@@ -38,7 +40,7 @@ from runtime_config.model_download_specs import (
 from runtime_config.runtime_config import RuntimeConfig
 from state.conditioning_cache import ConditioningCacheEntry, ConditioningCacheKey
 from services.interfaces import VideoProcessor
-from services.exr_input import is_exr_input, resolve_video_input_path
+from services.sequence_input import is_sequence_file, sequence_metadata, resolve_sequence, decode_sequence_frames
 from services.color_management import detect_colorspace
 from services.ltx_pipeline_common import make_encode_progress_callback, make_primary_output_path, make_proxy_output_path
 from services.media_encoder.media_encoder import MediaEncoder
@@ -447,11 +449,12 @@ class IcLoraHandler(StateHandlerBase):
             if not mask_path.exists():
                 raise HTTPError(400, f"Mask not found: {req.mask_path}")
 
-        # P0-3: EXR source resolution — the handler's VideoProcessor.open_video
-        # at :516 can't open an EXR dir/file. Resolve to a temp MP4 BEFORE that
-        # call so metadata reads succeed. Non-EXR: resolve_video_input_path
-        # returns the path UNCHANGED (pure-suffix gate, zero I/O).
-        resolved_video_path = resolve_video_input_path(str(video_path))
+        # Image-sequence input: video_path is a SINGLE FILE from a sequence
+        # (e.g. …/EXR/shot_0001.exr) — pass it through UNCHANGED. No temp file,
+        # no directory. The patched decode_video_by_frame resolves the sequence
+        # where the model decodes the user video; sequence_metadata supplies the
+        # dims/count/fps here (avoids trying to av.open a frame file).
+        is_sequence = is_sequence_file(str(video_path))
 
         if workflow == "union_control" and req.conditioning_type is None:
             raise HTTPError(400, "Union Control requires conditioning_type (canny or depth)")
@@ -519,14 +522,23 @@ class IcLoraHandler(StateHandlerBase):
             t_text_end = time.perf_counter()
             logger.info("[ic-lora] Text encoding (%s): %.2fs", encoding_method, t_text_end - t_text_start)
 
-            cap = self._video_processor.open_video(resolved_video_path)
-            if not cap.isOpened():
-                raise HTTPError(400, f"Cannot open video: {video_path}")
-            info = self._video_processor.get_video_info(cap)
-            input_width = int(info["width"])
-            input_height = int(info["height"])
-            frame_count = int(info["frame_count"])
-            fps = float(info["fps"])
+            # Metadata: sequence files use sequence_metadata (av.open/cv2 cannot
+            # open a single EXR/PNG-seq frame); video files use the cv2-backed
+            # VideoProcessor. The ORIGINAL single-file video_path is passed
+            # downstream (no temp file, no directory).
+            if is_sequence:
+                seq_w, seq_h, seq_count, seq_fps = sequence_metadata(str(video_path))
+                input_width, input_height, frame_count, fps = seq_w, seq_h, seq_count, seq_fps
+                cap = None
+            else:
+                cap = self._video_processor.open_video(str(video_path))
+                if not cap.isOpened():
+                    raise HTTPError(400, f"Cannot open video: {video_path}")
+                info = self._video_processor.get_video_info(cap)
+                input_width = int(info["width"])
+                input_height = int(info["height"])
+                frame_count = int(info["frame_count"])
+                fps = float(info["fps"])
 
             t_preprocess_start: float = 0.0
             t_preprocess_end: float = 0.0
@@ -536,7 +548,8 @@ class IcLoraHandler(StateHandlerBase):
                 cached = ic_state.conditioning_cache.get(cache_key)
 
                 if cached is not None:
-                    self._video_processor.release(cap)
+                    if cap is not None:
+                        self._video_processor.release(cap)
                     control_video_path = cached.control_video_path
                     frame_count = cached.frame_count
                     fps = cached.fps
@@ -555,22 +568,44 @@ class IcLoraHandler(StateHandlerBase):
                         control_video_path,
                         fourcc="mp4v",
                         fps=fps,
-                        size=(int(info["width"]), int(info["height"])),
+                        size=(input_width, input_height),
                     )
 
                     assert req.conditioning_type is not None
                     frame_idx = 0
-                    while frame_idx < frame_count:
-                        frame = self._video_processor.read_frame(cap)
-                        if frame is None:
-                            break
-                        control_frame = self._build_conditioning_frame(
-                            frame, req.conditioning_type, ic_state
-                        )
-                        writer.write(control_frame)
-                        frame_idx += 1
+                    # Frame source: sequence files decode via decode_sequence_frames
+                    # (cv2 cannot read EXR/PNG-seq frames); video files use
+                    # VideoProcessor.read_frame (BGR, byte-identical to before).
+                    if is_sequence:
+                        import numpy as np  # noqa: PLC0415
 
-                    self._video_processor.release(cap)
+                        spec = resolve_sequence(str(video_path))
+                        assert spec is not None
+                        seq_frames = decode_sequence_frames(
+                            spec, frame_cap=frame_count, device=torch.device("cpu")
+                        )
+                        for tensor in seq_frames:
+                            rgb = tensor.squeeze(0).numpy()  # (H,W,3) RGB uint8
+                            frame = np.ascontiguousarray(rgb[:, :, ::-1])  # RGB→BGR for cv2 processors
+                            control_frame = self._build_conditioning_frame(
+                                frame, req.conditioning_type, ic_state
+                            )
+                            writer.write(control_frame)
+                            frame_idx += 1
+                    else:
+                        assert cap is not None  # non-sequence path opened a cv2 cap above
+                        while frame_idx < frame_count:
+                            frame = self._video_processor.read_frame(cap)
+                            if frame is None:
+                                break
+                            control_frame = self._build_conditioning_frame(
+                                frame, req.conditioning_type, ic_state
+                            )
+                            writer.write(control_frame)
+                            frame_idx += 1
+
+                    if cap is not None:
+                        self._video_processor.release(cap)
                     self._video_processor.release(writer)
                     t_preprocess_end = time.perf_counter()
                     logger.info(
@@ -583,8 +618,10 @@ class IcLoraHandler(StateHandlerBase):
                     )
             else:
                 # No conditioning: use original video as the control signal
-                self._video_processor.release(cap)
+                if cap is not None:
+                    self._video_processor.release(cap)
                 control_video_path = str(video_path)
+
 
             images: list[ImageConditioningInput] = [
                 ImageConditioningInput(path=img.path, frame_idx=int(img.frame), strength=float(img.strength))
@@ -601,8 +638,8 @@ class IcLoraHandler(StateHandlerBase):
             height = _align_up(input_height, align_to)
 
             output_format = req.output_format or OutputFormat.MP4
-            # CM-2: detect source CS for EXR inputs (output-CS preservation).
-            input_colorspace = detect_colorspace(req.video_path) if (req.video_path and is_exr_input(req.video_path)) else None
+            # CM-2: detect source CS for sequence/EXR inputs (output-CS preservation).
+            input_colorspace = detect_colorspace(str(video_path)) if is_sequence else None
             output_path = make_primary_output_path(
                 str(self.config.outputs_dir), "ic_lora", output_format, uuid.uuid4().hex[:8]
             )
@@ -618,7 +655,7 @@ class IcLoraHandler(StateHandlerBase):
                     num_frames=frame_count,
                     frame_rate=fps,
                     images=images,
-                    video_path=resolved_video_path,
+                    video_path=str(video_path),
                     mask_path=str(req.mask_path),
                     output_path=output_path,
                     conditioning_strength=req.conditioning_strength,

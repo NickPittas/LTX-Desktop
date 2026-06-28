@@ -1,15 +1,18 @@
-"""EXR-input + input→Rec.709 tests (CM-1b).
+"""EXR single-file input + input→Rec.709 tests (CM-1b rework).
 
-SAFETY-FIRST: the headline test ``test_non_exr_inputs_are_byte_identical`` is the
-mandatory inpaint-protection gate — it proves the branched code path yields
-bit-exact conditioning tensors vs the legacy decode path for MP4 + sRGB PNG.
-EXR tests verify the new decode+transfer (linear → Rec.709 gamma). No /mnt paths
-in committed tests (the fixture check lives in the untracked validation script).
+The dir-based EXR path (CM-1b + P0-3) is GONE — ``video_path`` is now a SINGLE
+FILE from a sequence, resolved by :mod:`services.sequence_input` (see
+``test_sequence_input.py``). This file keeps the EXR image-conditioning color
+tests + the byte-identity gates for the reworked production branches.
+
+SAFETY-FIRST: ``test_non_exr_inputs_are_byte_identical`` +
+``test_bt709_video_input_byte_identical`` + the two ``test_production_inpaint_*``
+gates prove the reworked branches yield bit-exact conditioning tensors for the
+validated MP4 inpaint path. No /mnt paths in committed tests.
 """
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -17,16 +20,11 @@ import numpy as np
 import pytest
 import torch
 
-from api_types import ImageConditioningInput
-from services.color_management import REC709, bt709_oetf
+from services.color_management import bt709_oetf
 from services.exr_input import (
     decode_exr_image,
-    decode_exr_sequence,
-    is_exr_input,
-    iter_exr_frames_as_video_tensors,
     iter_video_frames_to_model_domain,
     resolve_image_input_path,
-    resolve_video_input_path,
 )
 
 
@@ -77,22 +75,20 @@ def _write_exr(path: Path, linear_rgb: np.ndarray, chromaticities: object = None
 
 
 # ---------------------------------------------------------------------------
-# THE inpaint-protection gate (mandatory, must not be weakened)
+# THE inpaint-protection gates (mandatory, must not be weakened)
 # ---------------------------------------------------------------------------
 
 def test_non_exr_inputs_are_byte_identical(tmp_path: Path) -> None:
-    """For NON-EXR inputs the conditioning frames must be BIT-EXACT vs legacy.
+    """For NON-sequence video inputs the conditioning frames must be BIT-EXACT vs
+    the legacy ``decode_video_by_frame``.
 
-    Exercises the EXACT branch pattern wired at the chokepoints: for a non-EXR
-    path the ternary must select ``decode_video_by_frame`` (the legacy decoder)
-    with identical args. We replicate the branch and assert the yielded tensors
-    equal the direct legacy call, for both an MP4 and (via the image resolver)
-    a PNG. This is the byte-identity guarantee for the validated inpaint path.
+    The reworked production branch is a single ``iter_video_frames_to_model_domain``
+    call; for a bt709/untagged MP4 it must passthrough byte-identical to the
+    legacy decoder. This is the byte-identity guarantee for the validated inpaint.
     """
     from ltx_pipelines.utils.media_io import decode_video_by_frame
 
     device = torch.device("cpu")
-    # A tiny synthetic MP4 (2 frames, 16x16, distinct pixel values).
     frames = np.stack([
         np.full((16, 16, 3), 50, dtype=np.uint8),
         np.full((16, 16, 3), 200, dtype=np.uint8),
@@ -100,22 +96,14 @@ def test_non_exr_inputs_are_byte_identical(tmp_path: Path) -> None:
     mp4 = tmp_path / "src.mp4"
     _write_mp4(mp4, frames)
 
-    # Legacy path (what the non-EXR branch MUST call).
     legacy = [t.cpu() for t in decode_video_by_frame(path=str(mp4), frame_cap=2, device=device)]
-
-    # Branched path (the wired pattern at the chokepoints).
     branched = [
-        t.cpu() for t in (
-            iter_exr_frames_as_video_tensors(str(mp4), frame_cap=2, device=device)
-            if is_exr_input(str(mp4))
-            else decode_video_by_frame(path=str(mp4), frame_cap=2, device=device)
-        )
+        t.cpu() for t in iter_video_frames_to_model_domain(str(mp4), frame_cap=2, device=device)
     ]
 
-    assert is_exr_input(str(mp4)) is False, "MP4 must not be detected as EXR"
     assert len(legacy) == len(branched) == 2
     for a, b in zip(legacy, branched):
-        assert torch.equal(a, b), "non-EXR video branch must be byte-identical to legacy"
+        assert torch.equal(a, b), "non-sequence video branch must be byte-identical to legacy"
 
     # Image-conditioning path: PNG resolves to ITSELF (identity), not a temp file.
     png = tmp_path / "src.png"
@@ -139,7 +127,6 @@ def test_exr_image_input_transferred_to_rec709(tmp_path: Path) -> None:
     exr = tmp_path / "lin.exr"
     _write_exr(exr, np.full((16, 16, 3), linear_val, dtype=np.float32))
 
-    # Image-conditioning resolution → temp PNG in Rec.709 gamma domain.
     resolved = resolve_image_input_path(str(exr))
     assert resolved != str(exr), "EXR must resolve to a temp PNG"
     assert Path(resolved).suffix == ".png"
@@ -163,51 +150,6 @@ def test_decode_exr_image_linear_value(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# EXR sequence input → video frames in Rec.709
-# ---------------------------------------------------------------------------
-
-def test_exr_sequence_input(tmp_path: Path) -> None:
-    """N=4 linear EXR frames → 4 video tensors, each transferred to Rec.709 gamma."""
-    seq_dir = tmp_path / "exr_seq"
-    seq_dir.mkdir()
-    for i in range(4):
-        _write_exr(seq_dir / f"frame_{i:05d}.exr",
-                   np.full((12, 12, 3), 0.5, dtype=np.float32))
-
-    frames = list(decode_exr_sequence(str(seq_dir)))
-    assert len(frames) == 4
-
-    # As video tensors (matches decode_video_by_frame output): (1,H,W,3) uint8.
-    tensors = list(iter_exr_frames_as_video_tensors(str(seq_dir), frame_cap=None, device=torch.device("cpu")))
-    assert len(tensors) == 4
-    for t in tensors:
-        assert t.shape == (1, 12, 12, 3)
-        assert t.dtype == torch.uint8
-    # Each transferred to bt709_oetf(0.5)*255 = 180.
-    expected = int(round(float(bt709_oetf(np.array([0.5], dtype=np.float32))[0]) * 255.0))
-    assert int(tensors[0][0, 0, 0, 0]) == expected
-
-    # frame_cap respected.
-    capped = list(iter_exr_frames_as_video_tensors(str(seq_dir), frame_cap=2, device=torch.device("cpu")))
-    assert len(capped) == 2
-
-
-def test_exr_sequence_fixture_pattern_sorts(tmp_path: Path) -> None:
-    """The fixture ``Name_####.exr`` pattern is sorted by trailing digit."""
-    seq_dir = tmp_path / "fixture_pattern"
-    seq_dir.mkdir()
-    # Write out of order; decode_exr_sequence must yield in numeric order.
-    for i in (3, 0, 2, 1):
-        _write_exr(seq_dir / f"Instant_Shave_Beard_{i:04d}.exr",
-                   np.full((4, 4, 3), 0.1 * i, dtype=np.float32))
-    frames = list(decode_exr_sequence(str(seq_dir)))
-    assert len(frames) == 4
-    # Sorted ascending → values 0.0, 0.1, 0.2, 0.3.
-    np.testing.assert_allclose(frames[0][0, 0, 0], 0.0, atol=1e-3)
-    np.testing.assert_allclose(frames[3][0, 0, 0], 0.3, atol=2e-3)
-
-
-# ---------------------------------------------------------------------------
 # media_validation EXR allow-list
 # ---------------------------------------------------------------------------
 
@@ -219,12 +161,10 @@ def test_media_validation_accepts_exr(tmp_path: Path) -> None:
     _write_exr(exr, np.full((8, 8, 3), 0.5, dtype=np.float32))
     assert validate_image_file(str(exr)) == exr
 
-    # Non-EXR unchanged: a valid PNG still validates.
     png = tmp_path / "ok.png"
     _write_srgb_png(png, np.full((8, 8, 3), 128, dtype=np.uint8))
     assert validate_image_file(str(png)) == png
 
-    # Invalid EXR (garbage) is rejected.
     bad = tmp_path / "bad.exr"
     bad.write_bytes(b"not an exr")
     from _routes._errors import HTTPError
@@ -234,139 +174,13 @@ def test_media_validation_accepts_exr(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Predicate
-# ---------------------------------------------------------------------------
-
-def test_is_exr_input_predicate(tmp_path: Path) -> None:
-    exr = tmp_path / "a.exr"
-    _write_exr(exr, np.full((4, 4, 3), 0.5, dtype=np.float32))
-    assert is_exr_input(str(exr)) is True
-
-    # EXR sequence dir — the pure-suffix gate requires the dir basename to signal
-    # EXR (ends with `_exr` or is `exr`); our convention is `..._exr/`.
-    seq = tmp_path / "clip_exr"
-    seq.mkdir()
-    _write_exr(seq / "frame_00000.exr", np.full((4, 4, 3), 0.5, dtype=np.float32))
-    assert is_exr_input(str(seq)) is True
-
-    mp4 = tmp_path / "a.mp4"
-    _write_mp4(mp4, np.full((1, 8, 8, 3), 50, dtype=np.uint8))
-    assert is_exr_input(str(mp4)) is False
-    assert is_exr_input("/nonexistent/foo.exr") is False
-
-
-def test_is_exr_input_zero_io_on_non_exr() -> None:
-    """Non-EXR inputs must incur ZERO filesystem I/O from the gate.
-
-    Pure-suffix fast path: a non-.exr path returns False without stat/open. We
-    assert this by pointing at a path whose parent doesn't exist (a stat would
-    raise) — the gate must return False cleanly without touching the FS.
-    """
-    # These paths do not exist and cannot be stat'd; the gate must NOT probe them.
-    assert is_exr_input("/no/such/dir/video.mp4") is False
-    assert is_exr_input("/no/such/dir/image.png") is False
-    assert is_exr_input("/no/such/dir/clip.mov") is False
-    # A dir whose name does NOT signal EXR is never probed (even if it existed).
-    assert is_exr_input("/tmp/definitely_not_probed_dir") is False
-
-
-# ---------------------------------------------------------------------------
-# Production-path identity (item 5): full video_preprocess chain, not just raw frames
-# ---------------------------------------------------------------------------
-
-def test_production_inpaint_video_branch_identity(tmp_path: Path) -> None:
-    """The production inpaint video branch (ltx_ic_lora_pipeline.py:526) on a
-    NON-EXR input must yield a byte-identical *conditioning tensor* (after the
-    full video_preprocess + normalize_latent chain), vs the legacy decode.
-
-    Stronger than the raw-frame check: proves the whole downstream pipeline
-    receives identical input for the validated MP4 inpaint path.
-    """
-    from ltx_pipelines.utils.media_io import decode_video_by_frame, video_preprocess
-
-    device = torch.device("cpu")
-    dtype = torch.float32
-    frames = np.stack([
-        np.full((16, 16, 3), 30, dtype=np.uint8),
-        np.full((16, 16, 3), 120, dtype=np.uint8),
-        np.full((16, 16, 3), 220, dtype=np.uint8),
-    ])
-    mp4 = tmp_path / "inpaint_src.mp4"
-    _write_mp4(mp4, frames)
-
-    # Legacy conditioning tensor.
-    legacy = video_preprocess(
-        decode_video_by_frame(path=str(mp4), frame_cap=3, device=device),
-        16, 16, dtype, device,
-    )
-
-    # The EXACT production branch expression (generate_inpaint).
-    branched_gen = (
-        iter_exr_frames_as_video_tensors(str(mp4), frame_cap=3, device=device)
-        if is_exr_input(str(mp4))
-        else decode_video_by_frame(path=str(mp4), frame_cap=3, device=device)
-    )
-    branched = video_preprocess(branched_gen, 16, 16, dtype, device)
-
-    assert is_exr_input(str(mp4)) is False
-    assert torch.equal(legacy, branched), (
-        "production inpaint branch must yield byte-identical conditioning tensor"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Retake: non-EXR identity + zero-I/O, EXR metadata-ordering fix
-# ---------------------------------------------------------------------------
-
-def test_retake_non_exr_identity_zero_io() -> None:
-    """resolve_video_input_path on a NON-EXR path returns it UNCHANGED with no I/O.
-
-    The pure-suffix fast path means a non-.exr path never touches the FS — we
-    prove this by passing a path whose parent doesn't exist (any stat would
-    raise) and asserting identity return with no exception.
-    """
-    bogus = "/no/such/dir/at/all/source.mp4"
-    assert resolve_video_input_path(bogus) == bogus
-    # Also a MOV and a non-_exr dir.
-    assert resolve_video_input_path("/no/such/clip.mov") == "/no/such/clip.mov"
-    assert resolve_video_input_path("/no/such/not_an_exr_dir") == "/no/such/not_an_exr_dir"
-
-
-def test_retake_exr_resolves_before_metadata(tmp_path: Path) -> None:
-    """EXR retake source: resolve_video_input_path yields a readable MP4 so
-    get_videostream_metadata succeeds — the metadata-ordering bug fix.
-
-    Previously generate() called get_videostream_metadata on the raw EXR path
-    → crash. Now resolution happens first (in generate), producing a temp MP4
-    that the metadata/video-lateral helpers can consume.
-    """
-    from ltx_pipelines.utils.media_io import get_videostream_metadata
-
-    # Build a 4-frame linear EXR sequence dir (our `_exr/` convention).
-    seq = tmp_path / "retake_src_exr"
-    seq.mkdir()
-    for i in range(4):
-        _write_exr(seq / f"frame_{i:05d}.exr", np.full((16, 16, 3), 0.5, dtype=np.float32))
-
-    resolved = resolve_video_input_path(str(seq), fps=24)
-    assert resolved != str(seq), "EXR dir must resolve to a temp MP4"
-    try:
-        # The metadata read that used to crash on the raw EXR path now succeeds.
-        meta = get_videostream_metadata(resolved)
-        assert meta.frames == 4, f"expected 4 frames in temp MP4, got {meta.frames}"
-    finally:
-        Path(resolved).unlink(missing_ok=True)
-
-
-# ---------------------------------------------------------------------------
-# Missing channels fail loudly (item 6)
+# Missing channels fail loudly
 # ---------------------------------------------------------------------------
 
 def test_exr_missing_channels_raise(tmp_path: Path) -> None:
     """An EXR missing R/G/B must raise (fail loudly, not default to a black plane)."""
     import OpenEXR
 
-    # Write an EXR with only R and G (no B).
     arr = np.full((8, 8), 0.5, dtype=np.float16)
     channels = {"R": arr, "G": arr}  # no B
     hdr = {"compression": OpenEXR.ZIP_COMPRESSION, "type": OpenEXR.scanlineimage}
@@ -406,7 +220,6 @@ def test_bt709_video_input_byte_identical(tmp_path: Path) -> None:
         np.full((16, 16, 3), 200, dtype=np.uint8),
     ])
 
-    # Untagged mp4 (Rec.709-assumed by detect_colorspace).
     untagged = tmp_path / "untagged.mp4"
     _write_mp4(untagged, frames)
     legacy = [t.cpu() for t in decode_video_by_frame(path=str(untagged), frame_cap=2, device=device)]
@@ -415,7 +228,6 @@ def test_bt709_video_input_byte_identical(tmp_path: Path) -> None:
     for a, b in zip(legacy, wrapped):
         assert torch.equal(a, b), "untagged video must be byte-identical (CM-1c passthrough)"
 
-    # Explicitly bt709-tagged mp4.
     bt709_mp4 = str(tmp_path / "bt709.mp4")
     _write_tagged_mp4(bt709_mp4, "bt709", "bt709", "bt709")
     legacy2 = [t.cpu() for t in decode_video_by_frame(path=bt709_mp4, frame_cap=3, device=device)]
@@ -432,22 +244,19 @@ def test_smpte170m_video_input_corrected(tmp_path: Path) -> None:
     mp4 = str(tmp_path / "smpte170m.mp4")
     _write_tagged_mp4(mp4, "smpte170m", "smpte170m", "smpte170m")
 
-    # Detection must return BT.601 (NOT bt709 — §9.7).
     cs = detect_colorspace(mp4)
     assert cs == BT601_525, f"expected BT601_525, got {cs.name}"
 
     device = torch.device("cpu")
     wrapped = list(iter_video_frames_to_model_domain(mp4, frame_cap=3, device=device))
 
-    # Get raw frames for comparison.
     from ltx_pipelines.utils.media_io import decode_video_by_frame
+
     raw = [t.cpu() for t in decode_video_by_frame(path=mp4, frame_cap=3, device=device)]
 
     assert len(wrapped) == len(raw) > 0
-    # Corrected frames differ from raw (correction applied).
     assert not torch.equal(wrapped[0], raw[0]), "smpte170m frames must be corrected (not passthrough)"
 
-    # And match color_to_model_space(raw, BT601_525) re-quantized to uint8.
     framef = raw[0].float() / 255.0
     expected = color_to_model_space(framef, BT601_525)
     if isinstance(expected, torch.Tensor):
@@ -461,9 +270,14 @@ def test_smpte170m_video_input_corrected(tmp_path: Path) -> None:
     )
 
 
-def test_production_inpaint_video_branch_identity_still_holds(tmp_path: Path) -> None:
-    """The production inpaint branch (now via iter_video_frames_to_model_domain) is
-    still byte-identical for bt709/untagged video — the hard identity gate."""
+# ---------------------------------------------------------------------------
+# Production-path identity: full video_preprocess chain, not just raw frames
+# ---------------------------------------------------------------------------
+
+def test_production_inpaint_video_branch_identity(tmp_path: Path) -> None:
+    """The production inpaint video branch (now a single iter_video_frames_to_model_domain
+    call) on a NON-sequence input must yield a byte-identical *conditioning tensor*
+    (after the full video_preprocess chain), vs the legacy decode."""
     from ltx_pipelines.utils.media_io import decode_video_by_frame, video_preprocess
 
     device = torch.device("cpu")
@@ -473,24 +287,21 @@ def test_production_inpaint_video_branch_identity_still_holds(tmp_path: Path) ->
         np.full((16, 16, 3), 120, dtype=np.uint8),
         np.full((16, 16, 3), 220, dtype=np.uint8),
     ])
-    mp4 = tmp_path / "inpaint_cm1c.mp4"
+    mp4 = tmp_path / "inpaint_src.mp4"
     _write_mp4(mp4, frames)
 
-    # Legacy conditioning tensor.
     legacy = video_preprocess(
         decode_video_by_frame(path=str(mp4), frame_cap=3, device=device),
         16, 16, dtype, device,
     )
 
-    # The EXACT production branch expression (generate_inpaint, now CM-1c).
-    branched_gen = (
-        iter_exr_frames_as_video_tensors(str(mp4), frame_cap=3, device=device)
-        if is_exr_input(str(mp4))
-        else iter_video_frames_to_model_domain(str(mp4), frame_cap=3, device=device)
+    # The EXACT production branch expression (generate_inpaint, reworked):
+    # a single iter_video_frames_to_model_domain call (no EXR ternary).
+    branched = video_preprocess(
+        iter_video_frames_to_model_domain(str(mp4), frame_cap=3, device=device),
+        16, 16, dtype, device,
     )
-    branched = video_preprocess(branched_gen, 16, 16, dtype, device)
 
-    assert is_exr_input(str(mp4)) is False
     assert torch.equal(legacy, branched), (
-        "production inpaint branch must yield byte-identical conditioning tensor (CM-1c)"
+        "production inpaint branch must yield byte-identical conditioning tensor"
     )

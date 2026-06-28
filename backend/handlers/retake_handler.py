@@ -25,7 +25,7 @@ from handlers.text_handler import TextHandler
 from runtime_config.runtime_config import RuntimeConfig
 from services.ltx_api_client.ltx_api_client import LTXAPIClientError
 from services.interfaces import LTXAPIClient
-from services.exr_input import is_exr_input, resolve_video_input_path
+from services.sequence_input import is_sequence_file, sequence_metadata
 from services.color_management import detect_colorspace
 from services.ltx_pipeline_common import make_encode_progress_callback, make_primary_output_path, make_proxy_output_path
 from services.media_encoder.media_encoder import MediaEncoder
@@ -157,13 +157,11 @@ class RetakeHandler(StateHandlerBase):
         if start_time >= end_time:
             raise HTTPError(400, "start_time must be less than end_time")
 
-        # P0-3: resolve EXR source → temp MP4 BEFORE the metadata read (handler-
-        # level `_validate_video_metadata` uses av.open which can't read EXR dirs).
-        # Non-EXR: returns the path UNCHANGED (pure-suffix gate, zero I/O).
-        # The pipeline's `generate()` receives this resolved path — no double-resolve
-        # because is_exr_input(resolved_temp_mp4) is False (the temp is an MP4).
-        resolved_video_file = resolve_video_input_path(str(video_file))
-        self._validate_video_metadata(resolved_video_file)
+        # Image-sequence input: pass the ORIGINAL single-file video_path
+        # straight through — no resolve, no temp file, no directory. Sequence
+        # metadata (dims/count/fps) is read inside _validate_video_metadata via
+        # sequence_metadata so av.open never sees a frame file.
+        self._validate_video_metadata(str(video_file))
 
         try:
             self._text.prepare_text_encoding(prompt, enhance_prompt=False)
@@ -176,8 +174,8 @@ class RetakeHandler(StateHandlerBase):
             str(self.config.outputs_dir), "retake", output_format, generation_id
         )
         proxy_path = make_proxy_output_path(output_path, output_format)
-        # CM-2: detect source CS for EXR inputs (output-CS preservation).
-        input_colorspace = detect_colorspace(str(video_file)) if is_exr_input(str(video_file)) else None
+        # CM-2: detect source CS for sequence/EXR inputs (output-CS preservation).
+        input_colorspace = detect_colorspace(str(video_file)) if is_sequence_file(str(video_file)) else None
         regenerate_video, regenerate_audio = self._resolve_retake_mode(mode)
 
         try:
@@ -187,7 +185,7 @@ class RetakeHandler(StateHandlerBase):
             self._generation.update_progress("inference", 15, 0, 1)
 
             pipeline_state.pipeline.generate(
-                video_path=resolved_video_file,
+                video_path=str(video_file),
                 prompt=prompt,
                 start_time=start_time,
                 end_time=end_time,
@@ -254,10 +252,15 @@ class RetakeHandler(StateHandlerBase):
 
     @staticmethod
     def _validate_video_metadata(video_path: str) -> None:
-        from ltx_pipelines.utils.media_io import get_videostream_metadata
+        # Sequence files: read dims/count/fps from sequence_metadata (av.open
+        # cannot open an EXR/PNG-seq frame). Otherwise av.open the container.
+        if is_sequence_file(video_path):
+            width, height, _count, _fps = sequence_metadata(video_path)
+        else:
+            from ltx_pipelines.utils.media_io import get_videostream_metadata
 
-        meta = get_videostream_metadata(video_path)
-        width, height = meta.width, meta.height
+            meta = get_videostream_metadata(video_path)
+            width, height = meta.width, meta.height
         if width % 32 != 0 or height % 32 != 0:
             raise HTTPError(400, f"Video width and height must be multiples of 32. Got {width}x{height}.")
         # ponytail: frame count 8n+1 requirement is enforced in pipeline._run by snapping output_shape.frames down.

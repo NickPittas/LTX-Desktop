@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 
 from api_types import ImageConditioningInput, OutputFormat
-from services.exr_input import is_exr_input, iter_exr_frames_as_video_tensors, iter_video_frames_to_model_domain
+from services.exr_input import iter_video_frames_to_model_domain
 from services.ltx_components import CheckpointPath, ResolvedLtxComponents
 from services.ltx_pipeline_common import default_tiling_config, encode_video_output, video_chunks_number
 from services.services_utils import AudioOrNone, TilingConfigType, device_supports_fp8
@@ -544,15 +544,13 @@ class LTXIcLoraPipeline:
         logger.info("[inpaint] Loading video and mask")
 
         # Load video frames at half res (for stage 1 conditioning) and full res.
-        # CM-1b: EXR inputs (file/seq) are decoded linear → Rec.709 gamma here;
-        # CM-1c: non-EXR tagged non-bt709 video is corrected to Rec.709 via
-        # iter_video_frames_to_model_domain (byte-identical passthrough for
-        # bt709/untagged — the validated inpaint MP4 path is an exact no-op).
-        video_gen = (
-            iter_exr_frames_as_video_tensors(video_path, frame_cap=num_frames, device=device)
-            if is_exr_input(video_path)
-            else iter_video_frames_to_model_domain(video_path, frame_cap=num_frames, device=device)
-        )
+        # Sequence files (image sequences) decode through the patched
+        # decode_video_by_frame inside iter_video_frames_to_model_domain (their
+        # color transfer happens in decode_sequence_frames). CM-1c: tagged
+        # non-bt709 VIDEO is corrected to Rec.709 here (byte-identical
+        # passthrough for bt709/untagged — the validated inpaint MP4 path is an
+        # exact no-op).
+        video_gen = iter_video_frames_to_model_domain(video_path, frame_cap=num_frames, device=device)
         video_full = video_preprocess(video_gen, height, width, dtype, device)  # (1, 3, F, H, W) in [-1,1]
         num_actual_frames = video_full.shape[2]
 
@@ -884,13 +882,12 @@ class LTXIcLoraPipeline:
         from ltx_core.conditioning import VideoConditionByReferenceLatent
         from ltx_pipelines.utils.media_io import video_preprocess
 
-        # CM-1b: EXR sequence/file → linear → Rec.709 gamma frames;
-        # CM-1c: non-EXR tagged non-bt709 video corrected to Rec.709
+        # Sequence files decode + color-transfer inside decode_sequence_frames
+        # (via the patched decode_video_by_frame that iter_video_frames_to_model_domain
+        # routes to). CM-1c: tagged non-bt709 VIDEO is corrected to Rec.709 here
         # (byte-identical passthrough for bt709/untagged).
-        frame_gen = (
-            iter_exr_frames_as_video_tensors(video_path, frame_cap=num_frames, device=self.pipeline.device)
-            if is_exr_input(video_path)
-            else iter_video_frames_to_model_domain(video_path, frame_cap=num_frames, device=self.pipeline.device)
+        frame_gen = iter_video_frames_to_model_domain(
+            video_path, frame_cap=num_frames, device=self.pipeline.device
         )
         video = video_preprocess(frame_gen, height, width, self.pipeline.dtype, self.pipeline.device)
         encoded_video = enc(video)
