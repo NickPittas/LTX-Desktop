@@ -22,9 +22,12 @@ import torch
 from services.color_management import bt709_oetf
 from services.sequence_input import (
     decode_sequence_frames,
+    is_sequence_dir,
     is_sequence_file,
     resolve_sequence,
+    resolve_sequence_from_dir,
     sequence_metadata,
+    sequence_metadata_from_dir,
 )
 
 
@@ -325,3 +328,262 @@ def test_decode_video_by_frame_patch_sequence(tmp_path: Path) -> None:
     for t in frames:
         assert t.shape == (1, 8, 8, 3)
         assert t.dtype == torch.uint8
+
+
+# ---------------------------------------------------------------------------
+# Directory fallback (Fix D) — is_sequence_dir / resolve_sequence_from_dir /
+# sequence_metadata_from_dir + patched decode_video_by_frame on a DIR path.
+# ---------------------------------------------------------------------------
+
+def test_is_sequence_dir_false_for_file(tmp_path: Path) -> None:
+    """``is_sequence_dir`` is False for files (and missing paths): ``os.path.isdir``
+    returns False → instant, no listing. A video file and a single sequence
+    frame file both return False because neither is a directory."""
+    # Real video file (not a dir).
+    mp4 = tmp_path / "clip.mp4"
+    _write_mp4(mp4, np.full((1, 8, 8, 3), 50, dtype=np.uint8))
+    assert is_sequence_dir(str(mp4)) is False
+
+    # Real single sequence frame (file, not a dir).
+    exr = tmp_path / "shot_0001.exr"
+    _write_exr(exr, np.full((4, 4, 3), 0.5, dtype=np.float32))
+    assert is_sequence_dir(str(exr)) is False
+
+    # Missing path: no stat target → isdir False, no listing, no crash.
+    assert is_sequence_dir(str(tmp_path / "does_not_exist")) is False
+
+
+def test_is_sequence_dir_false_for_single_image_dir(tmp_path: Path) -> None:
+    """A directory with only ONE image-sequence file is NOT a sequence dir
+    (needs ≥2 matching files)."""
+    _write_exr(tmp_path / "shot_0001.exr", np.full((4, 4, 3), 0.5, dtype=np.float32))
+    assert is_sequence_dir(str(tmp_path)) is False
+
+
+def test_is_sequence_dir_true_for_sequence_dir(tmp_path: Path) -> None:
+    """A directory with ≥2 image-sequence files is a sequence dir."""
+    for i in range(3):
+        _write_exr(tmp_path / f"frame_{i:05d}.exr", np.full((4, 4, 3), 0.5, dtype=np.float32))
+    assert is_sequence_dir(str(tmp_path)) is True
+
+
+def test_resolve_sequence_from_dir(tmp_path: Path) -> None:
+    """A dir with ``shot_0001.exr..0005.exr`` resolves to a 5-frame sequence,
+    files sorted ascending by frame number."""
+    for i in range(1, 6):
+        _write_exr(tmp_path / f"shot_{i:04d}.exr", np.full((8, 8, 3), 0.5, dtype=np.float32))
+    spec = resolve_sequence_from_dir(str(tmp_path))
+    assert spec is not None
+    assert len(spec.files) == 5
+    assert spec.frame_numbers == (1, 2, 3, 4, 5)
+    assert spec.pad == 4
+    assert spec.prefix == "shot_"
+    assert spec.suffix_stem == ""
+    assert spec.ext == ".exr"
+    # Files are absolute paths inside the dir, sorted ascending.
+    for i, f in enumerate(spec.files, start=1):
+        assert f == str(tmp_path / f"shot_{i:04d}.exr")
+
+
+def test_resolve_sequence_from_dir_returns_none_for_empty(tmp_path: Path) -> None:
+    """Empty dir → None. Dir with a single image → None (needs ≥2)."""
+    assert resolve_sequence_from_dir(str(tmp_path)) is None
+    _write_png(tmp_path / "only_0001.png", np.full((4, 4, 3), 10, dtype=np.uint8))
+    assert resolve_sequence_from_dir(str(tmp_path)) is None
+
+
+def test_resolve_sequence_from_dir_returns_none_for_missing(tmp_path: Path) -> None:
+    """A missing dir path → None (no OSError leaks out)."""
+    assert resolve_sequence_from_dir(str(tmp_path / "no_such_dir")) is None
+
+
+def test_resolve_sequence_from_dir_mixed_formats(tmp_path: Path) -> None:
+    """Mixed-format sequences (exr + png) in one dir: grouped by ext → two
+    separate groups; the dominant one (most files) wins."""
+    # 3 EXR frames vs 2 PNG frames → EXR wins.
+    for i in range(3):
+        _write_exr(tmp_path / f"a_{i:04d}.exr", np.full((4, 4, 3), 0.5, dtype=np.float32))
+    for i in range(2):
+        _write_png(tmp_path / f"a_{i:04d}.png", np.full((4, 4, 3), 100, dtype=np.uint8))
+    spec = resolve_sequence_from_dir(str(tmp_path))
+    assert spec is not None
+    assert len(spec.files) == 3
+    assert spec.ext == ".exr"
+
+
+def test_dir_with_version_variants(tmp_path: Path) -> None:
+    """Co-existing versioned sequences in one dir: dominant pattern wins;
+    equal-count tie → lexicographically smallest pattern (deterministic).
+
+    Two sequences ``shot_v01_0001..0003.exr`` and ``shot_v02_0001..0003.exr``
+    each have 3 files → tie → ``shot_v01_`` wins (``v01`` < ``v02``). Adding a
+    4th ``shot_v02`` frame makes v02 dominant.
+    """
+    for v in ("v01", "v02"):
+        for i in range(1, 4):
+            _write_exr(
+                tmp_path / f"shot_{v}_{i:04d}.exr",
+                np.full((4, 4, 3), 0.5, dtype=np.float32),
+            )
+
+    spec = resolve_sequence_from_dir(str(tmp_path))
+    assert spec is not None
+    assert len(spec.files) == 3
+    # Tie-break: lexicographically smallest pattern → shot_v01_.
+    assert spec.prefix == "shot_v01_"
+    assert spec.frame_numbers == (1, 2, 3)
+
+    # Make v02 dominant → it wins regardless of the tie-break.
+    _write_exr(tmp_path / "shot_v02_0004.exr", np.full((4, 4, 3), 0.5, dtype=np.float32))
+    spec2 = resolve_sequence_from_dir(str(tmp_path))
+    assert spec2 is not None
+    assert len(spec2.files) == 4
+    assert spec2.prefix == "shot_v02_"
+    assert spec2.frame_numbers == (1, 2, 3, 4)
+
+
+def test_resolve_sequence_from_dir_tolerates_gaps(tmp_path: Path) -> None:
+    """Non-contiguous frame numbers in a dir: the sequence is the sorted set
+    of present frames (no contiguity assumption)."""
+    for i in (1, 2, 5, 8):  # gaps at 3,4,6,7
+        _write_png(tmp_path / f"f_{i:04d}.png", np.full((4, 4, 3), 50, dtype=np.uint8))
+    spec = resolve_sequence_from_dir(str(tmp_path))
+    assert spec is not None
+    assert spec.frame_numbers == (1, 2, 5, 8)
+    assert len(spec.files) == 4
+
+
+def test_metadata_from_dir(tmp_path: Path) -> None:
+    """3-frame 16x16 EXR sequence @24fps in a dir → (16, 16, 3, 24.0)."""
+    for i in range(3):
+        _write_exr(
+            tmp_path / f"frame_{i:05d}.exr",
+            np.full((16, 16, 3), 0.5, dtype=np.float32),
+            fps=(24, 1),
+        )
+    width, height, count, fps = sequence_metadata_from_dir(str(tmp_path))
+    assert (width, height) == (16, 16)
+    assert count == 3
+    assert fps == pytest.approx(24.0)
+
+
+def test_metadata_from_dir_png_default_fps(tmp_path: Path) -> None:
+    """PNG sequence dir → default fps 24.0 (no EXR framesPerSecond header)."""
+    for i in range(2):
+        _write_png(tmp_path / f"f_{i:04d}.png", np.full((10, 8, 3), 50, dtype=np.uint8))
+    width, height, count, fps = sequence_metadata_from_dir(str(tmp_path))
+    assert (width, height, count) == (8, 10, 2)
+    assert fps == pytest.approx(24.0)
+
+
+def test_metadata_from_dir_raises_on_empty(tmp_path: Path) -> None:
+    """No resolvable sequence in the dir → ValueError."""
+    with pytest.raises(ValueError):
+        sequence_metadata_from_dir(str(tmp_path))
+
+
+def test_decode_from_dir_yields_frames(tmp_path: Path) -> None:
+    """The patched decode_video_by_frame on a DIR path yields the dominant
+    sequence's frames (count + shape match)."""
+    import services.patches.sequence_decode_patch as patch_mod
+
+    patch_mod.install_sequence_decode_patch()
+    from ltx_pipelines.utils import media_io
+
+    seq_dir = tmp_path / "exr_dir"
+    seq_dir.mkdir()
+    for i in range(4):
+        _write_exr(seq_dir / f"frame_{i:05d}.exr", np.full((8, 8, 3), 0.5, dtype=np.float32))
+
+    device = torch.device("cpu")
+    dir_path = str(seq_dir)
+    # Dir detection kicks in (is_sequence_file is False for a dir).
+    assert is_sequence_file(dir_path) is False
+    assert is_sequence_dir(dir_path) is True
+
+    frames = list(media_io.decode_video_by_frame(path=dir_path, frame_cap=None, device=device))
+    assert len(frames) == 4
+    for t in frames:
+        assert t.shape == (1, 8, 8, 3)
+        assert t.dtype == torch.uint8
+
+
+def test_decode_from_dir_respects_frame_cap(tmp_path: Path) -> None:
+    """frame_cap caps the count for the dir fallback too."""
+    import services.patches.sequence_decode_patch as patch_mod
+
+    patch_mod.install_sequence_decode_patch()
+    from ltx_pipelines.utils import media_io
+
+    seq_dir = tmp_path / "cap_dir"
+    seq_dir.mkdir()
+    for i in range(5):
+        _write_png(seq_dir / f"f_{i:04d}.png", np.full((4, 4, 3), 128, dtype=np.uint8))
+
+    device = torch.device("cpu")
+    frames = list(media_io.decode_video_by_frame(path=str(seq_dir), frame_cap=2, device=device))
+    assert len(frames) == 2
+
+
+def test_decode_from_dir_color_transfer(tmp_path: Path) -> None:
+    """Linear EXR (0.5) in a dir → transferred to Rec.709 gamma (≈180)."""
+    import services.patches.sequence_decode_patch as patch_mod
+
+    patch_mod.install_sequence_decode_patch()
+    from ltx_pipelines.utils import media_io
+
+    seq_dir = tmp_path / "color_dir"
+    seq_dir.mkdir()
+    for i in range(2):
+        _write_exr(seq_dir / f"frame_{i:05d}.exr", np.full((12, 12, 3), 0.5, dtype=np.float32))
+
+    device = torch.device("cpu")
+    frames = list(media_io.decode_video_by_frame(path=str(seq_dir), frame_cap=None, device=device))
+    assert len(frames) == 2
+    expected = int(round(float(bt709_oetf(np.array([0.5], dtype=np.float32))[0]) * 255.0))
+    assert expected == 180
+    assert int(frames[0][0, 0, 0, 0]) == expected
+
+
+def test_get_videostream_metadata_on_dir(tmp_path: Path) -> None:
+    """The patched get_videostream_metadata on a DIR path returns a
+    VideoPixelShape built from sequence_metadata_from_dir."""
+    import services.patches.sequence_decode_patch as patch_mod
+
+    patch_mod.install_sequence_decode_patch()
+    from ltx_pipelines.utils import media_io
+
+    seq_dir = tmp_path / "meta_dir"
+    seq_dir.mkdir()
+    for i in range(3):
+        _write_exr(
+            seq_dir / f"frame_{i:05d}.exr",
+            np.full((16, 16, 3), 0.5, dtype=np.float32),
+            fps=(24, 1),
+        )
+
+    meta = media_io.get_videostream_metadata(str(seq_dir))
+    # VideoPixelShape(batch, frames, height, width, fps).
+    assert int(meta.frames) == 3
+    assert int(meta.height) == 16
+    assert int(meta.width) == 16
+    assert float(meta.fps) == pytest.approx(24.0)
+
+
+def test_get_videostream_fps_on_dir(tmp_path: Path) -> None:
+    """The patched get_videostream_fps on a DIR path returns the EXR fps."""
+    import services.patches.sequence_decode_patch as patch_mod
+
+    patch_mod.install_sequence_decode_patch()
+    from ltx_pipelines.utils import media_io
+
+    seq_dir = tmp_path / "fps_dir"
+    seq_dir.mkdir()
+    for i in range(2):
+        _write_exr(
+            seq_dir / f"frame_{i:05d}.exr",
+            np.full((8, 8, 3), 0.5, dtype=np.float32),
+            fps=(30, 1),
+        )
+
+    assert float(media_io.get_videostream_fps(str(seq_dir))) == pytest.approx(30.0)

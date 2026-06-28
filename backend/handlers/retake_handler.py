@@ -25,7 +25,13 @@ from handlers.text_handler import TextHandler
 from runtime_config.runtime_config import RuntimeConfig
 from services.ltx_api_client.ltx_api_client import LTXAPIClientError
 from services.interfaces import LTXAPIClient
-from services.sequence_input import is_sequence_file, sequence_metadata
+from services.sequence_input import (
+    is_sequence_dir,
+    is_sequence_file,
+    resolve_sequence_from_dir,
+    sequence_metadata,
+    sequence_metadata_from_dir,
+)
 from services.color_management import detect_colorspace
 from services.ltx_pipeline_common import make_encode_progress_callback, make_primary_output_path, make_proxy_output_path
 from services.media_encoder.media_encoder import MediaEncoder
@@ -175,7 +181,18 @@ class RetakeHandler(StateHandlerBase):
         )
         proxy_path = make_proxy_output_path(output_path, output_format)
         # CM-2: detect source CS for sequence/EXR inputs (output-CS preservation).
-        input_colorspace = detect_colorspace(str(video_file)) if is_sequence_file(str(video_file)) else None
+        # Transparent dir fallback (Fix D): a system-generated EXR directory is
+        # detected via is_sequence_dir; detect_colorspace reads the first frame
+        # of the resolved spec (ffprobe cannot open a directory).
+        video_is_seq_file = is_sequence_file(str(video_file))
+        video_is_seq_dir = (not video_is_seq_file) and is_sequence_dir(str(video_file))
+        if video_is_seq_file:
+            input_colorspace = detect_colorspace(str(video_file))
+        elif video_is_seq_dir:
+            dir_spec = resolve_sequence_from_dir(str(video_file))
+            input_colorspace = detect_colorspace(dir_spec.files[0]) if dir_spec is not None else None
+        else:
+            input_colorspace = None
         regenerate_video, regenerate_audio = self._resolve_retake_mode(mode)
 
         try:
@@ -253,9 +270,13 @@ class RetakeHandler(StateHandlerBase):
     @staticmethod
     def _validate_video_metadata(video_path: str) -> None:
         # Sequence files: read dims/count/fps from sequence_metadata (av.open
-        # cannot open an EXR/PNG-seq frame). Otherwise av.open the container.
+        # cannot open an EXR/PNG-seq frame). Transparent dir fallback (Fix D):
+        # a system-generated EXR directory uses sequence_metadata_from_dir.
+        # Otherwise av.open the container.
         if is_sequence_file(video_path):
             width, height, _count, _fps = sequence_metadata(video_path)
+        elif is_sequence_dir(video_path):
+            width, height, _count, _fps = sequence_metadata_from_dir(video_path)
         else:
             from ltx_pipelines.utils.media_io import get_videostream_metadata
 

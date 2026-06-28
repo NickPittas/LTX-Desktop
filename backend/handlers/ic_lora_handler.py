@@ -40,7 +40,15 @@ from runtime_config.model_download_specs import (
 from runtime_config.runtime_config import RuntimeConfig
 from state.conditioning_cache import ConditioningCacheEntry, ConditioningCacheKey
 from services.interfaces import VideoProcessor
-from services.sequence_input import is_sequence_file, sequence_metadata, resolve_sequence, decode_sequence_frames
+from services.sequence_input import (
+    decode_sequence_frames,
+    is_sequence_dir,
+    is_sequence_file,
+    resolve_sequence,
+    resolve_sequence_from_dir,
+    sequence_metadata,
+    sequence_metadata_from_dir,
+)
 from services.color_management import detect_colorspace
 from services.ltx_pipeline_common import make_encode_progress_callback, make_primary_output_path, make_proxy_output_path
 from services.media_encoder.media_encoder import MediaEncoder
@@ -454,7 +462,14 @@ class IcLoraHandler(StateHandlerBase):
         # no directory. The patched decode_video_by_frame resolves the sequence
         # where the model decodes the user video; sequence_metadata supplies the
         # dims/count/fps here (avoids trying to av.open a frame file).
-        is_sequence = is_sequence_file(str(video_path))
+        #
+        # Transparent dir fallback (Fix D): a system-generated EXR asset is a
+        # DIRECTORY (``..._exr/``). When such a dir is passed in as video_path,
+        # treat it as a sequence too — is_sequence_dir resolves the dominant
+        # sequence inside; metadata/dims come from sequence_metadata_from_dir.
+        video_is_seq_file = is_sequence_file(str(video_path))
+        video_is_seq_dir = (not video_is_seq_file) and is_sequence_dir(str(video_path))
+        is_sequence = video_is_seq_file or video_is_seq_dir
 
         if workflow == "union_control" and req.conditioning_type is None:
             raise HTTPError(400, "Union Control requires conditioning_type (canny or depth)")
@@ -527,7 +542,10 @@ class IcLoraHandler(StateHandlerBase):
             # VideoProcessor. The ORIGINAL single-file video_path is passed
             # downstream (no temp file, no directory).
             if is_sequence:
-                seq_w, seq_h, seq_count, seq_fps = sequence_metadata(str(video_path))
+                if video_is_seq_dir:
+                    seq_w, seq_h, seq_count, seq_fps = sequence_metadata_from_dir(str(video_path))
+                else:
+                    seq_w, seq_h, seq_count, seq_fps = sequence_metadata(str(video_path))
                 input_width, input_height, frame_count, fps = seq_w, seq_h, seq_count, seq_fps
                 cap = None
             else:
@@ -579,7 +597,11 @@ class IcLoraHandler(StateHandlerBase):
                     if is_sequence:
                         import numpy as np  # noqa: PLC0415
 
-                        spec = resolve_sequence(str(video_path))
+                        spec = (
+                            resolve_sequence_from_dir(str(video_path))
+                            if video_is_seq_dir
+                            else resolve_sequence(str(video_path))
+                        )
                         assert spec is not None
                         seq_frames = decode_sequence_frames(
                             spec, frame_cap=frame_count, device=torch.device("cpu")
@@ -639,7 +661,17 @@ class IcLoraHandler(StateHandlerBase):
 
             output_format = req.output_format or OutputFormat.MP4
             # CM-2: detect source CS for sequence/EXR inputs (output-CS preservation).
-            input_colorspace = detect_colorspace(str(video_path)) if is_sequence else None
+            # For a sequence DIR, detect_colorspace must read a frame FILE (ffprobe
+            # cannot open a directory); use the first frame of the resolved spec.
+            if is_sequence:
+                if video_is_seq_dir:
+                    dir_spec = resolve_sequence_from_dir(str(video_path))
+                    assert dir_spec is not None  # is_sequence_dir guarantees a resolvable spec
+                    input_colorspace = detect_colorspace(dir_spec.files[0])
+                else:
+                    input_colorspace = detect_colorspace(str(video_path))
+            else:
+                input_colorspace = None
             output_path = make_primary_output_path(
                 str(self.config.outputs_dir), "ic_lora", output_format, uuid.uuid4().hex[:8]
             )

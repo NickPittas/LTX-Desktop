@@ -22,6 +22,7 @@ ORIGINAL function (byte-identical). No temp-MP4 detour, no directory path.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -158,6 +159,124 @@ def resolve_sequence(path: str) -> SequenceSpec | None:
 
 
 # ---------------------------------------------------------------------------
+# Directory-based sequences — transparent fallback for system-generated EXR assets
+# ---------------------------------------------------------------------------
+#
+# When a generated EXR asset (a DIRECTORY like ``..._exr/`` containing
+# ``frame_00000.exr…frame_00120.exr``) is re-used as input to another workflow,
+# the backend receives the DIR path. The single-file ``is_sequence_file`` /
+# ``resolve_sequence`` return False/None for a directory, so the decode path
+# would fall through to PyAV → ``av.open(dir)`` → ``[Errno 21] Is a directory``.
+#
+# These helpers provide a transparent fallback: given a DIRECTORY, they resolve
+# the dominant image sequence from the files INSIDE it. The user-facing input
+# mechanism stays single-file (user picks one frame); this fallback only kicks
+# in when the backend receives a directory (a system-generated EXR asset).
+#
+# Identity invariant preserved: ``is_sequence_dir`` is ``os.path.isdir`` first,
+# which is False for files → instant, no I/O beyond one stat → non-dir inputs
+# never enter this branch.
+
+
+def _classify_seq_name(name: str) -> tuple[str, int, str, str] | None:
+    """Classify a dir entry as a sequence frame: ``(prefix, pad, suffix_stem, ext)``.
+
+    Returns None when ``name`` is not an image-sequence file (ext not in
+    :data:`_SEQUENCE_EXTS` OR no trailing digit-run in the stem). ``ext`` keeps
+    its original case (matched literally downstream). Uses the same trailing
+    digit-run rule as :func:`resolve_sequence`, so the patterns line up.
+    """
+    p = Path(name)
+    ext = p.suffix
+    if ext.lower() not in _SEQUENCE_EXTS:
+        return None
+    stem = p.stem
+    match = _TRAILING_DIGITS_RE.search(stem)
+    if match is None:
+        return None
+    return stem[: match.start()], len(match.group(1)), stem[match.end() :], ext
+
+
+def is_sequence_dir(path: str) -> bool:
+    """Cheap check: is ``path`` a directory containing ≥2 image-sequence files?
+
+    Non-dir paths return False instantly (a single ``os.path.isdir`` stat — no
+    listing). For an actual directory, a SINGLE listing is taken and the helper
+    returns True iff at least 2 entries classify as image-sequence files
+    (``.exr/.dpx/.tif/.tiff/.png/.jpg/.jpeg`` + trailing digit-run in the stem).
+    A single-image dir, an empty dir, a video file, and a missing path all
+    return False.
+    """
+    if not os.path.isdir(path):
+        return False
+    try:
+        children = os.listdir(path)
+    except (OSError, FileNotFoundError):
+        return False
+    count = 0
+    for name in children:
+        if _classify_seq_name(name) is not None:
+            count += 1
+            if count >= 2:
+                return True
+    return False
+
+
+def resolve_sequence_from_dir(dir_path: str) -> SequenceSpec | None:
+    """Resolve the DOMINANT image sequence inside ``dir_path``, or None.
+
+    Groups every dir entry by its literal ``(prefix, pad, suffix_stem, ext)``
+    pattern (the same strict trailing-digit + literal-affix rule as
+    :func:`resolve_sequence`, applied to the dir's files rather than derived
+    from a single file's stem). The dominant pattern is the one with the MOST
+    files; ties are broken by the lexicographically smallest pattern tuple
+    (deterministic). Returns None when no pattern has ≥2 files (a single
+    image, an empty dir, or a dir with no image-sequence files). Gaps in frame
+    numbers are preserved (no contiguity assumption) — the result covers every
+    present frame in the half-open range, sorted ascending.
+    """
+    try:
+        children = os.listdir(dir_path)
+    except (OSError, FileNotFoundError):
+        return None
+
+    # Pattern → {frame_number: full_path}. Insertion order is dict order; the
+    # tie-break sort below makes the final pick deterministic regardless.
+    groups: dict[tuple[str, int, str, str], dict[int, str]] = {}
+    for name in children:
+        key = _classify_seq_name(name)
+        if key is None:
+            continue
+        # Re-extract the frame number with the same regex _classify_seq_name used
+        # (the strict sibling pattern is implicit: the trailing digit run of the
+        # SAME file we just classified is by construction exactly pad wide).
+        match = _TRAILING_DIGITS_RE.search(Path(name).stem)
+        if match is None:
+            continue  # defensive — _classify_seq_name already guaranteed a run
+        frame_num = int(match.group(1))
+        groups.setdefault(key, {})[frame_num] = os.path.join(dir_path, name)
+
+    # Dominant pattern: most files; ties → lexicographically smallest key tuple.
+    candidates = [(k, frames) for k, frames in groups.items() if len(frames) >= 2]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda kf: (-len(kf[1]),) + tuple(str(part) for part in kf[0]))
+    (prefix, pad, suffix_stem, ext), frame_map = candidates[0]
+
+    frame_numbers = tuple(sorted(frame_map))
+    files = tuple(frame_map[num] for num in frame_numbers)
+    return SequenceSpec(
+        dir=dir_path,
+        prefix=prefix,
+        suffix_stem=suffix_stem,
+        ext=ext,
+        pad=pad,
+        frame_numbers=frame_numbers,
+        files=files,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Decode — one frame at a time, transferred to Rec.709 (model domain)
 # ---------------------------------------------------------------------------
 
@@ -283,10 +402,34 @@ def sequence_metadata(path: str) -> tuple[int, int, int, float]:
     return width, height, count, fps
 
 
+def sequence_metadata_from_dir(dir_path: str) -> tuple[int, int, int, float]:
+    """Return ``(width, height, frame_count, fps)`` for the dominant sequence in ``dir_path``.
+
+    Mirrors :func:`sequence_metadata` but for a DIRECTORY input (a system-
+    generated EXR asset). Dims come from the first frame of the dominant
+    sequence (see :func:`resolve_sequence_from_dir`); count = number of frames
+    in that sequence; fps = the EXR ``framesPerSecond`` header of the first
+    frame if present, else 24.0. Raises ValueError if the dir holds no
+    resolvable image sequence (≥2 matching files).
+    """
+    spec = resolve_sequence_from_dir(dir_path)
+    if spec is None:
+        raise ValueError(f"No image sequence in directory: {dir_path}")
+
+    first = spec.files[0]
+    width, height = _frame_dims(first)
+    count = len(spec.files)
+    fps = _exr_fps(first) if first.lower().endswith(".exr") else _DEFAULT_FPS
+    return width, height, count, fps
+
+
 __all__ = [
     "SequenceSpec",
     "decode_sequence_frames",
+    "is_sequence_dir",
     "is_sequence_file",
     "resolve_sequence",
+    "resolve_sequence_from_dir",
     "sequence_metadata",
+    "sequence_metadata_from_dir",
 ]

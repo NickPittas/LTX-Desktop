@@ -65,9 +65,12 @@ def install_sequence_decode_patch() -> None:
 
     from services.sequence_input import (  # noqa: PLC0415
         decode_sequence_frames,
+        is_sequence_dir,
         is_sequence_file,
         resolve_sequence,
+        resolve_sequence_from_dir,
         sequence_metadata,
+        sequence_metadata_from_dir,
     )
 
     if _original_decode_video_by_frame is None:
@@ -87,6 +90,12 @@ def install_sequence_decode_patch() -> None:
     ) -> Iterator[torch.Tensor]:
         if is_sequence_file(path):
             spec = resolve_sequence(path)
+            if spec is not None:
+                return decode_sequence_frames(spec, frame_cap=frame_cap, device=device)
+        # Transparent dir fallback for system-generated EXR assets: a directory
+        # path (e.g. ``..._exr/``) resolves to the dominant sequence inside it.
+        if is_sequence_dir(path):
+            spec = resolve_sequence_from_dir(path)
             if spec is not None:
                 return decode_sequence_frames(spec, frame_cap=frame_cap, device=device)
         # Non-sequence OR unresolvable single image → original (byte-identical).
@@ -113,6 +122,15 @@ def install_sequence_decode_patch() -> None:
                     _, _, _, fps = sequence_metadata(path)
                     frame_cap = max(0, round(float(max_duration) * fps))
                 return decode_sequence_frames(spec, frame_cap=frame_cap, device=device)
+        # Transparent dir fallback (see wrapped_decode_video_by_frame above).
+        if is_sequence_dir(path):
+            spec = resolve_sequence_from_dir(path)
+            if spec is not None:
+                frame_cap = None
+                if max_duration is not None:
+                    _, _, _, fps = sequence_metadata_from_dir(path)
+                    frame_cap = max(0, round(float(max_duration) * fps))
+                return decode_sequence_frames(spec, frame_cap=frame_cap, device=device)
         return _original_decode_video_from_file(
             path=path, device=device, start_time=start_time, max_duration=max_duration
         )
@@ -126,6 +144,15 @@ def install_sequence_decode_patch() -> None:
                 width, height, count, fps = sequence_metadata(path)
                 # VideoPixelShape(batch, frames, height, width, fps).
                 return VideoPixelShape(1, count, height, width, fps)
+        # Transparent dir fallback: read dims/count/fps from the dominant
+        # sequence inside the directory.
+        if is_sequence_dir(path):
+            spec = resolve_sequence_from_dir(path)
+            if spec is not None:
+                from ltx_core.types import VideoPixelShape  # noqa: PLC0415
+
+                width, height, count, fps = sequence_metadata_from_dir(path)
+                return VideoPixelShape(1, count, height, width, fps)
         return _original_get_videostream_metadata(path)
 
     def wrapped_get_videostream_fps(path: str) -> float:
@@ -133,6 +160,12 @@ def install_sequence_decode_patch() -> None:
             spec = resolve_sequence(path)
             if spec is not None:
                 _, _, _, fps = sequence_metadata(path)
+                return fps
+        # Transparent dir fallback.
+        if is_sequence_dir(path):
+            spec = resolve_sequence_from_dir(path)
+            if spec is not None:
+                _, _, _, fps = sequence_metadata_from_dir(path)
                 return fps
         return _original_get_videostream_fps(path)
 
