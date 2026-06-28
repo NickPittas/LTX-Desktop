@@ -9,6 +9,7 @@ import { useHfAuth } from '../hooks/use-hf-auth'
 import { useHfModelAccess } from '../hooks/use-hf-model-access'
 import { useModelProfiles } from '../hooks/use-model-profiles'
 import { useOfficialAdapters } from '../hooks/use-official-adapters'
+import { ModelLibraryPanel } from './ModelLibraryPanel'
 import { ModelProfileWizard } from './ModelProfileWizard'
 
 interface SettingsModalProps {
@@ -17,7 +18,7 @@ interface SettingsModalProps {
   initialTab?: TabId
 }
 
-type TabId = 'general' | 'apiKeys' | 'promptEnhancer' | 'models' | 'about'
+type TabId = 'general' | 'apiKeys' | 'promptEnhancer' | 'models' | 'library' | 'about'
 
 export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProps) {
   const { settings, updateSettings, refreshSettings, saveLtxApiKey, saveFalApiKey, saveGeminiApiKey, forceApiGenerations } = useAppSettings()
@@ -296,7 +297,8 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
     { id: 'general' as TabId, label: 'General', icon: Settings },
     { id: 'apiKeys' as TabId, label: 'API Keys', icon: KeyRound },
     { id: 'promptEnhancer' as TabId, label: 'Prompt Enhancer', icon: Sparkles },
-    { id: 'models' as TabId, label: 'Models', icon: Cpu },
+    { id: 'models' as TabId, label: 'Profiles', icon: Cpu },
+    { id: 'library' as TabId, label: 'Library', icon: Boxes },
     { id: 'about' as TabId, label: 'About', icon: Info },
   ]
 
@@ -309,7 +311,9 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
       />
 
       {/* Modal */}
-      <div className="relative bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl w-full max-w-xl mx-4">
+      <div className={`relative bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl w-full mx-4 ${
+        activeTab === 'library' ? 'max-w-5xl' : 'max-w-xl'
+      }`}>
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800">
           <div className="flex items-center gap-2">
@@ -1227,6 +1231,10 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                 )}
               </div>
             </div>
+          )}
+
+          {activeTab === 'library' && (
+            <ModelLibraryPanel isOpen={isOpen} />
           )}
 
           {activeTab === 'about' && (
