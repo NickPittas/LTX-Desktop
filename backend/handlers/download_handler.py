@@ -6,6 +6,7 @@ import logging
 import shutil
 import time
 from collections.abc import Callable, Iterable
+from pathlib import Path
 from threading import RLock
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -35,6 +36,16 @@ from runtime_config.model_download_specs import (
     resolve_model_path,
 )
 from services.interfaces import ModelDownloader, TaskRunner
+from services.model_downloader.download_transaction import (
+    DownloadLock,
+    DownloadLockError,
+    InsufficientDiskSpaceError,
+    acquire_download_lock,
+    preflight_disk_space,
+    safe_atomic_promote,
+    should_skip_download,
+)
+from services.model_scanner import scan_models
 from state.app_state_types import (
     AppState,
     DownloadSessionComplete,
@@ -198,21 +209,33 @@ class DownloadHandler(StateHandlerBase):
         raise ValueError(f"Unknown download session: {session_id}")
 
     def cleanup_downloading_dir(self) -> None:
-        downloading_dir = resolve_downloading_dir(self.models_dir)
-        if downloading_dir.exists():
-            shutil.rmtree(downloading_dir)
+        """Startup no-op for the shared ``.downloading/`` directory.
 
-    def _download_to_staging(self, cp_id: ModelCheckpointID, hf_token: str | None) -> None:
+        Only ensures the directory exists. Must NOT delete it or any locks /
+        staging files: those may belong to another process or session that is
+        concurrently downloading. Session-owned staging is cleaned by the
+        download worker itself.
+        """
+        downloading_dir = resolve_downloading_dir(self.models_dir)
+        downloading_dir.mkdir(parents=True, exist_ok=True)
+
+    def _download_to_staging(
+        self,
+        cp_id: ModelCheckpointID,
+        hf_token: str | None,
+        models_dir: Path | None = None,
+    ) -> None:
+        root = models_dir if models_dir is not None else self.models_dir
         spec = get_model_cp_spec(cp_id)
         self.start_file(cp_id, spec.name)
         progress_cb = self._make_progress_callback(cp_id)
 
-        resolve_downloading_dir(self.models_dir).mkdir(parents=True, exist_ok=True)
+        resolve_downloading_dir(root).mkdir(parents=True, exist_ok=True)
 
         if spec.is_folder:
             self._model_downloader.download_snapshot(
                 repo_id=spec.repo_id,
-                local_dir=str(resolve_downloading_path(self.models_dir, cp_id)),
+                local_dir=str(resolve_downloading_path(root, cp_id)),
                 on_progress=progress_cb,
                 token=hf_token,
             )
@@ -220,39 +243,26 @@ class DownloadHandler(StateHandlerBase):
             self._model_downloader.download_file(
                 repo_id=spec.repo_id,
                 filename=spec.name,
-                local_dir=str(resolve_downloading_path(self.models_dir, cp_id)),
+                local_dir=str(resolve_downloading_path(root, cp_id)),
                 on_progress=progress_cb,
                 token=hf_token,
             )
 
-    def _commit_staged_checkpoint(self, cp_id: ModelCheckpointID) -> bool:
-        src = resolve_downloading_target_path(self.models_dir, cp_id)
-        dst = resolve_model_path(self.models_dir, cp_id)
-        spec = get_model_cp_spec(cp_id)
+    def _commit_staged_checkpoint(self, cp_id: ModelCheckpointID, models_dir: Path | None = None) -> bool:
+        root = models_dir if models_dir is not None else self.models_dir
+        src = resolve_downloading_target_path(root, cp_id)
+        dst = resolve_model_path(root, cp_id)
+        return safe_atomic_promote(src, dst, root)
 
-        if is_cp_downloaded(self.models_dir, cp_id):
-            if src.exists():
-                if spec.is_folder:
-                    shutil.rmtree(src)
-                else:
-                    src.unlink(missing_ok=True)
-            return False
-
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        if spec.is_folder:
-            if dst.exists():
-                shutil.rmtree(dst)
-            src.rename(dst)
-        else:
-            if dst.exists():
-                dst.unlink()
-            src.rename(dst)
-        return True
-
-    def _rollback_committed_checkpoints(self, cp_ids: Iterable[ModelCheckpointID]) -> None:
+    def _rollback_committed_checkpoints(
+        self,
+        cp_ids: Iterable[ModelCheckpointID],
+        models_dir: Path | None = None,
+    ) -> None:
+        root = models_dir if models_dir is not None else self.models_dir
         for cp_id in cp_ids:
             spec = get_model_cp_spec(cp_id)
-            path = resolve_model_path(self.models_dir, cp_id)
+            path = resolve_model_path(root, cp_id)
             if spec.is_folder:
                 if path.exists():
                     shutil.rmtree(path)
@@ -260,43 +270,99 @@ class DownloadHandler(StateHandlerBase):
                 path.unlink(missing_ok=True)
 
     def _discover_download_cp_ids(self, requested_cp_ids: set[ModelCheckpointID]) -> tuple[ModelCheckpointID, ...]:
+        """Scanner-aware no-redownload skip.
+
+        Scans the effective models_dir (outside lock) and skips CPs that are
+        already installed or duplicate-at-canonical.  Does NOT skip
+        wrong_folder_usable — current runtime cannot use those paths.
+        """
+        with self._lock:
+            models_dir = self.models_dir
+        catalog = scan_models(models_dir)
+        catalog_by_cp = {a.cp_id: a for a in catalog.artifacts if a.cp_id is not None}
+
         missing: set[ModelCheckpointID] = set()
         for cp_id in requested_cp_ids:
-            if not self._models_handler.is_cp_downloaded(cp_id):
-                missing.add(cp_id)
+            artifact = catalog_by_cp.get(cp_id)
+            if should_skip_download(artifact, models_dir):
+                continue
+            # Fallback for CPs not covered by catalog
+            if artifact is None and is_cp_downloaded(models_dir, cp_id):
+                continue
+            missing.add(cp_id)
         return self._ordered_cp_ids(missing)
+
+    def _cleanup_session_staging(
+        self,
+        cp_ids: Iterable[ModelCheckpointID],
+        models_dir: Path | None = None,
+    ) -> None:
+        """Remove only session-owned staging files (not shared .downloading/ dir)."""
+        root = models_dir if models_dir is not None else self.models_dir
+        for cp_id in cp_ids:
+            spec = get_model_cp_spec(cp_id)
+            staging_path = resolve_downloading_target_path(root, cp_id)
+            try:
+                if spec.is_folder:
+                    if staging_path.exists():
+                        shutil.rmtree(staging_path)
+                else:
+                    staging_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Failed to clean up staging for %s", cp_id)
 
     def _download_worker(self, cp_ids: tuple[ModelCheckpointID, ...], *, atomic_commit: bool) -> None:
         if not cp_ids:
             self.finish_download()
             return
 
+        # Snapshot models_dir once so lock/download/promote/cleanup use a
+        # consistent root for the whole worker lifetime (app settings could
+        # otherwise change mid-download).
+        with self._lock:
+            models_dir = self.models_dir
+
         hf_token = require_hf_token(self.state, self._lock) if self.config.hf_gating_enabled else None
+        acquired_locks: list[DownloadLock] = []
+        # Only CPs this worker actually acquired a lock for and staged.
+        # Cleanup is restricted to these so we never delete another session's
+        # staging (e.g. when we lose a lock contention race).
+        owned_staging_cp_ids: list[ModelCheckpointID] = []
 
         try:
             if atomic_commit:
                 for cp_id in cp_ids:
+                    lock = acquire_download_lock(models_dir, cp_id)
+                    if not lock.acquired:
+                        raise DownloadLockError(str(cp_id))
+                    acquired_locks.append(lock)
+                    owned_staging_cp_ids.append(cp_id)
                     logger.info("Downloading %s from %s", cp_id, get_model_cp_spec(cp_id).repo_id)
-                    self._download_to_staging(cp_id, hf_token)
+                    self._download_to_staging(cp_id, hf_token, models_dir)
 
                 committed_cp_ids: list[ModelCheckpointID] = []
                 try:
                     for cp_id in cp_ids:
-                        if self._commit_staged_checkpoint(cp_id):
+                        if self._commit_staged_checkpoint(cp_id, models_dir):
                             committed_cp_ids.append(cp_id)
                 except Exception:
-                    self._rollback_committed_checkpoints(committed_cp_ids)
+                    self._rollback_committed_checkpoints(committed_cp_ids, models_dir)
                     raise
             else:
                 for cp_id in cp_ids:
+                    lock = acquire_download_lock(models_dir, cp_id)
+                    if not lock.acquired:
+                        raise DownloadLockError(str(cp_id))
+                    acquired_locks.append(lock)
+                    owned_staging_cp_ids.append(cp_id)
                     logger.info("Downloading %s from %s", cp_id, get_model_cp_spec(cp_id).repo_id)
-                    self._download_to_staging(cp_id, hf_token)
-                    self._commit_staged_checkpoint(cp_id)
-        except Exception:
-            self.cleanup_downloading_dir()
-            raise
+                    self._download_to_staging(cp_id, hf_token, models_dir)
+                    self._commit_staged_checkpoint(cp_id, models_dir)
+        finally:
+            self._cleanup_session_staging(owned_staging_cp_ids, models_dir)
+            for lock in acquired_locks:
+                lock.release()
 
-        self.cleanup_downloading_dir()
         self.finish_download()
 
     def start_model_download(self, *, download_type: str, cp_ids: set[ModelCheckpointID]) -> DownloadSessionId:
@@ -318,6 +384,18 @@ class DownloadHandler(StateHandlerBase):
             atomic_commit = False
         else:
             raise HTTPError(400, "INVALID_DOWNLOAD_REQUEST")
+
+        # Disk-space preflight before creating session / background task
+        if ordered_cp_ids:
+            with self._lock:
+                models_dir = self.models_dir
+            required_bytes = sum(
+                get_model_cp_spec(cp_id).expected_size_bytes for cp_id in ordered_cp_ids
+            )
+            try:
+                preflight_disk_space(models_dir, required_bytes)
+            except InsufficientDiskSpaceError:
+                raise HTTPError(409, "INSUFFICIENT_DISK_SPACE") from None
 
         session_id = self.start_download(set(ordered_cp_ids))
         self._task_runner.run_background(

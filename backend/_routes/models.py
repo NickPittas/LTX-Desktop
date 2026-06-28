@@ -97,16 +97,20 @@ def route_download_progress(
 @router.post("/models/check-access", response_model=CheckModelAccessResponse)
 def route_check_model_access(
     req: CheckModelAccessRequest,
+    request: Request,
     handler: AppHandler = Depends(get_state_service),
 ) -> CheckModelAccessResponse:
+    guard_admin_permission(request)
     return handler.downloads.check_model_access(req.cp_ids)
 
 
 @router.post("/models/download", response_model=ModelDownloadStartResponse)
 def route_model_download(
     req: ModelDownloadRequest,
+    request: Request,
     handler: AppHandler = Depends(get_state_service),
 ) -> ModelDownloadStartResponse:
+    guard_admin_permission(request)
     session_id = handler.downloads.start_model_download(
         download_type=req.type,
         cp_ids=req.cp_ids,
@@ -121,8 +125,10 @@ def route_model_download(
 @router.delete("/models/delete", response_model=StatusResponse)
 def route_model_delete(
     req: ModelDeleteRequest,
+    request: Request,
     handler: AppHandler = Depends(get_state_service),
 ) -> StatusResponse:
+    guard_admin_permission(request)
     if handler.downloads.is_download_running():
         raise HTTPError(409, "DOWNLOAD_ALREADY_RUNNING")
     handler.models.delete_checkpoints(req.cp_ids)

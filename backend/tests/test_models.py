@@ -17,6 +17,7 @@ from runtime_config.model_download_specs import (
     get_latest_ltx_model_id,
     get_ltx_model_spec,
     resolve_downloading_dir,
+    resolve_downloading_target_path,
     resolve_model_path,
 )
 from state.app_state_types import DownloadSessionComplete, DownloadSessionError, DownloadingSession, FileDownloadRunning
@@ -248,16 +249,25 @@ class TestModelDownloads:
         response = client.post(
             "/api/models/download",
             json={"type": "download", "cp_ids": [IMG_GEN_MODEL_CP_ID]},
+            headers=_ADMIN_HEADERS,
         )
         assert response.status_code == 200
         assert response.json()["status"] == "started"
         assert _cp_path(test_state, IMG_GEN_MODEL_CP_ID).exists()
+
+    def test_download_requires_admin(self, client):
+        response = client.post(
+            "/api/models/download",
+            json={"type": "download", "cp_ids": [IMG_GEN_MODEL_CP_ID]},
+        )
+        assert_http_error(response, status_code=403, code="HTTP_403", message="Admin token required")
 
     def test_download_conflicts_when_another_session_is_running(self, client, test_state):
         test_state.downloads.start_download({"ltx-2.3-22b-distilled"})
         response = client.post(
             "/api/models/download",
             json={"type": "download", "cp_ids": [IMG_GEN_MODEL_CP_ID]},
+            headers=_ADMIN_HEADERS,
         )
         assert_http_error(response, status_code=409, code="DOWNLOAD_ALREADY_RUNNING")
 
@@ -265,6 +275,7 @@ class TestModelDownloads:
         response = client.post(
             "/api/models/download",
             json={"type": "upgrade", "cp_ids": [_current_ltx_spec().model_cp]},
+            headers=_ADMIN_HEADERS,
         )
         assert_http_error(response, status_code=409, code="NO_DOWNLOADED_LTX_MODEL")
 
@@ -305,6 +316,7 @@ class TestModelDownloads:
         response = client.post(
             "/api/models/download",
             json={"type": "download", "cp_ids": [IMG_GEN_MODEL_CP_ID]},
+            headers=_ADMIN_HEADERS,
         )
         assert response.status_code == 200
         session_id = response.json()["sessionId"]
@@ -317,24 +329,39 @@ class TestModelDownloads:
         response = client.post(
             "/api/models/download",
             json={"type": "download", "cp_ids": [IMG_GEN_MODEL_CP_ID]},
+            headers=_ADMIN_HEADERS,
         )
         assert response.status_code == 200
         assert test_state.model_downloader.calls
         assert all(call["on_progress"] is not None for call in test_state.model_downloader.calls)
 
-    def test_failed_download_cleans_staging_dir(self, test_state):
+    def test_failed_download_cleans_session_staging(self, test_state):
+        """Session-owned staging is cleaned; .downloading/ dir may persist."""
         test_state.model_downloader.fail_next = RuntimeError("network error")
         test_state.downloads.start_model_download(download_type="download", cp_ids={IMG_GEN_MODEL_CP_ID})
         assert len(test_state.task_runner.errors) == 1
-        assert not resolve_downloading_dir(test_state.config.default_models_dir).exists()
+        # Session's staged file should be cleaned
+        staging_path = resolve_downloading_target_path(
+            test_state.config.default_models_dir, IMG_GEN_MODEL_CP_ID
+        )
+        assert not staging_path.exists()
 
 
 class TestCheckpointDeletion:
+    def test_delete_requires_admin(self, client):
+        response = client.request(
+            "DELETE",
+            "/api/models/delete",
+            json={"cp_ids": [IMG_GEN_MODEL_CP_ID]},
+        )
+        assert_http_error(response, status_code=403, code="HTTP_403", message="Admin token required")
+
     def test_delete_missing_checkpoint_is_noop(self, client):
         response = client.request(
             "DELETE",
             "/api/models/delete",
             json={"cp_ids": [IMG_GEN_MODEL_CP_ID]},
+            headers=_ADMIN_HEADERS,
         )
         assert response.status_code == 200
         assert response.json()["status"] == "ok"
@@ -345,6 +372,7 @@ class TestCheckpointDeletion:
             "DELETE",
             "/api/models/delete",
             json={"cp_ids": [_current_ltx_spec().model_cp]},
+            headers=_ADMIN_HEADERS,
         )
         assert_http_error(response, status_code=409, code="DELETE_PROTECTED_CHECKPOINT")
 
@@ -357,6 +385,7 @@ class TestCheckpointDeletion:
             "DELETE",
             "/api/models/delete",
             json={"cp_ids": [IMG_GEN_MODEL_CP_ID]},
+            headers=_ADMIN_HEADERS,
         )
         assert response.status_code == 200
         assert response.json()["status"] == "ok"
