@@ -39,6 +39,7 @@ from services.interfaces import (
     ModelDownloader,
     PoseProcessorPipeline,
     RetakePipeline,
+    SystemInfo,
     TaskRunner,
     TextEncoder,
     VideoProcessor,
@@ -70,6 +71,7 @@ class AppHandler:
         a2v_pipeline_class: type[A2VPipeline],
         retake_pipeline_class: type[RetakePipeline],
         media_encoder: MediaEncoder,
+        system_info: SystemInfo,
     ) -> None:
         self.config = config
 
@@ -164,7 +166,9 @@ class AppHandler:
             config=config,
         )
 
-        self.generation = GenerationHandler(state=self.state, lock=self._lock, config=config)
+        self.generation = GenerationHandler(
+            state=self.state, lock=self._lock, config=config, system_info=system_info
+        )
 
         self.video_generation = VideoGenerationHandler(
             state=self.state,
@@ -255,6 +259,7 @@ class ServiceBundle:
     a2v_pipeline_class: type[A2VPipeline]
     retake_pipeline_class: type[RetakePipeline]
     media_encoder: MediaEncoder
+    system_info: SystemInfo
 
 
 def build_default_service_bundle(config: RuntimeConfig) -> ServiceBundle:
@@ -273,17 +278,19 @@ def build_default_service_bundle(config: RuntimeConfig) -> ServiceBundle:
     from services.model_downloader.hugging_face_downloader import HuggingFaceDownloader
     from services.retake_pipeline.ltx_retake_pipeline import LTXRetakePipeline
     from services.pose_processor_pipeline.dw_pose_pipeline import DWPosePipeline
+    from services.system_info.system_info_impl import SystemInfoImpl
     from services.task_runner.threading_runner import ThreadingRunner
     from services.text_encoder.ltx_text_encoder import LTXTextEncoder
     from services.video_processor.video_processor_impl import VideoProcessorImpl
 
     http = HTTPClientImpl()
+    gpu_info = GpuInfoImpl()
 
     return ServiceBundle(
         http=http,
         gpu_cleaner=TorchCleaner(device=config.device),
         model_downloader=HuggingFaceDownloader(),
-        gpu_info=GpuInfoImpl(),
+        gpu_info=gpu_info,
         video_processor=VideoProcessorImpl(),
         text_encoder=LTXTextEncoder(
             device=config.device,
@@ -301,6 +308,7 @@ def build_default_service_bundle(config: RuntimeConfig) -> ServiceBundle:
         a2v_pipeline_class=LTXa2vPipeline,
         retake_pipeline_class=LTXRetakePipeline,
         media_encoder=MediaEncoderImpl(),
+        system_info=SystemInfoImpl(gpu_info=gpu_info),
     )
 
 
@@ -331,4 +339,5 @@ def build_initial_state(
         a2v_pipeline_class=bundle.a2v_pipeline_class,
         retake_pipeline_class=bundle.retake_pipeline_class,
         media_encoder=bundle.media_encoder,
+        system_info=bundle.system_info,
     )

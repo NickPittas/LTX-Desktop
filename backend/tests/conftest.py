@@ -82,6 +82,7 @@ def test_state(tmp_path: Path, fake_services: FakeServices):
         a2v_pipeline_class=type(fake_services.a2v_pipeline),
         retake_pipeline_class=type(fake_services.retake_pipeline),
         media_encoder=fake_services.media_encoder,
+        system_info=fake_services.system_info,
     )
 
     handler = build_initial_state(

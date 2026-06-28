@@ -952,19 +952,39 @@ export interface components {
         };
         /** GenerationProgressResponse */
         GenerationProgressResponse: {
+            /** Cpuutilpct */
+            cpuUtilPct?: number | null;
             /** Currentstep */
             currentStep: number | null;
+            /** Elapsedseconds */
+            elapsedSeconds?: number | null;
+            /** Estimatedremainingseconds */
+            estimatedRemainingSeconds?: number | null;
+            /** Gpuutilpct */
+            gpuUtilPct?: number | null;
             /** Phase */
             phase: string;
+            /** Phaseelapsedseconds */
+            phaseElapsedSeconds?: number | null;
             /** Progress */
             progress: number;
+            /** Ramtotalmb */
+            ramTotalMb?: number | null;
+            /** Ramusedmb */
+            ramUsedMb?: number | null;
             /**
              * Status
              * @enum {string}
              */
             status: "idle" | "running" | "complete" | "cancelled" | "error";
+            /** Stepspersecond */
+            stepsPerSecond?: number | null;
             /** Totalsteps */
             totalSteps: number | null;
+            /** Vramtotalmb */
+            vramTotalMb?: number | null;
+            /** Vramusedmb */
+            vramUsedMb?: number | null;
         };
         /** GpuInfoResponse */
         GpuInfoResponse: {

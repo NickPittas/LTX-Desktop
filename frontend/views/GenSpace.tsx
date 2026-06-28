@@ -1116,6 +1116,14 @@ export function GenSpace() {
     imagePaths,
     error,
     reset,
+    elapsedSeconds,
+    estimatedRemainingSeconds,
+    vramUsedMb,
+    vramTotalMb,
+    gpuUtilPct,
+    ramUsedMb,
+    ramTotalMb,
+    cpuUtilPct,
   } = useGeneration()
 
   const {
@@ -1860,6 +1868,24 @@ export function GenSpace() {
                     {progress > 0 && (
                       <div className="w-32 h-1 bg-zinc-800 rounded-full mt-2 overflow-hidden">
                         <div className="h-full bg-violet-500 transition-all" style={{ width: `${progress}%` }} />
+                      </div>
+                    )}
+                    {(elapsedSeconds !== null || vramUsedMb !== null) && (
+                      <div className="flex items-center gap-3 mt-2 text-[11px] text-zinc-500 tabular-nums">
+                        {elapsedSeconds !== null && (
+                          <span>
+                            {Math.floor(elapsedSeconds / 60)}:{String(Math.floor(elapsedSeconds % 60)).padStart(2, '0')}
+                            {estimatedRemainingSeconds !== null && ` / ETA ${Math.ceil(estimatedRemainingSeconds)}s`}
+                          </span>
+                        )}
+                        {vramUsedMb !== null && vramTotalMb !== null && (
+                          <span>VRAM {(vramUsedMb / 1024).toFixed(1)}/{(vramTotalMb / 1024).toFixed(0)}GB</span>
+                        )}
+                        {gpuUtilPct !== null && <span>GPU {Math.round(gpuUtilPct)}%</span>}
+                        {ramUsedMb !== null && ramTotalMb !== null && (
+                          <span>RAM {(ramUsedMb / 1024).toFixed(1)}/{(ramTotalMb / 1024).toFixed(0)}GB</span>
+                        )}
+                        {cpuUtilPct !== null && <span>CPU {Math.round(cpuUtilPct)}%</span>}
                       </div>
                     )}
                   </div>

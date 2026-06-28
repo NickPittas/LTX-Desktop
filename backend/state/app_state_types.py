@@ -149,11 +149,31 @@ class RetakePipelineState:
 
 
 @dataclass
+class GenerationMetrics:
+    """Live-only resource telemetry snapshot (sampled by background sampler).
+
+    Not persisted — ephemeral, updated ~1 Hz while generation is running.
+    """
+
+    vram_used_mb: int | None = None
+    vram_total_mb: int | None = None
+    gpu_util_pct: float | None = None
+    ram_used_mb: int | None = None
+    ram_total_mb: int | None = None
+    cpu_util_pct: float | None = None
+
+
+@dataclass
 class GenerationProgress:
     phase: str
     progress: int
     current_step: int | None
     total_steps: int | None
+    # Monotonic timestamps (set by handler) for elapsed/ETA computation.
+    started_at: float | None = None
+    phase_started_at: float | None = None
+    # Latest resource telemetry snapshot (updated by background sampler).
+    metrics: GenerationMetrics | None = None
 
 
 @dataclass

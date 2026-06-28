@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from threading import RLock
 from typing import TYPE_CHECKING, Literal
 
@@ -13,12 +15,14 @@ from api_types import (
     GenerationProgressResponse,
 )
 from handlers.base import StateHandlerBase, with_state_lock
+from services.system_info.system_info import SystemInfo
 from state.app_state_types import (
     ApiGeneration,
     AppState,
     GenerationCancelled,
     GenerationComplete,
     GenerationError,
+    GenerationMetrics,
     GenerationProgress,
     GenerationRunning,
     GenerationState,
@@ -31,10 +35,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 GenerationSlot = Literal["gpu", "api"]
 
+#: Background sampler interval (~1 Hz per oracle decision).
+_METRICS_SAMPLE_INTERVAL_SECONDS = 1.0
+
 
 class GenerationHandler(StateHandlerBase):
-    def __init__(self, state: AppState, lock: RLock, config: RuntimeConfig) -> None:
+    def __init__(
+        self,
+        state: AppState,
+        lock: RLock,
+        config: RuntimeConfig,
+        system_info: SystemInfo,
+    ) -> None:
         super().__init__(state, lock, config)
+        self._system_info = system_info
 
     @with_state_lock
     def start_generation(self, generation_id: str) -> None:
@@ -43,24 +57,34 @@ class GenerationHandler(StateHandlerBase):
         if self.state.gpu_slot is None:
             raise RuntimeError("No active GPU pipeline")
 
+        now = time.monotonic()
         self.state.active_generation = GpuGeneration(
             state=GenerationRunning(
                 id=generation_id,
-                progress=GenerationProgress(phase="", progress=0, current_step=0, total_steps=0),
+                progress=GenerationProgress(
+                    phase="", progress=0, current_step=0, total_steps=0,
+                    started_at=now, phase_started_at=now,
+                ),
             )
         )
+        self._start_metrics_sampler(generation_id)
 
     @with_state_lock
     def start_api_generation(self, generation_id: str) -> None:
         if self.is_generation_running():
             raise RuntimeError("Generation already in progress")
 
+        now = time.monotonic()
         self.state.active_generation = ApiGeneration(
             state=GenerationRunning(
                 id=generation_id,
-                progress=GenerationProgress(phase="", progress=0, current_step=None, total_steps=None),
+                progress=GenerationProgress(
+                    phase="", progress=0, current_step=None, total_steps=None,
+                    started_at=now, phase_started_at=now,
+                ),
             )
         )
+        self._start_metrics_sampler(generation_id)
 
     @with_state_lock
     def _gpu_generation(self) -> GenerationState | None:
@@ -160,10 +184,63 @@ class GenerationHandler(StateHandlerBase):
             return
 
         _, running = running_generation
+        # Reset phase timer when phase changes (for phaseElapsedSeconds).
+        if running.progress.phase != phase:
+            running.progress.phase_started_at = time.monotonic()
         running.progress.phase = phase
         running.progress.progress = progress
         running.progress.current_step = current_step
         running.progress.total_steps = total_steps
+
+    def _start_metrics_sampler(self, generation_id: str) -> None:
+        """Start a ~1 Hz background telemetry sampler for *generation_id*.
+
+        The daemon thread exits automatically when the generation is no longer
+        running or has been replaced by a different generation. Sampling happens
+        outside the state lock; only the snapshot write is locked.
+        """
+        def sampler() -> None:
+            while True:
+                # Sleep first so the initial state is set by the caller.
+                time.sleep(_METRICS_SAMPLE_INTERVAL_SECONDS)
+
+                # Sample outside the lock (IO may be slow).
+                try:
+                    telemetry = self._system_info.sample()
+                except Exception:
+                    logger.debug("Metrics sample failed", exc_info=True)
+                    continue
+
+                metrics = GenerationMetrics(
+                    vram_used_mb=telemetry.get("vram_used_mb"),
+                    vram_total_mb=telemetry.get("vram_total_mb"),
+                    gpu_util_pct=telemetry.get("gpu_util_pct"),
+                    ram_used_mb=telemetry.get("ram_used_mb"),
+                    ram_total_mb=telemetry.get("ram_total_mb"),
+                    cpu_util_pct=telemetry.get("cpu_util_pct"),
+                )
+                if not self._store_metrics_if_running(generation_id, metrics):
+                    return
+
+        thread = threading.Thread(target=sampler, daemon=True, name=f"metrics-{generation_id}")
+        thread.start()
+
+    @with_state_lock
+    def _store_metrics_if_running(
+        self, generation_id: str, metrics: GenerationMetrics
+    ) -> bool:
+        """Store *metrics* on the running generation if it is still *generation_id*.
+
+        Returns False if the generation ended or was replaced (sampler exits).
+        """
+        running_generation = self._running_generation()
+        if running_generation is None:
+            return False
+        _, running = running_generation
+        if running.id != generation_id:
+            return False
+        running.progress.metrics = metrics
+        return True
 
     @with_state_lock
     def cancel_generation(self) -> CancelResponse:
@@ -209,12 +286,57 @@ class GenerationHandler(StateHandlerBase):
 
         match gen:
             case GenerationRunning(progress=progress):
+                now = time.monotonic()
+                elapsed = (now - progress.started_at) if progress.started_at is not None else None
+                phase_elapsed = (
+                    (now - progress.phase_started_at)
+                    if progress.phase_started_at is not None
+                    else None
+                )
+                steps_per_second: float | None = None
+                if (
+                    progress.current_step is not None
+                    and progress.current_step > 0
+                    and elapsed is not None
+                    and elapsed > 0
+                ):
+                    steps_per_second = progress.current_step / elapsed
+                estimated_remaining: float | None = None
+                if (
+                    progress.total_steps is not None
+                    and progress.current_step is not None
+                    and steps_per_second is not None
+                    and steps_per_second > 0
+                ):
+                    remaining_steps = progress.total_steps - progress.current_step
+                    if remaining_steps > 0:
+                        estimated_remaining = remaining_steps / steps_per_second
+
+                m = progress.metrics
                 return GenerationProgressResponse(
                     status="running",
                     phase=progress.phase,
                     progress=progress.progress,
                     currentStep=progress.current_step,
                     totalSteps=progress.total_steps,
+                    elapsedSeconds=round(elapsed, 1) if elapsed is not None else None,
+                    phaseElapsedSeconds=(
+                        round(phase_elapsed, 1) if phase_elapsed is not None else None
+                    ),
+                    stepsPerSecond=(
+                        round(steps_per_second, 2) if steps_per_second is not None else None
+                    ),
+                    estimatedRemainingSeconds=(
+                        round(estimated_remaining, 1)
+                        if estimated_remaining is not None
+                        else None
+                    ),
+                    vramUsedMb=m.vram_used_mb if m is not None else None,
+                    vramTotalMb=m.vram_total_mb if m is not None else None,
+                    gpuUtilPct=m.gpu_util_pct if m is not None else None,
+                    ramUsedMb=m.ram_used_mb if m is not None else None,
+                    ramTotalMb=m.ram_total_mb if m is not None else None,
+                    cpuUtilPct=m.cpu_util_pct if m is not None else None,
                 )
             case GenerationComplete():
                 return GenerationProgressResponse(

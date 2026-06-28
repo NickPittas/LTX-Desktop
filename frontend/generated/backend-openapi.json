@@ -1065,6 +1065,17 @@
       },
       "GenerationProgressResponse": {
         "properties": {
+          "cpuUtilPct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cpuutilpct"
+          },
           "currentStep": {
             "anyOf": [
               {
@@ -1076,13 +1087,79 @@
             ],
             "title": "Currentstep"
           },
+          "elapsedSeconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Elapsedseconds"
+          },
+          "estimatedRemainingSeconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimatedremainingseconds"
+          },
+          "gpuUtilPct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gpuutilpct"
+          },
           "phase": {
             "title": "Phase",
             "type": "string"
           },
+          "phaseElapsedSeconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phaseelapsedseconds"
+          },
           "progress": {
             "title": "Progress",
             "type": "integer"
+          },
+          "ramTotalMb": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ramtotalmb"
+          },
+          "ramUsedMb": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ramusedmb"
           },
           "status": {
             "enum": [
@@ -1095,6 +1172,17 @@
             "title": "Status",
             "type": "string"
           },
+          "stepsPerSecond": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stepspersecond"
+          },
           "totalSteps": {
             "anyOf": [
               {
@@ -1105,6 +1193,28 @@
               }
             ],
             "title": "Totalsteps"
+          },
+          "vramTotalMb": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vramtotalmb"
+          },
+          "vramUsedMb": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vramusedmb"
           }
         },
         "required": [

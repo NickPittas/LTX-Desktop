@@ -32,6 +32,7 @@ dependencies = [
     "llama-cpp-python>=0.3.9",
     "kornia==0.8.3",
     "OpenEXR>=3.3.2",
+    "psutil>=5.9.0",
 ]
 
 [[tool.uv.index]]

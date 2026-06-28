@@ -70,6 +70,7 @@ def _build_schema() -> dict[str, object]:
             a2v_pipeline_class=cast(Any, type(fake.a2v_pipeline)),
             retake_pipeline_class=cast(Any, type(fake.retake_pipeline)),
             media_encoder=cast(Any, fake.media_encoder),
+            system_info=cast(Any, fake.system_info),
         )
 
         handler = build_initial_state(config, AppSettings(), service_bundle=bundle)

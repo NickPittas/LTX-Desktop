@@ -902,6 +902,28 @@ class FakeMediaEncoder:
         return EncoderResult(primary_path=primary_path, proxy_path=proxy_path)
 
 
+from services.system_info.system_info import SystemTelemetry
+
+
+class FakeSystemInfo:
+    """Fake system-info service for tests. Returns configurable telemetry."""
+
+    def __init__(self) -> None:
+        self.telemetry: SystemTelemetry = SystemTelemetry(
+            vram_used_mb=4096,
+            vram_total_mb=8192,
+            gpu_util_pct=75.0,
+            ram_used_mb=16384,
+            ram_total_mb=32768,
+            cpu_util_pct=25.0,
+        )
+        self.sample_calls = 0
+
+    def sample(self) -> SystemTelemetry:
+        self.sample_calls += 1
+        return self.telemetry
+
+
 @dataclass
 class FakeServices:
     http: FakeHTTPClient = field(default_factory=FakeHTTPClient)
@@ -921,6 +943,7 @@ class FakeServices:
     a2v_pipeline: FakeA2VPipeline = field(default_factory=FakeA2VPipeline)
     retake_pipeline: FakeRetakePipeline = field(default_factory=FakeRetakePipeline)
     media_encoder: FakeMediaEncoder = field(default_factory=FakeMediaEncoder)
+    system_info: FakeSystemInfo = field(default_factory=FakeSystemInfo)
 
     def __post_init__(self) -> None:
         FakeFastVideoPipeline.bind_singleton(self.fast_video_pipeline)

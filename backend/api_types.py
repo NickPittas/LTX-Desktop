@@ -124,6 +124,17 @@ class GenerationProgressResponse(BaseModel):
     progress: int
     currentStep: int | None
     totalSteps: int | None
+    # Live-only metrics (additive, backward-compatible; None when unavailable).
+    elapsedSeconds: float | None = None
+    phaseElapsedSeconds: float | None = None
+    stepsPerSecond: float | None = None
+    estimatedRemainingSeconds: float | None = None
+    vramUsedMb: int | None = None
+    vramTotalMb: int | None = None
+    gpuUtilPct: float | None = None
+    ramUsedMb: int | None = None
+    ramTotalMb: int | None = None
+    cpuUtilPct: float | None = None
 
 
 class DownloadProgressRunningResponse(BaseModel):

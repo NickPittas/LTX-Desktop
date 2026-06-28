@@ -19,6 +19,7 @@ from services.retake_pipeline.retake_pipeline import RetakePipeline
 from services.model_downloader.model_downloader import ModelDownloader
 from services.pose_processor_pipeline.pose_processor_pipeline import PoseProcessorPipeline
 from services.services_utils import JSONScalar, JSONValue
+from services.system_info.system_info import SystemInfo, SystemTelemetry
 from services.task_runner.task_runner import TaskRunner
 from services.text_encoder.text_encoder import TextEncoder
 from services.video_processor.video_processor import VideoInfoPayload, VideoProcessor
@@ -30,6 +31,7 @@ __all__ = [
     "JSONScalar",
     "JSONValue",
     "GpuTelemetryPayload",
+    "SystemTelemetry",
     "VideoInfoPayload",
     "HttpTimeoutError",
     "HttpResponseLike",
@@ -38,6 +40,7 @@ __all__ = [
     "ModelDownloader",
     "GpuCleaner",
     "GpuInfo",
+    "SystemInfo",
     "VideoProcessor",
     "DepthProcessorPipeline",
     "PoseProcessorPipeline",

@@ -13,6 +13,15 @@ interface GenerationState {
   imagePath: string | null
   imagePaths: string[]
   error: GenerationError | null
+  // Live-only resource/timing metrics (null when unavailable).
+  elapsedSeconds: number | null
+  estimatedRemainingSeconds: number | null
+  vramUsedMb: number | null
+  vramTotalMb: number | null
+  ramUsedMb: number | null
+  ramTotalMb: number | null
+  gpuUtilPct: number | null
+  cpuUtilPct: number | null
 }
 
 type GenerateVideoRequest = ApiRequestBodyOf<'generateVideo'>
@@ -57,6 +66,17 @@ function getImageDimensions(settings: GenerationSettings): { width: number; heig
   return { width: shortSide, height: Math.round(shortSide / ratio) }
 }
 
+const NULL_METRICS = {
+  elapsedSeconds: null as number | null,
+  estimatedRemainingSeconds: null as number | null,
+  vramUsedMb: null as number | null,
+  vramTotalMb: null as number | null,
+  ramUsedMb: null as number | null,
+  ramTotalMb: null as number | null,
+  gpuUtilPct: null as number | null,
+  cpuUtilPct: null as number | null,
+}
+
 // Map phase to user-friendly message
 function getPhaseMessage(phase: string): string {
   switch (phase) {
@@ -98,6 +118,7 @@ export function useGeneration(): UseGenerationReturn {
     imagePath: null,
     imagePaths: [],
     error: null,
+      ...NULL_METRICS,
   })
 
   const abortControllerRef = useRef<AbortController | null>(null)
@@ -121,6 +142,7 @@ export function useGeneration(): UseGenerationReturn {
       imagePath: null,
       imagePaths: [],
       error: null,
+      ...NULL_METRICS,
     })
 
     abortControllerRef.current = new AbortController()
@@ -189,6 +211,14 @@ export function useGeneration(): UseGenerationReturn {
           ...prev,
           progress: displayProgress,
           statusMessage,
+          elapsedSeconds: data.elapsedSeconds ?? null,
+          estimatedRemainingSeconds: data.estimatedRemainingSeconds ?? null,
+          vramUsedMb: data.vramUsedMb ?? null,
+          vramTotalMb: data.vramTotalMb ?? null,
+          ramUsedMb: data.ramUsedMb ?? null,
+          ramTotalMb: data.ramTotalMb ?? null,
+          gpuUtilPct: data.gpuUtilPct ?? null,
+          cpuUtilPct: data.cpuUtilPct ?? null,
         }))
       }
       
@@ -219,6 +249,7 @@ export function useGeneration(): UseGenerationReturn {
           imagePath: null,
           imagePaths: [],
           error: null,
+      ...NULL_METRICS,
         })
       } else if (payload.status === 'cancelled') {
         setState(prev => ({
@@ -311,6 +342,7 @@ export function useGeneration(): UseGenerationReturn {
       imagePath: null,
       imagePaths: [],
       error: null,
+      ...NULL_METRICS,
     })
 
     abortControllerRef.current = new AbortController()
@@ -384,6 +416,7 @@ export function useGeneration(): UseGenerationReturn {
           imagePath: rawPaths[0],
           imagePaths: rawPaths,
           error: null,
+      ...NULL_METRICS,
         })
       } else if (payload.status === 'cancelled') {
         setState(prev => ({
@@ -422,6 +455,7 @@ export function useGeneration(): UseGenerationReturn {
       imagePath: null,
       imagePaths: [],
       error: null,
+      ...NULL_METRICS,
     })
   }, [])
 
