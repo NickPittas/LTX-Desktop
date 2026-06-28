@@ -1091,6 +1091,7 @@ export function VideoEditorTimelineEditingPanel(props: VideoEditorTimelineEditin
     handleResizeStart,
     handleTrackDrop,
     lassoOriginRef,
+    dragIndicatorRef,
   } = useTimelineDrag({
     activeTool, setActiveTool, lastTrimTool, setLastTrimTool,
     pixelsPerSecond, totalDuration,
@@ -1098,6 +1099,8 @@ export function VideoEditorTimelineEditingPanel(props: VideoEditorTimelineEditin
     selectedClipIds, setSelectedClipIds,
     currentTime, setCurrentTime, setIsPlaying,
     snapEnabled, resolveClipPath, getMaxClipDuration, addClipToTimeline,
+    activeTimelineInPoint: inPoint,
+    activeTimelineOutPoint: outPoint,
     assets, timelines, activeTimeline, currentProjectId,
     timelineRef, trackContainerRef,
     orderedTracks, getTrackHeight, trackTopPx, cutPoints,
@@ -2316,6 +2319,25 @@ export function VideoEditorTimelineEditingPanel(props: VideoEditorTimelineEditin
                   )}
                   {/* Playhead is now rendered as overlay on the column wrapper (playheadOverlayRef) */}
                   
+                  {/* Drag drop/snap indicator: a thin vertical line at the dragged
+                       clip's computed (and snapped) target start. Mounted only while
+                       a drag is active (single render on drag start/end). Its `left`
+                       is updated imperatively every frame by useTimelineDrag's RAF
+                       loop (dragIndicatorRef) so per-frame movement does NOT trigger
+                       React renders. Hidden until the first RAF positions it. */}
+                  {draggingClip && (
+                    <div
+                      ref={dragIndicatorRef}
+                      className="absolute top-0 bottom-0 pointer-events-none z-[45]"
+                      style={{
+                        left: `${draggingClip.originalStartTime * pixelsPerSecond}px`,
+                        width: '1px',
+                        backgroundColor: '#fde047',
+                        display: 'none',
+                      }}
+                    />
+                  )}
+                  
                   {orderedTracks.map(({ track, realIndex, displayRow }) => (
                     <React.Fragment key={track.id}>
                       {/* Divider between video and audio sections */}
@@ -2404,7 +2426,7 @@ export function VideoEditorTimelineEditingPanel(props: VideoEditorTimelineEditin
                     <div
                       key={clip.id}
                       data-clip-id={clip.id}
-                      className={`absolute rounded border-2 transition-all overflow-hidden select-none ${
+                      className={`absolute rounded border-2 transition-[opacity,border-color,background-color] duration-150 overflow-hidden select-none ${
                         selectedClipIds.has(clip.id) 
                           ? 'border-blue-500 shadow-lg shadow-blue-500/20' 
                           : clipColor

@@ -73,6 +73,8 @@ interface UseTimelineDragParams {
   setCurrentTime: (time: number) => void
   setIsPlaying: (playing: boolean) => void
   snapEnabled: boolean
+  activeTimelineInPoint: number | null
+  activeTimelineOutPoint: number | null
   resolveClipPath: (clip: TimelineClip | null) => string
   getMaxClipDuration: (clip: TimelineClip) => number
   addClipToTimeline: (asset: Asset, trackIndex: number, startTime?: number) => void
@@ -101,7 +103,8 @@ export function useTimelineDrag(params: UseTimelineDragParams) {
     clips, setClips, tracks,
     selectedClipIds, setSelectedClipIds,
     currentTime, setCurrentTime, setIsPlaying,
-    snapEnabled, getMaxClipDuration, addClipToTimeline,
+    snapEnabled, activeTimelineInPoint, activeTimelineOutPoint,
+    getMaxClipDuration, addClipToTimeline,
     assets, timelines, activeTimeline,
     timelineRef, trackContainerRef,
     orderedTracks, getTrackHeight, trackTopPx,
@@ -118,6 +121,13 @@ export function useTimelineDrag(params: UseTimelineDragParams) {
   const dragPreviewNodesRef = useRef<Map<string, DragPreviewNode>>(new Map())
   const dragPreviewRafRef = useRef<number | null>(null)
 
+  // Imperative snap/drop indicator state. Updated every frame inside the drag
+  // RAF loop (NOT React state) so per-frame movement never triggers re-renders.
+  // The panel mounts a ref'd <div> (dragIndicatorRef) while draggingClip != null
+  // and this hook repositions it directly from the same RAF that moves the clip.
+  const dragIndicatorRef = useRef<HTMLDivElement>(null)
+  const dragTargetRef = useRef<{ startTime: number; snapActive: boolean; snapSourceTime: number | null } | null>(null)
+
   const clearDragPreviewDom = useCallback(() => {
     if (dragPreviewRafRef.current !== null) {
       cancelAnimationFrame(dragPreviewRafRef.current)
@@ -130,6 +140,10 @@ export function useTimelineDrag(params: UseTimelineDragParams) {
     }
     dragPreviewNodesRef.current.clear()
     dragPreviewRef.current = null
+    dragTargetRef.current = null
+    // Hide the snap/drop indicator immediately when a drag ends/cancels.
+    const indicator = dragIndicatorRef.current
+    if (indicator) indicator.style.display = 'none'
   }, [])
 
   // --- Ruler scrub: click + drag to scrub playhead ---
@@ -415,28 +429,51 @@ export function useTimelineDrag(params: UseTimelineDragParams) {
     
     // Snap the primary clip (skip other clips in the drag group for snapping)
     const origPositions = draggingClip.originalPositions
+    // Zoom-aware threshold: ~10px at the current zoom, floored to 0.05s so it
+    // never becomes unusably tight at high zoom. Replaces the old hardcoded 0.2.
+    const snapThreshold = Math.max(0.05, 10 / pixelsPerSecond)
+    let snapActive = false
     if (snapEnabled) {
-      const snapThreshold = 0.2
       for (const otherClip of clips) {
         if (origPositions[otherClip.id]) continue // skip clips in the drag group
         
         if (Math.abs(newStartTime - otherClip.startTime) < snapThreshold) {
           newStartTime = otherClip.startTime
+          snapActive = true
         }
         const otherEnd = otherClip.startTime + otherClip.duration
         if (Math.abs(newStartTime - otherEnd) < snapThreshold) {
           newStartTime = otherEnd
+          snapActive = true
         }
         const clipEnd = newStartTime + primaryClip.duration
         if (Math.abs(clipEnd - otherClip.startTime) < snapThreshold) {
           newStartTime = otherClip.startTime - primaryClip.duration
+          snapActive = true
         }
       }
+      // Playhead
       if (Math.abs(newStartTime - currentTime) < snapThreshold) {
         newStartTime = currentTime
+        snapActive = true
       }
       if (Math.abs(newStartTime + primaryClip.duration - currentTime) < snapThreshold) {
         newStartTime = currentTime - primaryClip.duration
+        snapActive = true
+      }
+      // Timeline in/out points (pro NLE snap target)
+      if (activeTimelineInPoint !== null && Math.abs(newStartTime - activeTimelineInPoint) < snapThreshold) {
+        newStartTime = activeTimelineInPoint
+        snapActive = true
+      }
+      if (activeTimelineOutPoint !== null && Math.abs(newStartTime - activeTimelineOutPoint) < snapThreshold) {
+        newStartTime = activeTimelineOutPoint
+        snapActive = true
+      }
+      // Explicit snap-to-zero (timeline start)
+      if (Math.abs(newStartTime) < snapThreshold) {
+        newStartTime = 0
+        snapActive = true
       }
     }
     
@@ -529,6 +566,17 @@ export function useTimelineDrag(params: UseTimelineDragParams) {
     }
     dragPreviewRef.current = previewById
 
+    // Record the primary clip's final (clamped) target start + snap state so the
+    // RAF loop below can position the drop indicator imperatively.
+    const primaryPreview = previewById[draggingClip.clipId]
+    if (primaryPreview) {
+      dragTargetRef.current = {
+        startTime: primaryPreview.startTime,
+        snapActive,
+        snapSourceTime: snapActive ? primaryPreview.startTime : null,
+      }
+    }
+
     if (dragPreviewRafRef.current === null) {
       dragPreviewRafRef.current = requestAnimationFrame(() => {
         dragPreviewRafRef.current = null
@@ -559,9 +607,28 @@ export function useTimelineDrag(params: UseTimelineDragParams) {
           node.el.style.zIndex = '40'
           node.el.style.willChange = 'transform'
         }
+
+        // Drop/snap indicator: positioned imperatively at the primary clip's
+        // computed target start. Mirrors the DOM-takeover pattern above so this
+        // never triggers a React render. Emphasized (wider + glow) when snapped.
+        const indicator = dragIndicatorRef.current
+        const target = dragTargetRef.current
+        if (indicator && target) {
+          indicator.style.left = `${target.startTime * pixelsPerSecond}px`
+          indicator.style.display = ''
+          if (target.snapActive) {
+            indicator.style.width = '2px'
+            indicator.style.backgroundColor = '#fef9c3'
+            indicator.style.boxShadow = '0 0 6px 1px rgba(254,240,138,0.85)'
+          } else {
+            indicator.style.width = '1px'
+            indicator.style.backgroundColor = '#fde047'
+            indicator.style.boxShadow = 'none'
+          }
+        }
       })
     }
-  }, [draggingClip, clips, pixelsPerSecond, snapEnabled, tracks, currentTime, lassoRect, orderedTracks, trackContainerRef, trackTopPx])
+  }, [draggingClip, clips, pixelsPerSecond, snapEnabled, tracks, currentTime, lassoRect, orderedTracks, trackContainerRef, trackTopPx, activeTimelineInPoint, activeTimelineOutPoint])
   
   const handleMouseUp = useCallback((e?: MouseEvent | Event) => {
     // Finalize lasso selection
@@ -628,6 +695,16 @@ export function useTimelineDrag(params: UseTimelineDragParams) {
     setDraggingClip(null)
     setResizingClip(null)
   }, [lassoRect, clips, pixelsPerSecond, draggingClip, resizingClip, setClips, getTrackHeight, trackTopPx, clearDragPreviewDom])
+  
+  // Cancel an in-flight drag WITHOUT committing (e.g. window blur / alt-tab that
+  // swallows the mouseup). Mirrors the teardown in handleMouseUp but intentionally
+  // skips the setClips commit + resolveOverlaps so the user's unintentional
+  // release does not move clips or record an undo step.
+  const handleDragCancel = useCallback(() => {
+    if (!draggingClip) return
+    clearDragPreviewDom()
+    setDraggingClip(null)
+  }, [draggingClip, clearDragPreviewDom])
   
   const handleResizeMove = useCallback((e: MouseEvent) => {
     if (!resizingClip) return
@@ -908,12 +985,17 @@ export function useTimelineDrag(params: UseTimelineDragParams) {
     if (draggingClip || lassoRect) {
       window.addEventListener('mousemove', handleMouseMove)
       window.addEventListener('mouseup', handleMouseUp)
+      // If the window loses focus mid-drag (alt-tab, devtools, dialog steal),
+      // the mouseup is often never delivered. Cancel the drag without committing
+      // so clips do not get stuck in a ghost/preview state.
+      window.addEventListener('blur', handleDragCancel)
       return () => {
         window.removeEventListener('mousemove', handleMouseMove)
         window.removeEventListener('mouseup', handleMouseUp)
+        window.removeEventListener('blur', handleDragCancel)
       }
     }
-  }, [draggingClip, lassoRect, handleMouseMove, handleMouseUp])
+  }, [draggingClip, lassoRect, handleMouseMove, handleMouseUp, handleDragCancel])
 
   useEffect(() => {
     return () => {
@@ -1117,5 +1199,7 @@ export function useTimelineDrag(params: UseTimelineDragParams) {
     handleSlipSlideUp,
     handleTrackDrop,
     lassoOriginRef,
+    dragIndicatorRef,
+    dragTargetRef,
   }
 }
