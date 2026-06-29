@@ -12,7 +12,9 @@ Phase 2 constraints (oracle-enforced):
 - **Current runtime priority chain:** profile explicit path → catalog
   installed/duplicate → catalog wrong_folder_usable (candidate only) → missing.
 - **HDR always gated** regardless of file presence.
-- **Distilled LoRA** is ``candidate_unwired`` (not runtime-wired) until Phase 6.
+- **Distilled LoRA** for dev base is runtime-wired as of Phase 3D; dev base
+  + available distilled LoRA reports ``supported`` (missing LoRA stays
+  ``missing``). Distilled base does not need a distilled LoRA.
 - **Local Gemma/API-key suppression** derived from ``text_encoder_root`` +
   local ``text_encoder_format``, independent of text projection.
 """
@@ -470,12 +472,15 @@ def _derive_fast_status(
         return "supported"
 
     if base_family == "dev":
-        # Dev base needs distilled LoRA for fast, but loading is not wired
+        # Phase 3D: dev base + distilled LoRA is now runtime-wired via
+        # ``TI2VidTwoStagesPipeline``. Missing LoRA => missing (handler fails
+        # fast with DISTILLED_LORA_REQUIRED before heavy load).
         if distilled_lora_available:
-            return "candidate_unwired"
+            return "supported"
         return "missing"
 
-    # Unknown base family — cannot determine
+    # Unknown base family — cannot determine; handler rejects with
+    # UNSUPPORTED_MODEL_BASE_FAMILY before heavy load.
     return "missing"
 
 
@@ -484,8 +489,9 @@ def _derive_distilled_lora_status(
     distilled_lora_available: bool,
 ) -> PipelineStatus:
     if base_family == "dev":
+        # Phase 3D: distilled LoRA is now runtime-wired for dev base.
         if distilled_lora_available:
-            return "candidate_unwired"
+            return "supported"
         return "missing"
 
     # distilled and unknown → not applicable (unknown must not candidate)

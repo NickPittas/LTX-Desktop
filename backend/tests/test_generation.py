@@ -181,18 +181,20 @@ class TestGenerate:
         d = tmp_path / "profile"
         d.mkdir()
         files = {
-            "transformer.gguf": b"GGUF",
+            "ltx-2.3-22b-distilled.gguf": b"GGUF",
             "tp.safetensors": b"x",
             "ec.safetensors": b"x",
             "vvae.safetensors": b"x",
             "avae.safetensors": b"x",
             "gemma.gguf": b"GEMMA",
+            "upsampler.safetensors": b"UPSAMPLER",
         }
         paths = {}
         for name, content in files.items():
             p = d / name
             p.write_bytes(content)
-            paths[name.rsplit(".", 1)[0]] = str(p)
+            key = "transformer" if name.startswith("ltx-") else name.rsplit(".", 1)[0]
+            paths[key] = str(p)
 
         profile = ModelProfilePayload(
             id="gguf-profile",
@@ -201,6 +203,7 @@ class TestGenerate:
             components=ModelComponentPaths(
                 transformer=paths["transformer"],
                 transformer_format="gguf",
+                upsampler=paths["upsampler"],
                 text_projection=paths["tp"],
                 embeddings_connector=paths["ec"],
                 video_vae=paths["vvae"],
@@ -584,6 +587,43 @@ class TestOutputFormat:
         # Invoking the callback should not raise (it calls update_progress with int pct).
         call["on_progress"](0.3)  # encode phase
         call["on_progress"](0.8)  # proxy phase
+
+    def test_handler_forwards_negative_prompt_to_fast_pipeline(
+        self, client, test_state, fake_services, create_fake_model_files
+    ):
+        """Phase 3D: handler forwards req.negativePrompt to the fast pipeline.
+
+        Negative prompt is required by the dev route (TI2VidTwoStagesPipeline
+        CFG) and harmless for the distilled route. The handler must not drop it.
+        """
+        create_fake_model_files()
+        _enable_local_text_encoding(test_state)
+
+        r = client.post(
+            "/api/generate",
+            json={**_T2V_JSON, "negativePrompt": "blurry, low quality"},
+        )
+        assert r.status_code == 200, r.text
+
+        call = fake_services.fast_video_pipeline.generate_calls[-1]
+        assert call["negative_prompt"] == "blurry, low quality"
+
+    def test_handler_defaults_negative_prompt_to_empty_string(
+        self, client, test_state, fake_services, create_fake_model_files
+    ):
+        """When the request omits negativePrompt, the fast pipeline receives ``""``.
+
+        Distilled route ignores it; dev route treats it as no negative
+        conditioning. The handler default must be an empty string (not None).
+        """
+        create_fake_model_files()
+        _enable_local_text_encoding(test_state)
+
+        r = client.post("/api/generate", json=_T2V_JSON)
+        assert r.status_code == 200, r.text
+
+        call = fake_services.fast_video_pipeline.generate_calls[-1]
+        assert call["negative_prompt"] == ""
 
 
 class TestForcedApiGenerate:
@@ -1485,3 +1525,132 @@ class TestEnhancePromptFlag:
 
         assert len(fake_services.text_encoder.encode_calls) == 0
         assert fake_services.fast_video_pipeline.generate_calls[-1]["enhance_prompt"] is True
+
+
+def _make_gguf_profile(test_state, tmp_path: Path) -> dict[str, str]:
+    """Create an active GGUF local profile (text encoder + transformer) and return file paths.
+
+    Mirrors the profile shape used by ``test_t2v_active_profile_local_text_encoder_passes_gate``:
+    a GGUF transformer + GGUF Gemma text encoder (vision tower stripped at runtime).
+    Includes an upsampler so generation can proceed past the fast-pipeline upscaler gate.
+    """
+    d = tmp_path / "profile"
+    d.mkdir()
+    files = {
+        "ltx-2.3-22b-distilled.gguf": b"GGUF",
+        "tp.safetensors": b"x",
+        "ec.safetensors": b"x",
+        "vvae.safetensors": b"x",
+        "avae.safetensors": b"x",
+        "gemma.gguf": b"GEMMA",
+        "upsampler.safetensors": b"UPSAMPLER",
+    }
+    paths: dict[str, str] = {}
+    for name, content in files.items():
+        p = d / name
+        p.write_bytes(content)
+        key = "transformer" if name.startswith("ltx-") else name.rsplit(".", 1)[0]
+        paths[key] = str(p)
+
+    profile = ModelProfilePayload(
+        id="gguf-profile",
+        name="GGUF Profile",
+        source="kijai",
+        components=ModelComponentPaths(
+            transformer=paths["transformer"],
+            transformer_format="gguf",
+            upsampler=paths["upsampler"],
+            text_projection=paths["tp"],
+            embeddings_connector=paths["ec"],
+            video_vae=paths["vvae"],
+            audio_vae=paths["avae"],
+            text_encoder_root=paths["gemma"],
+            text_encoder_format="gguf",
+        ),
+    )
+    test_state.state.model_profiles = [profile]
+    test_state.state.active_model_profile_id = "gguf-profile"
+    return paths
+
+
+class TestGgufI2vEnhancerGate:
+    """Phase 3B: the stale GGUF I2V 409 gate is removed.
+
+    Local GGUF Gemma now handles image-conditioned prompt enhancement via
+    mmproj multimodal enhancement (when configured) or an observable text-only
+    llama.cpp degrade (image dropped from prompt enhancement only). Generation
+    proceeds through the normal ``images=`` image-conditioning path either way.
+    """
+
+    def test_i2v_enhancer_on_with_gguf_profile_generates(
+        self, client, test_state, fake_services, make_test_image, tmp_path
+    ):
+        """I2V + enhancer on + GGUF profile: no longer gated, returns 200.
+
+        The fast pipeline ``generate`` is called with ``enhance_prompt=True``
+        (local encoding path). The runtime PromptEncoder patch handles the
+        GGUF+image enhancement internally (mmproj multimodal or text-only
+        degrade); the handler no longer 409s.
+        """
+        _make_gguf_profile(test_state, tmp_path)
+        test_state.state.app_settings.prompt_enhancer_enabled_i2v = True
+        image_path = tmp_path / "input.png"
+        image_path.write_bytes(make_test_image().getvalue())
+
+        r = client.post("/api/generate", json={**_T2V_JSON, "imagePath": str(image_path)})
+
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "complete"
+        # Local encoding → enhance_prompt forwarded as True to the fast pipeline.
+        assert fake_services.fast_video_pipeline.generate_calls[-1]["enhance_prompt"] is True
+
+    def test_i2v_enhancer_off_with_gguf_profile_still_generates(
+        self, client, test_state, fake_services, make_test_image, tmp_path
+    ):
+        _make_gguf_profile(test_state, tmp_path)
+        # I2V enhancer OFF → no image-conditioned enhancement requested → generation proceeds.
+        test_state.state.app_settings.prompt_enhancer_enabled_i2v = False
+        image_path = tmp_path / "input.png"
+        image_path.write_bytes(make_test_image().getvalue())
+
+        r = client.post("/api/generate", json={**_T2V_JSON, "imagePath": str(image_path)})
+
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "complete"
+        # No image-conditioned enhancement: enhance_prompt forwarded as False.
+        assert fake_services.fast_video_pipeline.generate_calls[-1]["enhance_prompt"] is False
+
+    def test_t2v_enhancer_on_with_gguf_profile_not_gated(
+        self, client, test_state, fake_services, tmp_path
+    ):
+        """T2V (no image) + GGUF + t2v enhancer on: text-only llama.cpp enhancement, not gated."""
+        _make_gguf_profile(test_state, tmp_path)
+        test_state.state.app_settings.prompt_enhancer_enabled_t2v = True
+
+        r = client.post("/api/generate", json=_T2V_JSON)
+
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "complete"
+        assert fake_services.fast_video_pipeline.generate_calls[-1]["enhance_prompt"] is True
+
+    def test_i2v_enhancer_on_with_non_gguf_profile_not_gated(
+        self, client, test_state, fake_services, create_fake_model_files, make_test_image, tmp_path
+    ):
+        """I2V + enhancer on + non-GGUF (API) encoding: API Gemma is multimodal-capable, not gated."""
+        self._setup_api_encoding(test_state, fake_services, create_fake_model_files)
+        test_state.state.app_settings.prompt_enhancer_enabled_i2v = True
+        image_path = tmp_path / "input.png"
+        image_path.write_bytes(make_test_image().getvalue())
+
+        r = client.post("/api/generate", json={**_T2V_JSON, "imagePath": str(image_path)})
+
+        assert r.status_code == 200, r.text
+        assert len(fake_services.text_encoder.encode_calls) == 1
+        assert fake_services.text_encoder.encode_calls[0]["enhance_prompt"] is True
+
+    @staticmethod
+    def _setup_api_encoding(test_state, fake_services, create_fake_model_files):
+        create_fake_model_files()
+        test_state.state.app_settings.ltx_api_key = "test-key"
+        test_state.state.app_settings.use_local_text_encoder = False
+        fake_services.text_encoder.encode_responses.append(_FakeEncodingResult())

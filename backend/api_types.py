@@ -52,6 +52,16 @@ ModelCheckpointID = Literal[
     "dw-ll-ucoco-384-bs5",
     "gemma-3-12b-it-qat-q4_0-unquantized",
     "z-image-turbo",
+    # unsloth LTX-2.3 22B dev GGUF quants (Phase 2A). Section = GGUF.
+    # Q6 UD is intentionally absent — upstream does not publish it.
+    "ltx-2.3-22b-dev-gguf-q4-k-m",
+    "ltx-2.3-22b-dev-gguf-ud-q4-k-m",
+    "ltx-2.3-22b-dev-gguf-q6-k",
+    "ltx-2.3-22b-dev-gguf-ud-q5-k-m",
+    # Gemma 3 mmproj (BF16) multimodal projection (Phase 3A, plan §9).
+    # First-class downloadable CP: lives inside the gemma GGUF text-encoder
+    # folder artifact. Remote filename == local basename.
+    "gemma-3-12b-it-qat-gguf-mmproj",
 ]
 LTXLocalModelId = Literal["ltx-2.3-22b-distilled"]
 
@@ -404,6 +414,10 @@ class ModelComponentPaths(BaseModel):
     text_encoder_root: str | None = None
     text_encoder_format: ModelProfileTextEncoderFormat = "api"
     text_projection: str | None = None
+    # Phase 3A (plan §9 Option A): explicit mmproj projection path for the
+    # mmproj-aware multimodal I2V prompt-enhancement path. ``None`` when not
+    # configured (text-only degrade). Not yet wired to runtime llama.cpp.
+    mmproj: str | None = None
     embeddings_connector: str | None = None
     video_vae: str | None = None
     audio_vae: str | None = None
@@ -588,6 +602,11 @@ ArtifactKind: TypeAlias = Literal[
     "image_gen_model",
 ]
 
+#: Backend-owned downloader section (plan §7). The frontend renders sections
+#: purely from this value — it must not duplicate grouping logic. Stable
+#: lowercase literals so they survive OpenAPI regen unchanged.
+CatalogSection: TypeAlias = Literal["full", "kijai", "gguf", "addons"]
+
 #: Semantic role within a profile/pipeline (e.g. adapter id, ``base_diffusion_model``).
 #: ``str`` (not Literal) because roles grow with the adapter registry.
 ComponentRole: TypeAlias = str
@@ -629,6 +648,15 @@ class ModelLibraryArtifact(BaseModel):
     notes: str = ""
     cp_id: ModelCheckpointID | None = None
     adapter_id: AdapterID | None = None
+    # ---- Phase 2A catalog grouping metadata (plan §7) ----
+    # Backend-owned: the frontend renders sections/variants purely from these.
+    section: CatalogSection = "full"
+    display_name: str = ""
+    variant_group: str = ""
+    downloadable: bool = True
+    # Remote filename when it differs from the local basename; ``None`` means
+    # the remote filename equals ``filename`` (the common case).
+    remote_filename: str | None = None
 
 
 class UnknownFile(BaseModel):

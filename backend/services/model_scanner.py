@@ -30,6 +30,7 @@ from api_types import (
     AdapterID,
     AdapterKind,
     ArtifactKind,
+    CatalogSection,
     ModelCheckpointID,
     ModelLibraryArtifact,
     ModelLibraryScanResponse,
@@ -84,6 +85,14 @@ class _CanonicalArtifact:
     gated: bool
     cp_id: ModelCheckpointID | None
     adapter_id: AdapterID | None
+    # ---- Phase 2A catalog grouping metadata (plan §7) ----
+    section: CatalogSection = "full"
+    display_name: str = ""
+    variant_group: str = ""
+    downloadable: bool = True
+    # Remote filename when it differs from the local basename; ``None`` ⇒ equal
+    # to ``filename``.
+    remote_filename: str | None = None
 
 
 #: Maps non-adapter checkpoint IDs to (kind, role). Canonical subfolder is
@@ -96,6 +105,17 @@ _CP_KIND_MAP: dict[ModelCheckpointID, tuple[ArtifactKind, str]] = {
     "yolox-l-torchscript": ("person_detector", "person_detector"),
     "dw-ll-ucoco-384-bs5": ("pose_processor", "pose_processor"),
     "z-image-turbo": ("image_gen_model", "image_gen_model"),
+    # unsloth LTX-2.3 22B dev GGUF quants (Phase 2A). All share the
+    # ``base_diffusion_model_gguf`` role and the ``ltx-2.3-dev-gguf`` variant
+    # group (set on the spec); the scanner differentiates by filename.
+    "ltx-2.3-22b-dev-gguf-q4-k-m": ("gguf", "base_diffusion_model_gguf"),
+    "ltx-2.3-22b-dev-gguf-ud-q4-k-m": ("gguf", "base_diffusion_model_gguf"),
+    "ltx-2.3-22b-dev-gguf-q6-k": ("gguf", "base_diffusion_model_gguf"),
+    "ltx-2.3-22b-dev-gguf-ud-q5-k-m": ("gguf", "base_diffusion_model_gguf"),
+    # Gemma 3 mmproj (BF16) — Phase 3A: downloadable CP-backed artifact.
+    # Lives inside the gemma GGUF folder artifact; detected via
+    # descent-aware folder-child scan (see _FOLDER_CHILD_FILES).
+    "gemma-3-12b-it-qat-gguf-mmproj": ("gguf", "gemma_mmproj"),
 }
 
 
@@ -122,6 +142,10 @@ _EXTRA_KNOWN_ARTIFACTS: list[_CanonicalArtifact] = [
         gated=False,
         cp_id=None,
         adapter_id=None,
+        section="kijai",
+        display_name="LTX-2.3 22B distilled FP8 (Kijai v3)",
+        variant_group="ltx-2.3-distilled-fp8",
+        downloadable=False,
     ),
     _CanonicalArtifact(
         filename="LTX-2.3-22B-distilled-1.1-Q4_K_M.gguf",
@@ -134,6 +158,10 @@ _EXTRA_KNOWN_ARTIFACTS: list[_CanonicalArtifact] = [
         gated=False,
         cp_id=None,
         adapter_id=None,
+        section="gguf",
+        display_name="LTX-2.3 22B distilled 1.1 GGUF — Q4_K_M (QuantStack)",
+        variant_group="ltx-2.3-distilled-gguf",
+        downloadable=False,
     ),
     _CanonicalArtifact(
         filename="ltx-2.3_text_projection_bf16.safetensors",
@@ -146,6 +174,9 @@ _EXTRA_KNOWN_ARTIFACTS: list[_CanonicalArtifact] = [
         gated=False,
         cp_id=None,
         adapter_id=None,
+        section="full",
+        display_name="LTX-2.3 text projection (BF16)",
+        downloadable=False,
     ),
     _CanonicalArtifact(
         filename="LTX23_video_vae_bf16.safetensors",
@@ -158,6 +189,9 @@ _EXTRA_KNOWN_ARTIFACTS: list[_CanonicalArtifact] = [
         gated=False,
         cp_id=None,
         adapter_id=None,
+        section="full",
+        display_name="LTX-2.3 video VAE (BF16)",
+        downloadable=False,
     ),
     _CanonicalArtifact(
         filename="LTX23_audio_vae_bf16.safetensors",
@@ -170,6 +204,9 @@ _EXTRA_KNOWN_ARTIFACTS: list[_CanonicalArtifact] = [
         gated=False,
         cp_id=None,
         adapter_id=None,
+        section="addons",
+        display_name="LTX-2.3 audio VAE (BF16)",
+        downloadable=False,
     ),
     _CanonicalArtifact(
         filename="gemma-3-12b-it-qat-GGUF",
@@ -182,7 +219,17 @@ _EXTRA_KNOWN_ARTIFACTS: list[_CanonicalArtifact] = [
         gated=False,
         cp_id=None,
         adapter_id=None,
+        section="gguf",
+        display_name="Gemma 3 12B IT QAT GGUF (text encoder)",
+        variant_group="gemma-3-gguf",
+        downloadable=False,
     ),
+    # Gemma 3 mmproj (BF16) was a scanner-only artifact in Phase 2A; Phase 3A
+    # promotes it to a downloadable CP-backed artifact
+    # (gemma-3-12b-it-qat-gguf-mmproj, see _CP_KIND_MAP). The scanner detects
+    # it via descent-aware folder-child lookup (_FOLDER_CHILD_FILES) so it
+    # reports ``installed`` when present inside the gemma GGUF folder artifact
+    # without leaking arbitrary internal files as unknown.
 ]
 
 
@@ -213,6 +260,11 @@ def _build_canonical_artifacts() -> list[_CanonicalArtifact]:
             gated=False,
             cp_id=cp_id,
             adapter_id=None,
+            section=spec.section,
+            display_name=spec.display_name or spec.description or filename,
+            variant_group=spec.variant_group,
+            downloadable=spec.downloadable,
+            remote_filename=spec.remote_filename,
         ))
 
     for adapter_id, adapter in OFFICIAL_LTX23_ADAPTERS.items():
@@ -231,6 +283,11 @@ def _build_canonical_artifacts() -> list[_CanonicalArtifact]:
             gated=adapter_id in _GATED_ADAPTER_IDS,
             cp_id=ADAPTER_TO_CP_ID.get(adapter_id),
             adapter_id=adapter_id,
+            section=adapter.section,
+            display_name=adapter.display_name,
+            variant_group=adapter.variant_group,
+            downloadable=adapter.downloadable,
+            remote_filename=filename,
         ))
 
     # Scanner-only known artifacts (no download CP).
@@ -249,6 +306,38 @@ _FILE_ARTIFACTS_BY_NAME: dict[str, _CanonicalArtifact] = {
 _FOLDER_ARTIFACTS_BY_NAME: dict[str, _CanonicalArtifact] = {
     a.filename: a for a in _CANONICAL_ARTIFACTS if a.is_folder
 }
+
+
+def _build_folder_child_files() -> dict[str, list[str]]:
+    """Map folder-artifact filename → known child file-artifact filenames that
+    live inside the folder's canonical path.
+
+    Derived automatically from canonical paths so parent/child relationships
+    stay in sync with the catalog: a file artifact is a child of a folder
+    artifact when the immediate parent directory of the file's canonical path
+    has the same name as the folder artifact. Only known children are matched;
+    arbitrary unknown files inside a folder artifact are never leaked (the
+    folder is treated as a folder artifact and descent is blocked).
+
+    Example: ``mmproj-BF16.gguf`` whose canonical path is
+    ``text_encoders/unsloth/gemma-3-12b-it-qat-GGUF/mmproj-BF16.gguf`` is
+    registered as a child of the ``gemma-3-12b-it-qat-GGUF`` folder artifact.
+    """
+    folder_names = set(_FOLDER_ARTIFACTS_BY_NAME)
+    result: dict[str, list[str]] = {}
+    for file_art in _CANONICAL_ARTIFACTS:
+        if file_art.is_folder:
+            continue
+        parent_name = Path(file_art.canonical_relative_path).parent.name
+        if parent_name in folder_names:
+            result.setdefault(parent_name, []).append(file_art.filename)
+    return result
+
+
+#: Known child file artifacts inside each matched folder artifact (plan §9).
+#: Drives descent-aware child detection without exposing arbitrary internal
+#: files as unknown.
+_FOLDER_CHILD_FILES: dict[str, list[str]] = _build_folder_child_files()
 
 
 def _source_url(repo_id: str, filename: str, is_folder: bool) -> str:
@@ -305,6 +394,11 @@ def _build_artifact(
             notes="",
             cp_id=canonical.cp_id,
             adapter_id=canonical.adapter_id,
+            section=canonical.section,
+            display_name=canonical.display_name,
+            variant_group=canonical.variant_group,
+            downloadable=canonical.downloadable,
+            remote_filename=canonical.remote_filename,
         )
 
     absolute_paths = [str(p) for p in paths]
@@ -346,6 +440,11 @@ def _build_artifact(
         notes=notes,
         cp_id=canonical.cp_id,
         adapter_id=canonical.adapter_id,
+        section=canonical.section,
+        display_name=canonical.display_name,
+        variant_group=canonical.variant_group,
+        downloadable=canonical.downloadable,
+        remote_filename=canonical.remote_filename,
     )
 
 
@@ -373,12 +472,41 @@ def scan_models(models_dir: Path) -> ModelLibraryScanResponse:
                     continue
                 full = root_path / dir_name
                 try:
-                    is_nonempty = full.is_dir() and any(full.iterdir())
+                    entries = list(full.iterdir()) if full.is_dir() else []
                 except OSError:
-                    is_nonempty = False
-                if is_nonempty:
+                    entries = []
+
+                if not entries:
+                    # Empty or unreadable — nothing to detect, no descent block.
+                    continue
+
+                # Block descent into any non-empty matched folder artifact so
+                # arbitrary internal files are not leaked as unknown.
+                matched_folder_names.add(dir_name)
+
+                # Known child file artifacts (e.g. mmproj-BF16.gguf inside the
+                # gemma GGUF folder) are detected explicitly here — descent-
+                # aware detection (Phase 3A, plan §9). They resolve against
+                # their own canonical path, independent of the parent folder's
+                # install state. Unknown children are intentionally NOT emitted.
+                known_children = _FOLDER_CHILD_FILES.get(dir_name, ())
+                for child_filename in known_children:
+                    child_full = full / child_filename
+                    try:
+                        if child_full.is_file():
+                            discovered.setdefault(child_filename, []).append(child_full)
+                    except OSError:
+                        pass
+
+                # Parent folder evidence: at least one entry that is NOT a known
+                # child file artifact. Known children alone do NOT count as
+                # evidence for the parent folder artifact — otherwise a folder
+                # containing only a child projection file (e.g. mmproj-BF16.gguf
+                # inside the gemma GGUF folder) would wrongly report the parent
+                # gemma_gguf folder artifact as installed. An actual Gemma GGUF
+                # model file (or any other real content) is required.
+                if any(entry.name not in known_children for entry in entries):
                     discovered.setdefault(dir_name, []).append(full)
-                    matched_folder_names.add(dir_name)
 
             dirs[:] = sorted(
                 d for d in dirs

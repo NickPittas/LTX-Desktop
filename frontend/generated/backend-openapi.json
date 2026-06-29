@@ -26,7 +26,12 @@
                 "yolox-l-torchscript",
                 "dw-ll-ucoco-384-bs5",
                 "gemma-3-12b-it-qat-q4_0-unquantized",
-                "z-image-turbo"
+                "z-image-turbo",
+                "ltx-2.3-22b-dev-gguf-q4-k-m",
+                "ltx-2.3-22b-dev-gguf-ud-q4-k-m",
+                "ltx-2.3-22b-dev-gguf-q6-k",
+                "ltx-2.3-22b-dev-gguf-ud-q5-k-m",
+                "gemma-3-12b-it-qat-gguf-mmproj"
               ],
               "type": "string"
             },
@@ -527,7 +532,12 @@
                 "yolox-l-torchscript",
                 "dw-ll-ucoco-384-bs5",
                 "gemma-3-12b-it-qat-q4_0-unquantized",
-                "z-image-turbo"
+                "z-image-turbo",
+                "ltx-2.3-22b-dev-gguf-q4-k-m",
+                "ltx-2.3-22b-dev-gguf-ud-q4-k-m",
+                "ltx-2.3-22b-dev-gguf-q6-k",
+                "ltx-2.3-22b-dev-gguf-ud-q5-k-m",
+                "gemma-3-12b-it-qat-gguf-mmproj"
               ],
               "type": "string"
             },
@@ -675,7 +685,12 @@
                 "yolox-l-torchscript",
                 "dw-ll-ucoco-384-bs5",
                 "gemma-3-12b-it-qat-q4_0-unquantized",
-                "z-image-turbo"
+                "z-image-turbo",
+                "ltx-2.3-22b-dev-gguf-q4-k-m",
+                "ltx-2.3-22b-dev-gguf-ud-q4-k-m",
+                "ltx-2.3-22b-dev-gguf-q6-k",
+                "ltx-2.3-22b-dev-gguf-ud-q5-k-m",
+                "gemma-3-12b-it-qat-gguf-mmproj"
               ],
               "type": "string"
             },
@@ -706,7 +721,12 @@
                 "yolox-l-torchscript",
                 "dw-ll-ucoco-384-bs5",
                 "gemma-3-12b-it-qat-q4_0-unquantized",
-                "z-image-turbo"
+                "z-image-turbo",
+                "ltx-2.3-22b-dev-gguf-q4-k-m",
+                "ltx-2.3-22b-dev-gguf-ud-q4-k-m",
+                "ltx-2.3-22b-dev-gguf-q6-k",
+                "ltx-2.3-22b-dev-gguf-ud-q5-k-m",
+                "gemma-3-12b-it-qat-gguf-mmproj"
               ],
               "type": "string"
             },
@@ -738,7 +758,12 @@
                   "yolox-l-torchscript",
                   "dw-ll-ucoco-384-bs5",
                   "gemma-3-12b-it-qat-q4_0-unquantized",
-                  "z-image-turbo"
+                  "z-image-turbo",
+                  "ltx-2.3-22b-dev-gguf-q4-k-m",
+                  "ltx-2.3-22b-dev-gguf-ud-q4-k-m",
+                  "ltx-2.3-22b-dev-gguf-q6-k",
+                  "ltx-2.3-22b-dev-gguf-ud-q5-k-m",
+                  "gemma-3-12b-it-qat-gguf-mmproj"
                 ],
                 "type": "string"
               },
@@ -1762,7 +1787,12 @@
                   "yolox-l-torchscript",
                   "dw-ll-ucoco-384-bs5",
                   "gemma-3-12b-it-qat-q4_0-unquantized",
-                  "z-image-turbo"
+                  "z-image-turbo",
+                  "ltx-2.3-22b-dev-gguf-q4-k-m",
+                  "ltx-2.3-22b-dev-gguf-ud-q4-k-m",
+                  "ltx-2.3-22b-dev-gguf-q6-k",
+                  "ltx-2.3-22b-dev-gguf-ud-q5-k-m",
+                  "gemma-3-12b-it-qat-gguf-mmproj"
                 ],
                 "type": "string"
               },
@@ -1908,7 +1938,12 @@
                 "yolox-l-torchscript",
                 "dw-ll-ucoco-384-bs5",
                 "gemma-3-12b-it-qat-q4_0-unquantized",
-                "z-image-turbo"
+                "z-image-turbo",
+                "ltx-2.3-22b-dev-gguf-q4-k-m",
+                "ltx-2.3-22b-dev-gguf-ud-q4-k-m",
+                "ltx-2.3-22b-dev-gguf-q6-k",
+                "ltx-2.3-22b-dev-gguf-ud-q5-k-m",
+                "gemma-3-12b-it-qat-gguf-mmproj"
               ],
               "type": "string"
             },
@@ -1953,7 +1988,12 @@
                 "yolox-l-torchscript",
                 "dw-ll-ucoco-384-bs5",
                 "gemma-3-12b-it-qat-q4_0-unquantized",
-                "z-image-turbo"
+                "z-image-turbo",
+                "ltx-2.3-22b-dev-gguf-q4-k-m",
+                "ltx-2.3-22b-dev-gguf-ud-q4-k-m",
+                "ltx-2.3-22b-dev-gguf-q6-k",
+                "ltx-2.3-22b-dev-gguf-ud-q5-k-m",
+                "gemma-3-12b-it-qat-gguf-mmproj"
               ],
               "type": "string"
             },
@@ -2025,7 +2065,12 @@
                 "yolox-l-torchscript",
                 "dw-ll-ucoco-384-bs5",
                 "gemma-3-12b-it-qat-q4_0-unquantized",
-                "z-image-turbo"
+                "z-image-turbo",
+                "ltx-2.3-22b-dev-gguf-q4-k-m",
+                "ltx-2.3-22b-dev-gguf-ud-q4-k-m",
+                "ltx-2.3-22b-dev-gguf-q6-k",
+                "ltx-2.3-22b-dev-gguf-ud-q5-k-m",
+                "gemma-3-12b-it-qat-gguf-mmproj"
               ],
               "type": "string"
             },
@@ -2055,7 +2100,12 @@
                 "yolox-l-torchscript",
                 "dw-ll-ucoco-384-bs5",
                 "gemma-3-12b-it-qat-q4_0-unquantized",
-                "z-image-turbo"
+                "z-image-turbo",
+                "ltx-2.3-22b-dev-gguf-q4-k-m",
+                "ltx-2.3-22b-dev-gguf-ud-q4-k-m",
+                "ltx-2.3-22b-dev-gguf-q6-k",
+                "ltx-2.3-22b-dev-gguf-ud-q5-k-m",
+                "gemma-3-12b-it-qat-gguf-mmproj"
               ],
               "type": "string"
             },
@@ -2204,6 +2254,17 @@
               }
             ],
             "title": "Ic Lora Union"
+          },
+          "mmproj": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mmproj"
           },
           "official_adapters": {
             "additionalProperties": {
@@ -2361,7 +2422,12 @@
                 "yolox-l-torchscript",
                 "dw-ll-ucoco-384-bs5",
                 "gemma-3-12b-it-qat-q4_0-unquantized",
-                "z-image-turbo"
+                "z-image-turbo",
+                "ltx-2.3-22b-dev-gguf-q4-k-m",
+                "ltx-2.3-22b-dev-gguf-ud-q4-k-m",
+                "ltx-2.3-22b-dev-gguf-q6-k",
+                "ltx-2.3-22b-dev-gguf-ud-q5-k-m",
+                "gemma-3-12b-it-qat-gguf-mmproj"
               ],
               "type": "string"
             },
@@ -2398,7 +2464,12 @@
                 "yolox-l-torchscript",
                 "dw-ll-ucoco-384-bs5",
                 "gemma-3-12b-it-qat-q4_0-unquantized",
-                "z-image-turbo"
+                "z-image-turbo",
+                "ltx-2.3-22b-dev-gguf-q4-k-m",
+                "ltx-2.3-22b-dev-gguf-ud-q4-k-m",
+                "ltx-2.3-22b-dev-gguf-q6-k",
+                "ltx-2.3-22b-dev-gguf-ud-q5-k-m",
+                "gemma-3-12b-it-qat-gguf-mmproj"
               ],
               "type": "string"
             },
@@ -2532,7 +2603,12 @@
                   "yolox-l-torchscript",
                   "dw-ll-ucoco-384-bs5",
                   "gemma-3-12b-it-qat-q4_0-unquantized",
-                  "z-image-turbo"
+                  "z-image-turbo",
+                  "ltx-2.3-22b-dev-gguf-q4-k-m",
+                  "ltx-2.3-22b-dev-gguf-ud-q4-k-m",
+                  "ltx-2.3-22b-dev-gguf-q6-k",
+                  "ltx-2.3-22b-dev-gguf-ud-q5-k-m",
+                  "gemma-3-12b-it-qat-gguf-mmproj"
                 ],
                 "type": "string"
               },
@@ -2541,6 +2617,16 @@
               }
             ],
             "title": "Cp Id"
+          },
+          "display_name": {
+            "default": "",
+            "title": "Display Name",
+            "type": "string"
+          },
+          "downloadable": {
+            "default": true,
+            "title": "Downloadable",
+            "type": "boolean"
           },
           "expected_size_bytes": {
             "title": "Expected Size Bytes",
@@ -2576,6 +2662,17 @@
             ],
             "title": "Preferred Path"
           },
+          "remote_filename": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remote Filename"
+          },
           "repo_id": {
             "title": "Repo Id",
             "type": "string"
@@ -2588,6 +2685,17 @@
               "unknown"
             ],
             "title": "Scanner Confidence",
+            "type": "string"
+          },
+          "section": {
+            "default": "full",
+            "enum": [
+              "full",
+              "kijai",
+              "gguf",
+              "addons"
+            ],
+            "title": "Section",
             "type": "string"
           },
           "size_bytes": {
@@ -2624,6 +2732,11 @@
               "not_applicable"
             ],
             "title": "Support Status",
+            "type": "string"
+          },
+          "variant_group": {
+            "default": "",
+            "title": "Variant Group",
             "type": "string"
           }
         },
@@ -3415,7 +3528,12 @@
                   "yolox-l-torchscript",
                   "dw-ll-ucoco-384-bs5",
                   "gemma-3-12b-it-qat-q4_0-unquantized",
-                  "z-image-turbo"
+                  "z-image-turbo",
+                  "ltx-2.3-22b-dev-gguf-q4-k-m",
+                  "ltx-2.3-22b-dev-gguf-ud-q4-k-m",
+                  "ltx-2.3-22b-dev-gguf-q6-k",
+                  "ltx-2.3-22b-dev-gguf-ud-q5-k-m",
+                  "gemma-3-12b-it-qat-gguf-mmproj"
                 ],
                 "type": "string"
               },

@@ -13,6 +13,7 @@ from handlers.base import StateHandlerBase
 from handlers.text_handler import TextHandler
 from runtime_config.model_download_specs import (
     IMG_GEN_MODEL_CP_ID,
+    OFFICIAL_LTX23_ADAPTERS,
     UPSAMPLER_CP_ID,
     get_downloaded_ltx_model_id,
     get_existing_cp_path,
@@ -184,6 +185,44 @@ class PipelinesHandler(StateHandlerBase):
             return str(canonical)
         return ""
 
+    def _canonical_distilled_lora_candidates(self) -> list[tuple[str, Path]]:
+        """Canonical models-dir distilled LoRA paths in preference order.
+
+        Returns ``(adapter_id, path)`` tuples for the newest-then-older
+        distilled LoRA filenames declared in ``OFFICIAL_LTX23_ADAPTERS``.
+        Adapter canonical placement is ``<models_dir>/adapters/<filename>``
+        (matches the scanner's canonical subfolder).
+        """
+        candidates: list[tuple[str, Path]] = []
+        for role in ("distilled_lora_384_1_1", "distilled_lora_384"):
+            adapter = OFFICIAL_LTX23_ADAPTERS.get(role)  # type: ignore[arg-type]
+            if adapter is None:
+                continue
+            candidates.append((role, self.models_dir / "adapters" / adapter.filename))
+        return candidates
+
+    def _resolve_distilled_lora_path(
+        self,
+        components: ResolvedLtxComponents | None,
+    ) -> str | None:
+        """Resolve the effective distilled LoRA path for a dev base profile.
+
+        Preference order:
+        1. explicit profile path (``components.distilled_lora_path``)
+        2. canonical models-dir fallback using ``OFFICIAL_LTX23_ADAPTERS``
+           filenames for ``distilled_lora_384_1_1`` then ``distilled_lora_384``.
+
+        Returns ``None`` when neither exists on disk.
+        """
+        explicit = components.distilled_lora_path if components is not None else None
+        if explicit and Path(explicit).exists():
+            return explicit
+
+        for _role, path in self._canonical_distilled_lora_candidates():
+            if path.exists():
+                return str(path)
+        return None
+
     def _resolve_checkpoint_paths(self):
         """Return (checkpoint_path, gemma_root, upsampler_path, cache_key)."""
         components = self._resolve_active_components()
@@ -224,6 +263,45 @@ class PipelinesHandler(StateHandlerBase):
         components = self._resolve_active_components()
         transformer_format = components.transformer_format if components is not None else "safetensors"
 
+        # Phase 3D (plan §12): route dev/distilled pipeline selection via
+        # base_family. Unknown base family fails fast with an actionable error
+        # before any heavy GPU work — never silently guess.
+        base_family = components.base_family if components is not None else "distilled"
+        if base_family == "unknown":
+            raise HTTPError(
+                409,
+                (
+                    "Active model profile has an unrecognized base family. The fast video "
+                    "pipeline supports 'dev' and 'distilled' LTX-2.3 base models only; "
+                    "the transformer path/filename did not contain a 'dev' or 'distilled' "
+                    "signal. Choose an official LTX-2.3 dev or distilled transformer "
+                    "(the filename must contain 'dev' or 'distilled'; note that "
+                    "'distilled-lora' / 'distilled_lora' is an adapter name and does not "
+                    "imply a distilled base)."
+                ),
+                code="UNSUPPORTED_MODEL_BASE_FAMILY",
+            )
+
+        # Dev route requires a distilled LoRA. Resolve explicit → canonical
+        # fallback; if neither exists, fail before pipeline creation with the
+        # exact canonical placement path(s) the user needs.
+        distilled_lora_path: str | None = None
+        if base_family == "dev":
+            distilled_lora_path = self._resolve_distilled_lora_path(components)
+            if not distilled_lora_path:
+                canonical_paths = ", ".join(
+                    str(p) for _role, p in self._canonical_distilled_lora_candidates()
+                )
+                raise HTTPError(
+                    409,
+                    (
+                        "Dev base model requires a distilled LoRA for the fast video "
+                        "pipeline, but none was found. Install one of the official "
+                        f"distilled LoRAs at: {canonical_paths}."
+                    ),
+                    code="DISTILLED_LORA_REQUIRED",
+                )
+
         pipeline = self._fast_video_pipeline_class.create(
             checkpoint_path,
             gemma_root,
@@ -232,12 +310,22 @@ class PipelinesHandler(StateHandlerBase):
             streaming_prefetch_count_for_mode(self.config.local_generations_mode),
             components=components,
             transformer_format=transformer_format,
+            distilled_lora_path=distilled_lora_path,
         )
+
+        # Cache key must reflect the effective distilled LoRA path so a dev
+        # profile that toggles between explicit and canonical fallback (or
+        # whose fallback appears/disappears on disk) invalidates correctly.
+        effective_cache_key = cache_key
+        if base_family == "dev" and distilled_lora_path is not None:
+            explicit_in_key = bool(components is not None and components.distilled_lora_path)
+            if not explicit_in_key:
+                effective_cache_key = (*cache_key, distilled_lora_path)
 
         state = VideoPipelineState(
             pipeline=pipeline,
             is_compiled=False,
-            cache_key=cache_key,
+            cache_key=effective_cache_key,
         )
         return self._compile_if_enabled(state)
 

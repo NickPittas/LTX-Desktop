@@ -13,6 +13,7 @@ from services.services_utils import AudioOrNone, TilingConfigType, device_suppor
 
 if TYPE_CHECKING:
     from ltx_core.components.guiders import MultiModalGuiderParams
+    from ltx_pipelines.utils.args import ImageConditioningInput as LtxImageConditioningInput
     from services.color_management import ColorSpace
     from services.media_encoder.media_encoder import MediaEncoder
 
@@ -33,6 +34,34 @@ def video_chunks_number(num_frames: int, tiling_config: TilingConfigType | None)
     from ltx_core.model.video_vae import get_video_chunks_number
 
     return int(get_video_chunks_number(num_frames, tiling_config))
+
+
+# CRF (H.264 compression quality) used for every app-created image conditioning
+# input. Upstream ``ltx_pipelines`` defaults image conditioning CRF to
+# ``DEFAULT_IMAGE_CRF`` (=33, lossy). The app targets a near-lossless CRF so
+# conditioning frames are not recompressed/degraded before the VAE sees them.
+# Centralized here (plan §11): all image-conditioning entry points must route
+# construction through :func:`make_ltx_image_conditioning_input`.
+IMAGE_CONDITIONING_CRF: int = 18
+
+
+def make_ltx_image_conditioning_input(
+    path: str, frame_idx: int, strength: float
+) -> LtxImageConditioningInput:
+    """Build an upstream ``ltx_pipelines`` image conditioning input with the
+    app-wide CRF override applied.
+
+    Upstream ``ltx_pipelines.utils.args.ImageConditioningInput`` is a
+    ``NamedTuple`` of ``(path, frame_idx, strength, crf)`` whose ``crf`` field
+    defaults to ``DEFAULT_IMAGE_CRF`` (=33). Every app entry point that builds
+    image conditioning for the upstream pipelines (fast/distilled native,
+    IC-LoRA) must use this helper so CRF is overridden consistently to
+    :data:`IMAGE_CONDITIONING_CRF` (18). The upstream import is lazy so this
+    module does not gain an import-time dependency on ``ltx_pipelines``.
+    """
+    from ltx_pipelines.utils.args import ImageConditioningInput as _LtxImageInput
+
+    return _LtxImageInput(path, frame_idx, strength, crf=IMAGE_CONDITIONING_CRF)
 
 
 def make_primary_output_path(
@@ -217,7 +246,6 @@ class DistilledNativePipeline:
         tiling_config: TilingConfigType | None = None,
     ) -> tuple[torch.Tensor | Iterator[torch.Tensor], AudioOrNone]:
         from ltx_core.components.noisers import GaussianNoiser
-        from ltx_pipelines.utils.args import ImageConditioningInput as _LtxImageInput
         from ltx_pipelines.utils.constants import DISTILLED_SIGMA_VALUES
         from ltx_pipelines.utils.denoisers import SimpleDenoiser
         from ltx_pipelines.utils.helpers import image_conditionings_by_replacing_latent
@@ -240,7 +268,7 @@ class DistilledNativePipeline:
         # them (no leak across a generation).
         resolved_paths = [resolve_image_input_path(img.path) for img in images]
         ltx_images = [
-            _LtxImageInput(rp, img.frame_idx, img.strength)
+            make_ltx_image_conditioning_input(rp, img.frame_idx, img.strength)
             for rp, img in zip(resolved_paths, images)
         ]
         try:

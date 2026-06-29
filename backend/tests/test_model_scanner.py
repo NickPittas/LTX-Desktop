@@ -328,6 +328,302 @@ class TestScannerStatuses:
         assert "LTX23_video_vae_bf16.safetensors" not in unknown_names
         assert "LTX23_audio_vae_bf16.safetensors" not in unknown_names
 
+    # ------------------------------------------------------------------
+    # Phase 2A — unsloth LTX-2.3 dev GGUF canonical classification (plan §4)
+    # ------------------------------------------------------------------
+
+    def test_dev_gguf_at_canonical_unsloth_path_installed(self, tmp_path):
+        """The four dev GGUF quants at diffusion_models/unsloth/LTX-2.3-GGUF/
+        are canonical installed — not unknown, not wrong-folder."""
+        models = tmp_path / "models"
+        gguf_dir = models / "diffusion_models" / "unsloth" / "LTX-2.3-GGUF"
+        _write(gguf_dir, "ltx-2.3-22b-dev-Q4_K_M.gguf")
+        _write(gguf_dir, "ltx-2.3-22b-dev-UD-Q4_K_M.gguf")
+        _write(gguf_dir, "ltx-2.3-22b-dev-Q6_K.gguf")
+        _write(gguf_dir, "ltx-2.3-22b-dev-UD-Q5_K_M.gguf")
+
+        result = scan_models(models)
+
+        installed = {
+            "ltx-2.3-22b-dev-Q4_K_M.gguf",
+            "ltx-2.3-22b-dev-UD-Q4_K_M.gguf",
+            "ltx-2.3-22b-dev-Q6_K.gguf",
+            "ltx-2.3-22b-dev-UD-Q5_K_M.gguf",
+        }
+        for art in result.artifacts:
+            if art.filename in installed:
+                assert art.status == "installed", art.filename
+                assert art.scanner_confidence == "exact_catalog_match", art.filename
+                assert art.artifact_kind == "gguf", art.filename
+                assert art.component_role == "base_diffusion_model_gguf", art.filename
+                assert art.cp_id in {
+                    "ltx-2.3-22b-dev-gguf-q4-k-m",
+                    "ltx-2.3-22b-dev-gguf-ud-q4-k-m",
+                    "ltx-2.3-22b-dev-gguf-q6-k",
+                    "ltx-2.3-22b-dev-gguf-ud-q5-k-m",
+                }, art.filename
+        # None of the GGUF files appear as unknown.
+        unknown_names = {Path(f.relative_path).name for f in result.unknown_files}
+        assert not (installed & unknown_names)
+
+    def test_dev_gguf_canonical_path_matches_resolve_model_path(self, tmp_path):
+        from runtime_config.model_download_specs import resolve_model_path
+
+        models = tmp_path / "models"
+        gguf_dir = models / "diffusion_models" / "unsloth" / "LTX-2.3-GGUF"
+        _write(gguf_dir, "ltx-2.3-22b-dev-Q4_K_M.gguf")
+
+        result = scan_models(models)
+        art = next(a for a in result.artifacts if a.filename == "ltx-2.3-22b-dev-Q4_K_M.gguf")
+        assert art.preferred_path == str(
+            resolve_model_path(models, "ltx-2.3-22b-dev-gguf-q4-k-m")
+        )
+
+    def test_dev_gguf_at_wrong_folder_classified_usable(self, tmp_path):
+        """A dev GGUF placed outside the canonical unsloth path is NOT installed
+        (wrong_folder_usable), so it would be re-fetched to the canonical path."""
+        models = tmp_path / "models"
+        _write(models / "diffusion_models", "ltx-2.3-22b-dev-Q4_K_M.gguf")
+
+        result = scan_models(models)
+        art = next(a for a in result.artifacts if a.filename == "ltx-2.3-22b-dev-Q4_K_M.gguf")
+        assert art.status == "wrong_folder_usable"
+        assert art.scanner_confidence == "filename_match"
+
+    # ------------------------------------------------------------------
+    # Phase 2A — catalog grouping metadata (plan §7)
+    # ------------------------------------------------------------------
+
+    def test_dev_gguf_artifacts_carry_section_and_variant_group(self, tmp_path):
+        models = tmp_path / "models"
+        result = scan_models(models)
+
+        gguf_basenames = {
+            "ltx-2.3-22b-dev-Q4_K_M.gguf",
+            "ltx-2.3-22b-dev-UD-Q4_K_M.gguf",
+            "ltx-2.3-22b-dev-Q6_K.gguf",
+            "ltx-2.3-22b-dev-UD-Q5_K_M.gguf",
+        }
+        gguf_arts = [a for a in result.artifacts if a.filename in gguf_basenames]
+        assert len(gguf_arts) == 4
+        for art in gguf_arts:
+            assert art.section == "gguf", art.filename
+            assert art.variant_group == "ltx-2.3-dev-gguf", art.filename
+            assert art.downloadable is True, art.filename
+            assert art.display_name, art.filename
+
+    def test_sections_assign_existing_artifacts(self, tmp_path):
+        """Section grouping: full official set vs add-ons vs gguf (plan §2/§7)."""
+        models = tmp_path / "models"
+        result = scan_models(models)
+        by_role = {a.component_role: a for a in result.artifacts}
+
+        # Full section: base model, upscaler, gemma text encoder, video VAE,
+        # text projection.
+        assert by_role["base_diffusion_model"].section == "full"
+        assert by_role["spatial_upscaler"].section == "full"
+        assert by_role["gemma"].section == "full"
+        assert by_role["video_vae"].section == "full"
+        assert by_role["text_projection_file"].section == "full"
+
+        # Add-ons & Controls: IC-LoRAs, depth/pose/person processors, image gen.
+        assert by_role["ingredients"].section == "addons"
+        assert by_role["depth_processor"].section == "addons"
+        assert by_role["person_detector"].section == "addons"
+        assert by_role["pose_processor"].section == "addons"
+        assert by_role["image_gen_model"].section == "addons"
+
+        # GGUF section: dev quants + gemma GGUF folder + mmproj + distilled GGUF.
+        assert by_role["base_diffusion_model_gguf"].section == "gguf"
+        assert by_role["gemma_gguf"].section == "gguf"
+        assert by_role["gemma_mmproj"].section == "gguf"
+
+    def test_gemma_mmproj_is_first_class_downloadable_artifact(self, tmp_path):
+        """mmproj-BF16.gguf is a first-class downloadable CP-backed catalog
+        entry (Phase 3A, plan §9 Option A).
+
+        Phase 2A registered it scanner-only (downloadable=False) because the
+        scanner could not detect a file inside the matched gemma GGUF folder
+        artifact. Phase 3A promotes it to a downloadable CP
+        (``gemma-3-12b-it-qat-gguf-mmproj``) and the scanner is now
+        descent-aware for known folder children.
+        """
+        models = tmp_path / "models"
+        result = scan_models(models)
+
+        mmproj = next(a for a in result.artifacts if a.component_role == "gemma_mmproj")
+        assert mmproj.filename == "mmproj-BF16.gguf"
+        assert mmproj.artifact_kind == "gguf"
+        assert mmproj.repo_id == "unsloth/gemma-3-12b-it-qat-GGUF"
+        assert mmproj.expected_size_bytes == 854_200_448
+        assert mmproj.section == "gguf"
+        assert mmproj.display_name == "Gemma 3 mmproj BF16"
+        assert mmproj.variant_group == "gemma-3-gguf"
+        # Phase 3A promotion: now downloadable and CP-backed.
+        assert mmproj.downloadable is True
+        assert mmproj.cp_id == "gemma-3-12b-it-qat-gguf-mmproj"
+        # remote_filename is None because the HF remote basename equals the
+        # local basename (no remote-name promotion change needed).
+        assert mmproj.remote_filename is None
+        # Canonical placement is inside the gemma GGUF folder.
+        assert mmproj.canonical_relative_path == (
+            "text_encoders/unsloth/gemma-3-12b-it-qat-GGUF/mmproj-BF16.gguf"
+        )
+        # Source link points at the HF resolve URL.
+        assert "mmproj-BF16.gguf" in mmproj.source_url
+        # Absent on disk → missing.
+        assert mmproj.status == "missing"
+
+    def test_mmproj_installed_inside_gemma_gguf_folder_artifact(self, tmp_path):
+        """Descent-aware detection (Phase 3A): when the gemma GGUF folder
+        artifact is present at its canonical path and contains
+        ``mmproj-BF16.gguf``, the mmproj artifact must report ``installed`` at
+        the canonical path — not missing/unknown. The scanner blocks full
+        descent into matched folder artifacts but checks known children
+        explicitly."""
+        models = tmp_path / "models"
+        gguf_folder = models / "text_encoders" / "unsloth" / "gemma-3-12b-it-qat-GGUF"
+        gguf_folder.mkdir(parents=True)
+        (gguf_folder / "mmproj-BF16.gguf").write_bytes(b"\x00mmproj")
+        # An arbitrary unknown sibling inside the folder artifact.
+        (gguf_folder / "random-internal-file.bin").write_bytes(b"\x00junk")
+        # The actual gemma GGUF text-encoder file.
+        (gguf_folder / "gemma-3-12b-it-qat-UD-Q4_K_XL.gguf").write_bytes(b"\x00gemma")
+
+        result = scan_models(models)
+
+        # Folder artifact detected as installed.
+        gemma_gguf = next(a for a in result.artifacts if a.component_role == "gemma_gguf")
+        assert gemma_gguf.status == "installed"
+        assert gemma_gguf.is_folder is True
+
+        # mmproj detected as installed at the canonical path (descent-aware).
+        from runtime_config.model_download_specs import resolve_model_path
+
+        mmproj = next(a for a in result.artifacts if a.component_role == "gemma_mmproj")
+        assert mmproj.status == "installed"
+        assert mmproj.scanner_confidence == "exact_catalog_match"
+        assert mmproj.preferred_path == str(
+            resolve_model_path(models, "gemma-3-12b-it-qat-gguf-mmproj")
+        )
+        assert mmproj.size_bytes is not None
+
+    def test_mmproj_missing_when_folder_artifact_absent(self, tmp_path):
+        """Without the gemma GGUF folder artifact, mmproj is missing (not
+        wrongly detected from an unrelated folder)."""
+        models = tmp_path / "models"
+        # Place mmproj at root — no folder artifact context.
+        _write(models, "mmproj-BF16.gguf")
+
+        result = scan_models(models)
+        mmproj = next(a for a in result.artifacts if a.component_role == "gemma_mmproj")
+        # Root placement is non-canonical → wrong_folder_usable (filename match).
+        assert mmproj.status == "wrong_folder_usable"
+        assert mmproj.scanner_confidence == "filename_match"
+
+    def test_no_arbitrary_unknown_child_leakage_from_folder_artifact(self, tmp_path):
+        """Arbitrary unknown files inside a matched folder artifact are NOT
+        emitted as unknown (the folder is intentionally treated as a folder
+        artifact; only known children are matched)."""
+        models = tmp_path / "models"
+        gguf_folder = models / "text_encoders" / "unsloth" / "gemma-3-12b-it-qat-GGUF"
+        gguf_folder.mkdir(parents=True)
+        (gguf_folder / "mmproj-BF16.gguf").write_bytes(b"\x00mmproj")
+        (gguf_folder / "random-internal-a.bin").write_bytes(b"\x00a")
+        (gguf_folder / "random-internal-b.bin").write_bytes(b"\x00b")
+
+        result = scan_models(models)
+
+        unknown_names = {Path(f.relative_path).name for f in result.unknown_files}
+        # Known child is matched (not unknown).
+        assert "mmproj-BF16.gguf" not in unknown_names
+        # Arbitrary internal files are NOT leaked as unknown.
+        assert "random-internal-a.bin" not in unknown_names
+        assert "random-internal-b.bin" not in unknown_names
+
+    def test_mmproj_metadata_cp_id_and_downloadable(self, tmp_path):
+        """mmproj scanner artifact carries cp_id and downloadable=true metadata
+        regardless of install state (catalog metadata is static)."""
+        models = tmp_path / "models"
+        result = scan_models(models)
+        mmproj = next(a for a in result.artifacts if a.component_role == "gemma_mmproj")
+        assert mmproj.cp_id == "gemma-3-12b-it-qat-gguf-mmproj"
+        assert mmproj.downloadable is True
+
+    # ------------------------------------------------------------------
+    # Phase 3A regression: parent-folder evidence excludes known children
+    # ------------------------------------------------------------------
+
+    def test_mmproj_only_does_not_install_gemma_gguf_parent(self, tmp_path):
+        """Regression: a gemma GGUF folder containing ONLY mmproj-BF16.gguf
+        must report mmproj installed but the parent gemma_gguf folder artifact
+        as missing. A known child projection file is not evidence that the
+        Gemma text-encoder model itself is present."""
+        models = tmp_path / "models"
+        gguf_folder = models / "text_encoders" / "unsloth" / "gemma-3-12b-it-qat-GGUF"
+        gguf_folder.mkdir(parents=True)
+        (gguf_folder / "mmproj-BF16.gguf").write_bytes(b"\x00mmproj")
+
+        result = scan_models(models)
+
+        # mmproj is installed at its canonical path (descent-aware detection).
+        from runtime_config.model_download_specs import resolve_model_path
+
+        mmproj = next(a for a in result.artifacts if a.component_role == "gemma_mmproj")
+        assert mmproj.status == "installed"
+        assert mmproj.preferred_path == str(
+            resolve_model_path(models, "gemma-3-12b-it-qat-gguf-mmproj")
+        )
+
+        # The parent gemma_gguf folder artifact is NOT installed — mmproj
+        # alone is not evidence of the Gemma text-encoder model.
+        gemma_gguf = next(a for a in result.artifacts if a.component_role == "gemma_gguf")
+        assert gemma_gguf.status == "missing"
+        assert gemma_gguf.preferred_path is None
+        assert gemma_gguf.absolute_paths == []
+
+        # No unknown leakage: the folder descent is still blocked.
+        unknown_names = {Path(f.relative_path).name for f in result.unknown_files}
+        assert "mmproj-BF16.gguf" not in unknown_names
+
+    def test_actual_gemma_gguf_file_installs_parent_folder(self, tmp_path):
+        """A gemma GGUF folder containing an actual (non-mmproj) Gemma .gguf
+        model file reports the parent gemma_gguf folder artifact as installed.
+        This is the positive counterpart to the mmproj-only regression above."""
+        models = tmp_path / "models"
+        gguf_folder = models / "text_encoders" / "unsloth" / "gemma-3-12b-it-qat-GGUF"
+        gguf_folder.mkdir(parents=True)
+        (gguf_folder / "gemma-3-12b-it-qat-UD-Q4_K_XL.gguf").write_bytes(b"\x00gemma")
+
+        result = scan_models(models)
+
+        # Parent folder artifact installed — real Gemma model file present.
+        gemma_gguf = next(a for a in result.artifacts if a.component_role == "gemma_gguf")
+        assert gemma_gguf.status == "installed"
+        assert gemma_gguf.is_folder is True
+        assert gemma_gguf.preferred_path is not None
+
+        # mmproj is missing (not present in the folder).
+        mmproj = next(a for a in result.artifacts if a.component_role == "gemma_mmproj")
+        assert mmproj.status == "missing"
+
+    def test_mmproj_plus_actual_gemma_installs_both(self, tmp_path):
+        """When the folder contains both mmproj and an actual Gemma model
+        file, both the parent folder and mmproj report installed."""
+        models = tmp_path / "models"
+        gguf_folder = models / "text_encoders" / "unsloth" / "gemma-3-12b-it-qat-GGUF"
+        gguf_folder.mkdir(parents=True)
+        (gguf_folder / "mmproj-BF16.gguf").write_bytes(b"\x00mmproj")
+        (gguf_folder / "gemma-3-12b-it-qat-UD-Q4_K_XL.gguf").write_bytes(b"\x00gemma")
+
+        result = scan_models(models)
+
+        gemma_gguf = next(a for a in result.artifacts if a.component_role == "gemma_gguf")
+        assert gemma_gguf.status == "installed"
+
+        mmproj = next(a for a in result.artifacts if a.component_role == "gemma_mmproj")
+        assert mmproj.status == "installed"
+
     def test_canonical_paths_match_resolve_model_path(self, tmp_path):
         """Scanner canonical_relative_path for CPs must match resolve_model_path()."""
         from runtime_config.model_download_specs import (

@@ -464,6 +464,10 @@ class _FakeVideoPipelineBase:
         self.last_upsampler_path: str | None = None
         self.last_transformer_format: str | None = None
         self.last_streaming_prefetch_count: int | None = None
+        # Phase 3D: dev-vs-distilled routing metadata captured from create().
+        self.last_components: ResolvedLtxComponents | None = None
+        self.last_base_family: str | None = None
+        self.last_distilled_lora_path: str | None = None
 
     def _record_generate(self, payload: dict[str, Any]) -> None:
         self.generate_calls.append(payload)
@@ -485,10 +489,14 @@ class _FakeVideoPipelineBase:
         self.compile_calls += 1
 
     def supports_torch_compile(self) -> bool:
-        # GGUF transformers are not torch.compile-able (lazy per-forward dequant).
-        # Mirrors LTXFastVideoPipeline.supports_torch_compile so the handler can
-        # skip compile silently for GGUF profiles without raising.
-        return self.last_transformer_format != "gguf"
+        # Mirrors LTXFastVideoPipeline.supports_torch_compile: GGUF and dev
+        # routes are not torch.compile-able so the handler skips compile
+        # silently for those profiles without raising.
+        if self.last_transformer_format == "gguf":
+            return False
+        if self.last_base_family == "dev":
+            return False
+        return True
 
 
 class FakeFastVideoPipeline(_FakeVideoPipelineBase):
@@ -509,6 +517,7 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
         components: ResolvedLtxComponents | None = None,
         *,
         transformer_format: str = "safetensors",
+        distilled_lora_path: str | None = None,
     ) -> "FakeFastVideoPipeline":
         pipeline = FakeFastVideoPipeline._singleton
         if pipeline is None:
@@ -518,6 +527,8 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
         pipeline.last_upsampler_path = upsampler_path
         pipeline.last_components = components
         pipeline.last_transformer_format = transformer_format
+        pipeline.last_distilled_lora_path = distilled_lora_path
+        pipeline.last_base_family = components.base_family if components is not None else "distilled"
         # ponytail: match real __init__ guard — split safetensors needs streaming
         _is_split = (
             transformer_format == "safetensors"
@@ -540,6 +551,7 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
         images: list[ImageConditioningInput],
         output_path: str,
         enhance_prompt: bool = False,
+        negative_prompt: str = "",
         output_format: Any = None,
         encoder: Any = None,
         proxy_path: Any = None,
@@ -557,6 +569,7 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
                 "images": images,
                 "output_path": output_path,
                 "enhance_prompt": enhance_prompt,
+                "negative_prompt": negative_prompt,
                 "output_format": output_format,
                 "encoder": encoder,
                 "proxy_path": proxy_path,

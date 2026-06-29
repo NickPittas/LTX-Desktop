@@ -153,6 +153,12 @@ class VideoGenerationHandler(StateHandlerBase):
         generation_id = self._make_generation_id()
         seed = self._resolve_seed()
 
+        # Phase 3B: the stale GGUF I2V prompt-enhancement 409 gate is removed.
+        # Local GGUF Gemma now handles image-conditioned prompt enhancement via
+        # mmproj multimodal enhancement (when an explicit mmproj projection is
+        # configured) or an observable text-only llama.cpp degrade (image dropped
+        # from prompt enhancement only; image conditioning proceeds normally).
+
         try:
             self._pipelines.load_gpu_pipeline("fast")
             self._generation.start_generation(generation_id)
@@ -260,6 +266,7 @@ class VideoGenerationHandler(StateHandlerBase):
                 images=images,
                 output_path=output_path,
                 enhance_prompt=pipeline_enhance,
+                negative_prompt=negative_prompt,
                 output_format=output_format,
                 encoder=self.media_encoder,
                 proxy_path=proxy_path,

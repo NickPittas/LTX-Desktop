@@ -12,7 +12,12 @@ import torch.nn.functional as F
 from api_types import ImageConditioningInput, OutputFormat
 from services.exr_input import iter_video_frames_to_model_domain
 from services.ltx_components import CheckpointPath, ResolvedLtxComponents
-from services.ltx_pipeline_common import default_tiling_config, encode_video_output, video_chunks_number
+from services.ltx_pipeline_common import (
+    default_tiling_config,
+    encode_video_output,
+    make_ltx_image_conditioning_input,
+    video_chunks_number,
+)
 from services.services_utils import AudioOrNone, TilingConfigType, device_supports_fp8
 
 if TYPE_CHECKING:
@@ -332,7 +337,6 @@ class LTXIcLoraPipeline:
         hdr_audio_context: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | Iterator[torch.Tensor], AudioOrNone]:
         import ltx_pipelines.ic_lora as ic_lora_module
-        from ltx_pipelines.utils.args import ImageConditioningInput as _LtxImageInput
 
         load_mask_video = cast(Callable[..., Any], getattr(ic_lora_module, "_load_mask_video"))
         # ponytail: trim mask frames to match VAE-compatible count (1+8*k)
@@ -359,7 +363,10 @@ class LTXIcLoraPipeline:
             width=width,
             num_frames=num_frames,
             frame_rate=frame_rate,
-            images=[_LtxImageInput(img.path, img.frame_idx, img.strength) for img in images],
+            images=[
+                make_ltx_image_conditioning_input(img.path, img.frame_idx, img.strength)
+                for img in images
+            ],
             video_conditioning=video_conditioning,
             tiling_config=tiling_config,
             streaming_prefetch_count=self._streaming_prefetch_count,
@@ -626,7 +633,6 @@ class LTXIcLoraPipeline:
         import logging
 
         from ltx_core.components.noisers import GaussianNoiser
-        from ltx_pipelines.utils.args import ImageConditioningInput as _LtxImageInput
         from ltx_pipelines.utils.constants import DISTILLED_SIGMAS, STAGE_2_DISTILLED_SIGMAS
         from ltx_pipelines.utils.denoisers import SimpleDenoiser
         from ltx_pipelines.utils.helpers import (
@@ -761,7 +767,10 @@ class LTXIcLoraPipeline:
         logger.info("[inpaint] Stage 1 denoising (half res, %d x %d)", half_w, half_h)
 
         # Create conditionings: image (from images param) + video (green composite)
-        stage1_ltx_images = [_LtxImageInput(img.path, img.frame_idx, img.strength) for img in images]
+        stage1_ltx_images = [
+            make_ltx_image_conditioning_input(img.path, img.frame_idx, img.strength)
+            for img in images
+        ]
 
         # Encode green composite as video conditioning — direct tensor path
         tiling_config = default_tiling_config()

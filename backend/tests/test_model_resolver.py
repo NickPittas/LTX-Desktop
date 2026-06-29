@@ -154,9 +154,15 @@ class TestNoProfile:
 
 
 class TestDistilledLoRARule:
-    """Oracle: distilled LoRA candidate_unwired for dev base; not_applicable for distilled."""
+    """Phase 3D: distilled LoRA is now runtime-wired for dev base.
 
-    def test_dev_base_distilled_lora_present_is_candidate_unwired(self):
+    Dev base + available distilled LoRA => ``supported`` (was candidate_unwired
+    pre-3D). Missing distilled LoRA stays ``missing``. Distilled base does not
+    need a distilled LoRA (``not_applicable``). Unknown base family never
+    candidates distilled LoRA.
+    """
+
+    def test_dev_base_distilled_lora_present_is_supported(self):
         profile = _profile(
             transformer="/models/ltx-2.3-22b-dev.safetensors",
         )
@@ -170,9 +176,9 @@ class TestDistilledLoRARule:
         )
         result = _resolve(profile, catalog)
         assert result.base_family == "dev"
-        # Distilled LoRA present but NOT runtime-wired
-        assert result.distilled_lora_status == "candidate_unwired"
-        assert result.fast_status == "candidate_unwired"
+        # Phase 3D: distilled LoRA + dev base is now runtime-wired
+        assert result.distilled_lora_status == "supported"
+        assert result.fast_status == "supported"
 
     def test_dev_base_distilled_lora_missing(self):
         profile = _profile(
@@ -288,7 +294,7 @@ class TestDevGGUFProfile:
         assert result.quantization == "gguf"
         assert result.base_family == "dev"
 
-    def test_dev_gguf_distilled_lora_candidate_not_wired(self):
+    def test_dev_gguf_distilled_lora_supported(self):
         profile = _profile(
             transformer="/models/ltx-2.3-22b-dev.gguf",
             transformer_format="gguf",
@@ -302,9 +308,9 @@ class TestDevGGUFProfile:
                       preferred_path="/models/ltx-2.3-22b-distilled-lora-384-1.1.safetensors"),
         )
         result = _resolve(profile, catalog)
-        # Even with LoRA present, runtime loading is not wired
-        assert result.fast_status == "candidate_unwired"
-        assert result.distilled_lora_status == "candidate_unwired"
+        # Phase 3D: dev + distilled LoRA is now runtime-wired (GGUF or otherwise)
+        assert result.fast_status == "supported"
+        assert result.distilled_lora_status == "supported"
 
 
 class TestProfilePathPriority:

@@ -12,6 +12,7 @@ from api_types import (
     AdapterKind,
     AdapterPipeline,
     AdapterSource,
+    CatalogSection,
     LTXLocalModelId,
     LTXVideoGenDuration,
     LTXVideoGenFps,
@@ -35,10 +36,26 @@ class ModelCheckpointSpec:
     is_folder: bool
     repo_id: str
     description: str
+    # ---- Phase 2A catalog grouping metadata (plan §7) ----
+    # All optional with defaults so existing specs keep their current behavior.
+    # ``section`` places the artifact in a downloader section; the scanner is
+    # the authoritative source for the frontend (it may override for adapters).
+    section: CatalogSection = "full"
+    display_name: str = ""
+    variant_group: str = ""
+    downloadable: bool = True
+    # Remote filename when it differs from the local basename (``relative_path.name``).
+    # ``None`` ⇒ downloader uses ``relative_path.name`` as the HF filename.
+    remote_filename: str | None = None
 
     @property
     def name(self) -> str:
         return self.relative_path.name
+
+    @property
+    def remote_name(self) -> str:
+        """Filename to fetch from HF: explicit override or the local basename."""
+        return self.remote_filename if self.remote_filename is not None else self.relative_path.name
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +99,11 @@ class AdapterComponent:
     expected_size_bytes: int
     required_for: tuple[AdapterPipeline, ...] = ()
     optional_for: tuple[AdapterPipeline, ...] = ()
+    # ---- Phase 2A catalog grouping metadata (plan §7) ----
+    # Adapters/LoRAs/controls default to the Add-ons & Controls section.
+    section: CatalogSection = "addons"
+    variant_group: str = ""
+    downloadable: bool = True
 
 
 def _local_resolution_spec(
@@ -279,6 +301,7 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
                 is_folder=False,
                 repo_id="Lightricks/LTX-2.3",
                 description="Main transformer model",
+                display_name="LTX-2.3 22B distilled (full precision)",
             )
         case "ltx-2.3-spatial-upscaler-x2-1.0":
             return ModelCheckpointSpec(
@@ -287,6 +310,7 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
                 is_folder=False,
                 repo_id="Lightricks/LTX-2.3",
                 description="2x upscaler",
+                display_name="LTX-2.3 spatial upscaler x2 (1.0)",
             )
         case "ltx-2.3-22b-ic-lora-union-control-ref0.5":
             return ModelCheckpointSpec(
@@ -407,6 +431,8 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
                 is_folder=True,
                 repo_id="Intel/dpt-hybrid-midas",
                 description="DPT-Hybrid MiDaS depth processor",
+                section="addons",
+                display_name="DPT-Hybrid MiDaS depth processor",
             )
         case "yolox-l-torchscript":
             return ModelCheckpointSpec(
@@ -415,6 +441,8 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
                 is_folder=False,
                 repo_id="hr16/yolox-onnx",
                 description="YOLOX person detector for pose preprocessing",
+                section="addons",
+                display_name="YOLOX-L person detector",
             )
         case "dw-ll-ucoco-384-bs5":
             return ModelCheckpointSpec(
@@ -423,6 +451,8 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
                 is_folder=False,
                 repo_id="hr16/DWPose-TorchScript-BatchSize5",
                 description="DW Pose TorchScript processor",
+                section="addons",
+                display_name="DW-Ll Pose processor (UCOCO 384, bs5)",
             )
         case "gemma-3-12b-it-qat-q4_0-unquantized":
             return ModelCheckpointSpec(
@@ -431,6 +461,7 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
                 is_folder=True,
                 repo_id="Lightricks/gemma-3-12b-it-qat-q4_0-unquantized",
                 description="Gemma text encoder (bfloat16)",
+                display_name="Gemma 3 12B IT QAT text encoder (unquantized, BF16)",
             )
         case "z-image-turbo":
             return ModelCheckpointSpec(
@@ -439,6 +470,80 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
                 is_folder=True,
                 repo_id="Tongyi-MAI/Z-Image-Turbo",
                 description="Z-Image-Turbo model for text-to-image generation",
+                section="addons",
+                display_name="Z-Image-Turbo (image generation)",
+            )
+        # ---- unsloth LTX-2.3 22B dev GGUF quants (Phase 2A, plan §4/§5) ----
+        # Canonical placement: diffusion_models/unsloth/LTX-2.3-GGUF/<file>.gguf
+        # Remote filename == local basename for all four, so remote_filename is
+        # left at None (downloader uses relative_path.name). Q6 UD intentionally
+        # absent — upstream does not publish it (plan §5).
+        case "ltx-2.3-22b-dev-gguf-q4-k-m":
+            return ModelCheckpointSpec(
+                relative_path=Path("diffusion_models/unsloth/LTX-2.3-GGUF/ltx-2.3-22b-dev-Q4_K_M.gguf"),
+                expected_size_bytes=14_326_856_736,
+                is_folder=False,
+                repo_id="unsloth/LTX-2.3-GGUF",
+                description="LTX-2.3 22B dev GGUF — Q4_K_M (standard)",
+                section="gguf",
+                display_name="LTX-2.3 22B dev GGUF — Q4_K_M",
+                variant_group="ltx-2.3-dev-gguf",
+                downloadable=True,
+            )
+        case "ltx-2.3-22b-dev-gguf-ud-q4-k-m":
+            return ModelCheckpointSpec(
+                relative_path=Path("diffusion_models/unsloth/LTX-2.3-GGUF/ltx-2.3-22b-dev-UD-Q4_K_M.gguf"),
+                expected_size_bytes=16_506_438_688,
+                is_folder=False,
+                repo_id="unsloth/LTX-2.3-GGUF",
+                description="LTX-2.3 22B dev GGUF — UD Q4_K_M (Unsloth Dynamic)",
+                section="gguf",
+                display_name="LTX-2.3 22B dev GGUF — UD Q4_K_M",
+                variant_group="ltx-2.3-dev-gguf",
+                downloadable=True,
+            )
+        case "ltx-2.3-22b-dev-gguf-q6-k":
+            return ModelCheckpointSpec(
+                relative_path=Path("diffusion_models/unsloth/LTX-2.3-GGUF/ltx-2.3-22b-dev-Q6_K.gguf"),
+                expected_size_bytes=17_774_906_400,
+                is_folder=False,
+                repo_id="unsloth/LTX-2.3-GGUF",
+                description="LTX-2.3 22B dev GGUF — Q6_K (standard)",
+                section="gguf",
+                display_name="LTX-2.3 22B dev GGUF — Q6_K",
+                variant_group="ltx-2.3-dev-gguf",
+                downloadable=True,
+            )
+        case "ltx-2.3-22b-dev-gguf-ud-q5-k-m":
+            return ModelCheckpointSpec(
+                relative_path=Path("diffusion_models/unsloth/LTX-2.3-GGUF/ltx-2.3-22b-dev-UD-Q5_K_M.gguf"),
+                expected_size_bytes=18_274_719_776,
+                is_folder=False,
+                repo_id="unsloth/LTX-2.3-GGUF",
+                description="LTX-2.3 22B dev GGUF — UD Q5_K_M (Unsloth Dynamic)",
+                section="gguf",
+                display_name="LTX-2.3 22B dev GGUF — UD Q5_K_M",
+                variant_group="ltx-2.3-dev-gguf",
+                downloadable=True,
+            )
+        # ---- Gemma 3 mmproj (BF16) projection (Phase 3A, plan §9) ----
+        # First-class downloadable CP. Canonical placement is inside the
+        # gemma GGUF text-encoder folder artifact
+        # (text_encoders/unsloth/gemma-3-12b-it-qat-GGUF/mmproj-BF16.gguf).
+        # Remote filename == local basename, so remote_filename stays None
+        # (downloader uses relative_path.name). Variant group aligns with the
+        # gemma GGUF text encoder so the UI groups them together.
+        case "gemma-3-12b-it-qat-gguf-mmproj":
+            return ModelCheckpointSpec(
+                relative_path=Path("text_encoders/unsloth/gemma-3-12b-it-qat-GGUF/mmproj-BF16.gguf"),
+                expected_size_bytes=854_200_448,
+                is_folder=False,
+                repo_id="unsloth/gemma-3-12b-it-qat-GGUF",
+                description="Gemma 3 mmproj BF16 multimodal projection",
+                section="gguf",
+                display_name="Gemma 3 mmproj BF16",
+                variant_group="gemma-3-gguf",
+                downloadable=True,
             )
         case _:
             assert_never(cp_id)

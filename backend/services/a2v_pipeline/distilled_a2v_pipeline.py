@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
+from services.ltx_pipeline_common import make_ltx_image_conditioning_input
 from services.services_utils import AudioOrNone, TilingConfigType
 
 if TYPE_CHECKING:
@@ -93,7 +94,6 @@ class DistilledA2VPipeline:
         from ltx_core.components.noisers import GaussianNoiser
         from ltx_core.model.audio_vae import encode_audio as vae_encode_audio
         from ltx_core.types import Audio, AudioLatentShape
-        from ltx_pipelines.utils.args import ImageConditioningInput as LtxImageInput
         from ltx_pipelines.utils.constants import DISTILLED_SIGMA_VALUES, STAGE_2_DISTILLED_SIGMA_VALUES
         from ltx_pipelines.utils.denoisers import SimpleDenoiser
         from ltx_pipelines.utils.helpers import (
@@ -105,7 +105,10 @@ class DistilledA2VPipeline:
 
         assert_resolution(height=height, width=width, is_two_stage=True)
 
-        ltx_images = [LtxImageInput(path, frame_idx, strength) for path, frame_idx, strength in images]
+        ltx_images = [
+            make_ltx_image_conditioning_input(path, frame_idx, strength)
+            for path, frame_idx, strength in images
+        ]
         generator = torch.Generator(device=self.device).manual_seed(seed)
         noiser = GaussianNoiser(generator=generator)
         dtype = torch.bfloat16

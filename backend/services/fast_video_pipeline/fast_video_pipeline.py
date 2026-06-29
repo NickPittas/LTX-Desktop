@@ -28,6 +28,7 @@ class FastVideoPipeline(Protocol):
         components: ResolvedLtxComponents | None = None,
         *,
         transformer_format: str = "safetensors",
+        distilled_lora_path: str | None = None,
     ) -> "FastVideoPipeline":
         ...
 
@@ -42,6 +43,7 @@ class FastVideoPipeline(Protocol):
         images: list[ImageConditioningInput],
         output_path: str,
         enhance_prompt: bool = False,
+        negative_prompt: str = "",
         output_format: OutputFormat = OutputFormat.MP4,
         encoder: MediaEncoder | None = None,
         proxy_path: str | None = None,

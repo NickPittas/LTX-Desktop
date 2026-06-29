@@ -170,3 +170,179 @@ def test_model_path_rejects_parent_traversal(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError):
         resolve_model_path(tmp_path, "ltx-2.3-22b-distilled")
+
+
+# ------------------------------------------------------------------
+# Phase 2A — unsloth LTX-2.3 dev GGUF catalog entries (plan §4/§5/§7)
+# ------------------------------------------------------------------
+
+
+# Local basename, repo, byte size, section, variant group for each dev GGUF.
+_DEV_GGUF_EXPECTATIONS: dict[ModelCheckpointID, tuple[str, str, int]] = {
+    "ltx-2.3-22b-dev-gguf-q4-k-m": (
+        "ltx-2.3-22b-dev-Q4_K_M.gguf",
+        "unsloth/LTX-2.3-GGUF",
+        14_326_856_736,
+    ),
+    "ltx-2.3-22b-dev-gguf-ud-q4-k-m": (
+        "ltx-2.3-22b-dev-UD-Q4_K_M.gguf",
+        "unsloth/LTX-2.3-GGUF",
+        16_506_438_688,
+    ),
+    "ltx-2.3-22b-dev-gguf-q6-k": (
+        "ltx-2.3-22b-dev-Q6_K.gguf",
+        "unsloth/LTX-2.3-GGUF",
+        17_774_906_400,
+    ),
+    "ltx-2.3-22b-dev-gguf-ud-q5-k-m": (
+        "ltx-2.3-22b-dev-UD-Q5_K_M.gguf",
+        "unsloth/LTX-2.3-GGUF",
+        18_274_719_776,
+    ),
+}
+
+
+def test_dev_gguf_specs_have_canonical_paths_sizes_and_repo():
+    for cp_id, (basename, repo_id, size) in _DEV_GGUF_EXPECTATIONS.items():
+        spec = get_model_cp_spec(cp_id)
+        assert spec.relative_path == Path(
+            f"diffusion_models/unsloth/LTX-2.3-GGUF/{basename}"
+        ), cp_id
+        assert spec.relative_path.name == basename, cp_id
+        assert spec.expected_size_bytes == size, cp_id
+        assert spec.is_folder is False, cp_id
+        assert spec.repo_id == repo_id, cp_id
+
+
+def test_dev_gguf_specs_carry_catalog_grouping_metadata():
+    for cp_id in _DEV_GGUF_EXPECTATIONS:
+        spec = get_model_cp_spec(cp_id)
+        assert spec.section == "gguf", cp_id
+        assert spec.variant_group == "ltx-2.3-dev-gguf", cp_id
+        assert spec.downloadable is True, cp_id
+        assert spec.display_name, f"display_name missing for {cp_id}"
+        # Remote filename equals the local basename (no override needed).
+        assert spec.remote_filename is None, cp_id
+        assert spec.remote_name == spec.name, cp_id
+
+
+def test_dev_gguf_specs_resolve_under_models_root():
+    models_dir = Path("/tmp/models")
+    for cp_id, (basename, _repo, _size) in _DEV_GGUF_EXPECTATIONS.items():
+        resolved = resolve_model_path(models_dir, cp_id)
+        assert resolved == models_dir / "diffusion_models" / "unsloth" / "LTX-2.3-GGUF" / basename, cp_id
+        # No parent traversal, no absolute path.
+        assert not resolved.is_absolute() or str(resolved).startswith(str(models_dir)), cp_id
+
+
+def test_q6_ud_dev_gguf_is_not_present():
+    """Q6 UD does not exist upstream (plan §5) — must never be a catalog entry."""
+    assert "ltx-2.3-22b-dev-gguf-ud-q6-k" not in set(ALL_MODEL_CP_IDS)
+    # No CP id should mention both UD and Q6 for the dev GGUF.
+    for cp_id in ALL_MODEL_CP_IDS:
+        if cp_id.startswith("ltx-2.3-22b-dev-gguf-"):
+            lower = cp_id.lower()
+            assert not ("ud" in lower and "q6" in lower), cp_id
+
+
+def test_dev_gguf_paths_are_unique_against_existing_specs():
+    """Adding GGUF entries must not collide with any existing relative path."""
+    relative_paths = {get_model_cp_spec(cp_id).relative_path for cp_id in ALL_MODEL_CP_IDS}
+    assert len(relative_paths) == len(ALL_MODEL_CP_IDS)
+
+
+def test_dev_gguf_entries_do_not_change_latest_ltx_model_baseline():
+    """Adding GGUF entries must not shift the default/relevant LTX model (plan §15)."""
+    assert get_latest_ltx_model_id() == "ltx-2.3-22b-distilled"
+    # GGUF ids are not LTX-local model ids.
+    assert not any(
+        cp_id in ALL_LTX_LOCAL_MODEL_IDS for cp_id in _DEV_GGUF_EXPECTATIONS
+    )
+
+
+def test_remote_name_property_defaults_to_local_basename():
+    """remote_name falls back to relative_path.name when remote_filename is None."""
+    spec = get_model_cp_spec("ltx-2.3-22b-distilled")
+    assert spec.remote_filename is None
+    assert spec.remote_name == spec.name
+
+
+def test_remote_name_property_uses_explicit_override():
+    """When remote_filename is set, remote_name returns it (HF name differs from local)."""
+    spec = ModelCheckpointSpec(
+        relative_path=Path("diffusion_models/local-name.gguf"),
+        expected_size_bytes=1,
+        is_folder=False,
+        repo_id="test/repo",
+        description="override",
+        remote_filename="remote-name.gguf",
+    )
+    assert spec.name == "local-name.gguf"
+    assert spec.remote_name == "remote-name.gguf"
+
+
+# ------------------------------------------------------------------
+# Phase 3A — Gemma 3 mmproj downloadable CP (plan §9 Option A)
+# ------------------------------------------------------------------
+
+
+def test_mmproj_spec_has_canonical_path_size_and_repo():
+    """mmproj CP: canonical placement inside the gemma GGUF folder, BF16 size."""
+    cp_id: ModelCheckpointID = "gemma-3-12b-it-qat-gguf-mmproj"
+    spec = get_model_cp_spec(cp_id)
+    assert spec.relative_path == Path(
+        "text_encoders/unsloth/gemma-3-12b-it-qat-GGUF/mmproj-BF16.gguf"
+    )
+    assert spec.relative_path.name == "mmproj-BF16.gguf"
+    assert spec.expected_size_bytes == 854_200_448
+    assert spec.is_folder is False
+    assert spec.repo_id == "unsloth/gemma-3-12b-it-qat-GGUF"
+
+
+def test_mmproj_spec_carry_catalog_grouping_metadata():
+    spec = get_model_cp_spec("gemma-3-12b-it-qat-gguf-mmproj")
+    assert spec.section == "gguf"
+    assert spec.variant_group == "gemma-3-gguf"
+    assert spec.downloadable is True
+    assert spec.display_name == "Gemma 3 mmproj BF16"
+    assert spec.description
+
+
+def test_mmproj_spec_remote_name_equals_local_basename():
+    """remote_filename is None because the HF remote basename equals the local
+    basename (mmproj-BF16.gguf). No remote-name promotion change is needed."""
+    spec = get_model_cp_spec("gemma-3-12b-it-qat-gguf-mmproj")
+    assert spec.remote_filename is None
+    assert spec.remote_name == spec.name == "mmproj-BF16.gguf"
+
+
+def test_mmproj_spec_path_does_not_collide_with_gemma_folder_artifact():
+    """The mmproj file lives inside the gemma GGUF folder artifact's canonical
+    path but must not collide with any other CP relative path."""
+    relative_paths = {get_model_cp_spec(cp_id).relative_path for cp_id in ALL_MODEL_CP_IDS}
+    assert len(relative_paths) == len(ALL_MODEL_CP_IDS)
+    # The gemma GGUF text-encoder folder CP is a distinct path.
+    gemma_cp = get_model_cp_spec("gemma-3-12b-it-qat-q4_0-unquantized").relative_path
+    mmproj_cp = get_model_cp_spec("gemma-3-12b-it-qat-gguf-mmproj").relative_path
+    assert gemma_cp != mmproj_cp
+    # mmproj path is nested under the unsloth GGUF folder name but is a file,
+    # not the folder itself.
+    assert mmproj_cp.parent.name == "gemma-3-12b-it-qat-GGUF"
+
+
+def test_mmproj_spec_resolve_under_models_root():
+    models_dir = Path("/tmp/models")
+    resolved = resolve_model_path(models_dir, "gemma-3-12b-it-qat-gguf-mmproj")
+    assert resolved == (
+        models_dir
+        / "text_encoders"
+        / "unsloth"
+        / "gemma-3-12b-it-qat-GGUF"
+        / "mmproj-BF16.gguf"
+    )
+
+
+def test_mmproj_entries_do_not_change_latest_ltx_model_baseline():
+    """Adding mmproj must not shift the default/relevant LTX model (plan §15)."""
+    assert get_latest_ltx_model_id() == "ltx-2.3-22b-distilled"
+    assert "gemma-3-12b-it-qat-gguf-mmproj" not in set(ALL_LTX_LOCAL_MODEL_IDS)

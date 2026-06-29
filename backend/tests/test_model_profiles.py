@@ -568,6 +568,95 @@ class TestProfileSchemaMigration:
         assert data["schema_version"] == CURRENT_MODEL_PROFILE_SCHEMA_VERSION
 
 
+class TestMmprojComponentField:
+    """Phase 3A (plan §9 Option A): explicit ``mmproj`` component field.
+
+    Legacy profile dicts without ``mmproj`` must load with ``mmproj is None``
+    (pydantic default), and create/patch round-trips must accept and persist an
+    explicit ``mmproj`` path. No schema-version bump is required because the
+    field is additive with a default.
+    """
+
+    def _write_profiles(self, handler, data: dict) -> Path:
+        path: Path = handler._profiles_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data), encoding="utf-8")
+        return path
+
+    def _legacy_profile_dict(self, profile_id: str = "legacy-mmproj") -> dict:
+        return {
+            "id": profile_id,
+            "name": "Legacy Profile",
+            "family": "ltx-2.3",
+            "source": "official",
+            "components": {"text_encoder_format": "api"},
+            "capabilities": ["t2v"],
+            "notes": "",
+            "created_at": "",
+            "updated_at": "",
+        }
+
+    def test_legacy_profile_migration_mmproj_is_none(self, test_state):
+        """A legacy profile dict without ``mmproj`` loads with mmproj=None."""
+        self._write_profiles(
+            test_state.model_profiles,
+            {
+                "active_model_profile_id": "legacy-mmproj",
+                "profiles": [self._legacy_profile_dict()],
+            },
+        )
+        test_state.model_profiles.load_profiles()
+
+        assert len(test_state.state.model_profiles) == 1
+        profile = test_state.state.model_profiles[0]
+        assert profile.components.mmproj is None
+
+    def test_create_with_mmproj_round_trips(self, client):
+        """POST accepts components.mmproj and persists it."""
+        payload = _make_official_payload(
+            profile_id="with-mmproj",
+            components={
+                "transformer": "/tmp/test_model.safetensors",
+                "upsampler": "/tmp/test_upsampler.safetensors",
+                "text_encoder_format": "api",
+                "mmproj": "/tmp/mmproj-BF16.gguf",
+            },
+        )
+        response = client.post("/api/model-profiles", json=payload, headers=_ADMIN_HEADERS)
+        assert response.status_code == 200
+        assert response.json()["components"]["mmproj"] == "/tmp/mmproj-BF16.gguf"
+
+        # Round-trip via GET
+        response = client.get("/api/model-profiles", headers=_ADMIN_HEADERS)
+        profile = next(
+            p for p in response.json()["profiles"] if p["id"] == "with-mmproj"
+        )
+        assert profile["components"]["mmproj"] == "/tmp/mmproj-BF16.gguf"
+
+    def test_patch_mmproj_round_trips(self, client):
+        """PATCH components.mmproj is accepted and persisted."""
+        client.post(
+            "/api/model-profiles",
+            json=_make_official_payload(profile_id="patch-mmproj"),
+            headers=_ADMIN_HEADERS,
+        )
+        response = client.request(
+            "PATCH",
+            "/api/model-profiles/patch-mmproj",
+            json={"components": {"mmproj": "/tmp/patched-mmproj.gguf"}},
+            headers=_ADMIN_HEADERS,
+        )
+        assert response.status_code == 200
+        assert response.json()["components"]["mmproj"] == "/tmp/patched-mmproj.gguf"
+
+    def test_create_without_mmproj_defaults_none(self, client):
+        """Profiles created without mmproj load it as None in the response."""
+        payload = _make_official_payload(profile_id="no-mmproj")
+        response = client.post("/api/model-profiles", json=payload, headers=_ADMIN_HEADERS)
+        assert response.status_code == 200
+        assert response.json()["components"]["mmproj"] is None
+
+
 class TestProfileActivationSafety:
     """Phase 5: activation hardening (generation gate + resolver gating)."""
 

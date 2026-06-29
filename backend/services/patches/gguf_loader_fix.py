@@ -297,6 +297,39 @@ def _llama_cpp_prompt_enhancer_op(model_path: Path) -> ModuleOps:
     )
 
 
+def _llama_cpp_mmproj_op(mmproj_path: str) -> ModuleOps:
+    """ModuleOps that attaches the mmproj projection path to a GemmaTextEncoder.
+
+    Composed into a Gemma text-encoder builder's module_ops so any later-built
+    GemmaTextEncoder carries the mmproj path for the mmproj-aware multimodal
+    I2V prompt-enhancement path (Phase 3B, plan §9).
+    """
+
+    def attach(module: GemmaTextEncoder) -> GemmaTextEncoder:
+        module._ltx_desktop_llama_cpp_mmproj_path = mmproj_path  # type: ignore[attr-defined]
+        return module
+
+    return ModuleOps(
+        name="llama_cpp_mmproj_attach",
+        matcher=lambda model: isinstance(model, GemmaTextEncoder),
+        mutator=attach,
+    )
+
+
+#: Historically raised whenever image-conditioned (I2V) prompt enhancement
+#: would run against a GGUF Gemma text encoder (vision tower stripped). Phase 3B
+#: replaces this hard-fail with an mmproj multimodal path when an explicit
+#: mmproj projection is configured, falling back to an observable text-only
+#: degrade otherwise. The constant is retained for reference/test matching; it
+#: is no longer raised by the runtime patches below.
+_GGUF_IMAGE_ENHANCE_ERROR = (
+    "Local GGUF Gemma does not support image-conditioned prompt enhancement: "
+    "the vision tower is stripped in the GGUF text-encoder build. Disable I2V "
+    "prompt enhancement (prompt_enhancer_enabled_i2v) or use a multimodal/API "
+    "text encoder path."
+)
+
+
 def _install_llama_cpp_enhance_patch() -> None:
     if getattr(GemmaTextEncoder._enhance, "_ltx_desktop_llama_cpp_patch", False):
         return
@@ -311,7 +344,21 @@ def _install_llama_cpp_enhance_patch() -> None:
         seed: int = 10,
     ) -> str:
         model_path = getattr(self, "_ltx_desktop_llama_cpp_model_path", None)
-        if model_path is None or image is not None:
+        # GGUF build strips the vision tower to Identity. Never route an image-
+        # conditioned enhance through the stripped tower, and never raise
+        # (Phase 3B removes the stale GGUF I2V hard-fail). Degrade to text-only
+        # llama.cpp enhancement — the image tensor is dropped from PROMPT
+        # enhancement only (tensor-to-mmproj serialization is out of scope for
+        # this slice; image conditioning still proceeds via the normal images=
+        # path). Fall through to the text-only llama.cpp path below.
+        if model_path is not None and image is not None:
+            logger.warning(
+                "GGUF GemmaTextEncoder._enhance received an image tensor; the "
+                "vision tower is stripped in the GGUF build. Degrading to "
+                "text-only llama.cpp prompt enhancement (image dropped from "
+                "prompt enhancement; image conditioning still proceeds normally)."
+            )
+        if model_path is None:
             return original_enhance(self, messages, image=image, max_new_tokens=max_new_tokens, seed=seed)
         try:
             from llama_cpp import Llama, llama_supports_gpu_offload
@@ -366,17 +413,170 @@ def _load_gemma_t2v_system_prompt() -> str:
     return (Path(_be.__file__).parent / "prompts" / "gemma_t2v_system_prompt.txt").read_text()
 
 
+def _resolve_multimodal_chat_handler() -> Any | None:
+    """Lazy-resolve a llama.cpp multimodal chat handler class.
+
+    Returns ``None`` if no multimodal handler is importable (caller degrades to
+    text-only). Imports are lazy so this module never imports ``llama_cpp`` at
+    module import time.
+
+    Handler location by version (verified against the pinned
+    ``llama-cpp-python==0.3.31``):
+
+    - ``llama_cpp.llama_chat_format.MTMDChatHandler`` — the current viable path
+      (MTMD = Multi-Modal Document handler). This is the only path that resolves
+      in 0.3.31.
+    - ``llama_cpp.llama_chat_format.Gemma3ChatHandler`` — present in some builds
+      as a Gemma-3-specific handler; checked as a candidate when available.
+
+    ``llama_cpp.llama_chat_handler`` is a stale/wrong path (the submodule was
+    renamed to ``llama_chat_format``); it is kept last as a defensive fallback
+    in case an older pinned version still exposes handlers there.
+    """
+    for module_path, handler_name in (
+        ("llama_cpp.llama_chat_format", "MTMDChatHandler"),
+        ("llama_cpp.llama_chat_format", "Gemma3ChatHandler"),
+        ("llama_cpp.llama_chat_handler", "Gemma3ChatHandler"),
+        ("llama_cpp.llama_chat_handler", "MTMDChatHandler"),
+        ("llama_cpp", "MTMDChatHandler"),
+        ("llama_cpp", "Gemma3ChatHandler"),
+    ):
+        try:
+            module = __import__(module_path, fromlist=[handler_name])
+        except ImportError:
+            continue
+        cls = getattr(module, handler_name, None)
+        if cls is not None:
+            return cls
+    return None
+
+
+def _image_to_data_uri(image_path: str) -> str:
+    """Read a local image file and return a base64 data URI for image_url blocks."""
+    import base64
+    import mimetypes
+
+    mime, _ = mimetypes.guess_type(image_path)
+    if mime is None:
+        mime = "image/png"
+    with open(image_path, "rb") as f:
+        data = base64.b64encode(f.read()).decode("ascii")
+    return f"data:{mime};base64,{data}"
+
+
+def _try_multimodal_llama_cpp_enhance(
+    *,
+    llama_cls: Any,
+    model_path: str,
+    system_prompt: str,
+    prompt: str,
+    image_path: str,
+    mmproj_path: str,
+    max_new_tokens: int,
+    seed: int,
+) -> str | None:
+    """Attempt mmproj multimodal prompt enhancement.
+
+    Returns enhanced text on success, or ``None`` when the multimodal handler
+    is unavailable or setup fails (caller degrades to text-only with a warning).
+
+    Does NOT catch errors from the actual ``create_chat_completion`` call —
+    those propagate as honest failures rather than being silently swallowed
+    into a text-only degradation. Only handler import/setup unavailability
+    degrades.
+    """
+    handler_cls = _resolve_multimodal_chat_handler()
+    if handler_cls is None:
+        logger.warning(
+            "GGUF I2V multimodal enhancement: no Gemma3ChatHandler/MTMDChatHandler "
+            "available in llama_cpp; degrading to text-only"
+        )
+        return None
+
+    try:
+        data_uri = _image_to_data_uri(image_path)
+    except OSError as exc:
+        logger.warning(
+            "GGUF I2V multimodal enhancement: cannot read image %s (%s); degrading to text-only",
+            image_path, exc,
+        )
+        return None
+
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": data_uri}},
+                {"type": "text", "text": f"user prompt: {prompt}"},
+            ],
+        },
+    ]
+
+    llm: Any | None = None
+    try:
+        llm = llama_cls(
+            model_path=str(model_path),
+            n_gpu_layers=-1,
+            n_ctx=8192,
+            n_batch=512,
+            seed=seed,
+            verbose=False,
+        )
+        # Construct + attach the multimodal handler. Setup failures (missing
+        # clip model, wrong constructor signature, corrupt mmproj) degrade to
+        # text-only rather than crashing the generation.
+        try:
+            handler = handler_cls(clip_model_path=str(mmproj_path), verbose=False)
+        except (TypeError, ValueError, OSError, RuntimeError) as exc:
+            logger.warning(
+                "GGUF I2V multimodal enhancement: handler setup failed for "
+                "mmproj=%s (%s); degrading to text-only",
+                mmproj_path, exc,
+            )
+            return None
+        llm.chat_handler = handler
+        result = llm.create_chat_completion(
+            messages=messages,
+            max_tokens=max_new_tokens,
+            temperature=0.7,
+        )
+        choice = result["choices"][0]
+        content = choice.get("message", {}).get("content") or choice.get("text", "")
+        return str(content).strip()
+    finally:
+        if llm is not None:
+            close = getattr(llm, "close", None)
+            if callable(close):
+                close()
+            del llm
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
 def _enhance_prompt_with_llama_cpp(
     model_path: str,
     prompt: str,
     max_new_tokens: int = 512,
     seed: int = 10,
+    *,
+    image_path: str | None = None,
+    mmproj_path: str | None = None,
 ) -> str:
     """Run llama.cpp prompt enhancement standalone, free GPU memory, return enhanced text.
 
     Constructs the same system prompt + user message format as
     ``GemmaTextEncoder.enhance_t2v`` but uses llama.cpp directly so PyTorch
     Gemma is not loaded unnecessarily.
+
+    Text-only by default (T2V). When both ``image_path`` and ``mmproj_path``
+    are provided (I2V), attempts mmproj multimodal enhancement via
+    ``Gemma3ChatHandler``/``MTMDChatHandler``; if the handler is unavailable or
+    setup fails, logs an observable warning and degrades to text-only (the
+    image is dropped from PROMPT enhancement only — image conditioning still
+    proceeds through the normal ``images=`` path). Errors from the actual
+    llama inference call propagate (not swallowed).
     """
     try:
         from llama_cpp import Llama, llama_supports_gpu_offload
@@ -388,6 +588,30 @@ def _enhance_prompt_with_llama_cpp(
         raise RuntimeError("llama-cpp-python was installed without GPU offload support")
 
     system_prompt = _load_gemma_t2v_system_prompt()
+
+    # mmproj multimodal path (I2V): attempt only when both image + projection present.
+    if image_path is not None and mmproj_path is not None:
+        result = _try_multimodal_llama_cpp_enhance(
+            llama_cls=Llama,
+            model_path=model_path,
+            system_prompt=system_prompt,
+            prompt=prompt,
+            image_path=image_path,
+            mmproj_path=mmproj_path,
+            max_new_tokens=max_new_tokens,
+            seed=seed,
+        )
+        if result is not None:
+            return result
+        logger.warning(
+            "GGUF I2V prompt enhancement: multimodal handler unavailable or setup "
+            "failed; degrading to text-only prompt enhancement (image dropped from "
+            "prompt enhancement, image conditioning still proceeds normally). "
+            "image_path=%s mmproj_path=%s",
+            image_path, mmproj_path,
+        )
+
+    # Text-only path (T2V, or I2V degrade).
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": f"user prompt: {prompt}"},
@@ -426,13 +650,19 @@ def _install_llama_cpp_prompt_encoder_call_patch() -> None:
     """Patch ``PromptEncoder.__call__`` to run llama.cpp before PyTorch Gemma.
 
     When ``enhance_first_prompt=True`` and GGUF is configured:
-      1. Run llama.cpp text enhancement standalone (regardless of whether an
-         ``enhance_prompt_image`` was supplied).
-      2. Free llama.cpp GPU memory.
-      3. Call original ``__call__`` with ``enhance_first_prompt=False`` and
-         ``enhance_prompt_image=None`` so the dense PyTorch
-         ``GemmaTextEncoder._enhance`` never builds and image-conditioned
-         enhancement cannot hit the GGUF-stripped Gemma vision tower.
+
+    - **No image (T2V)**: run llama.cpp text-only enhancement standalone, free
+      GPU memory, then call the original ``__call__`` with
+      ``enhance_first_prompt=False`` so the dense PyTorch
+      ``GemmaTextEncoder._enhance`` never builds.
+    - **Image present (I2V)**: run mmproj multimodal enhancement when an
+      explicit mmproj projection is attached; otherwise log an observable
+      warning and degrade to text-only enhancement (the image is dropped from
+      PROMPT enhancement only — image conditioning still proceeds through the
+      normal ``images=`` path). Then call the original ``__call__`` with
+      ``enhance_first_prompt=False`` and ``enhance_prompt_image=None`` so no
+      PyTorch Gemma enhance path runs. Never raises (Phase 3B removes the
+      stale GGUF I2V hard-fail).
 
     Non-GGUF calls pass through unchanged.
     """
@@ -455,10 +685,17 @@ def _install_llama_cpp_prompt_encoder_call_patch() -> None:
     ) -> list[object]:
         gguf_model_path = getattr(self, "_ltx_desktop_llama_cpp_model_path", None)
         if enhance_first_prompt and gguf_model_path is not None:
-            # Standalone llama.cpp text enhancement before _text_encoder_ctx
-            # builds PyTorch Gemma. We intentionally drop enhance_prompt_image
-            # so upstream image-conditioned enhancement never runs against the
-            # GGUF-stripped (Identity) Gemma vision tower.
+            mmproj_path = getattr(self, "_ltx_desktop_llama_cpp_mmproj_path", None)
+            # GGUF + image: mmproj multimodal enhancement when a projection is
+            # configured; otherwise observable text-only degrade. The image is
+            # dropped from PROMPT enhancement only — image conditioning still
+            # proceeds through the normal images= path. Never raise.
+            if enhance_prompt_image is not None and mmproj_path is None:
+                logger.warning(
+                    "GGUF I2V prompt enhancement: no mmproj projection configured; "
+                    "degrading to text-only prompt enhancement (image dropped from "
+                    "prompt enhancement, image conditioning still proceeds normally)."
+                )
             prompts = list(prompts)
             prompts[0] = clean_response(
                 _enhance_prompt_with_llama_cpp(
@@ -466,10 +703,10 @@ def _install_llama_cpp_prompt_encoder_call_patch() -> None:
                     prompts[0],
                     max_new_tokens=512,
                     seed=enhance_prompt_seed,
+                    image_path=enhance_prompt_image,
+                    mmproj_path=mmproj_path,
                 )
             )
-            # Enter _text_encoder_ctx with enhance=False / image=None to prevent
-            # PyTorch Gemma enhance (text and image-conditioned).
             return original_call(
                 self,
                 prompts,
@@ -995,12 +1232,53 @@ def install_gguf_t2v_conditioning_patch() -> None:
     blocks.ImageConditioner.__call__ = patched_call
 
 
+def _attach_mmproj_to_prompt_encoder(pipeline: object, mmproj_path: str) -> None:
+    """Attach the mmproj projection path to the pipeline's prompt encoder.
+
+    Sets ``_ltx_desktop_llama_cpp_mmproj_path`` on the PromptEncoder instance
+    (if present) so the patched ``__call__`` can route I2V prompt enhancement
+    through the mmproj multimodal path. Also composes a ModuleOps into the
+    Gemma text-encoder builder (if present) so any later-built
+    GemmaTextEncoder carries the path too.
+
+    Safe no-op if the prompt encoder / builder attrs are missing (e.g. API
+    text-encoder mode with no local Gemma).
+    """
+    prompt_encoder = getattr(pipeline, "prompt_encoder", None)
+    if prompt_encoder is None:
+        return
+    try:
+        setattr(prompt_encoder, "_ltx_desktop_llama_cpp_mmproj_path", mmproj_path)
+    except (AttributeError, TypeError):
+        pass
+
+    builder = getattr(prompt_encoder, "_text_encoder_builder", None)
+    if builder is None:
+        return
+    mmproj_op = _llama_cpp_mmproj_op(mmproj_path)
+    existing_ops = tuple(getattr(builder, "module_ops", ()) or ())
+    if any(getattr(op, "name", None) == mmproj_op.name for op in existing_ops):
+        return
+    try:
+        prompt_encoder._text_encoder_builder = replace(  # type: ignore[attr-defined]
+            builder, module_ops=(*existing_ops, mmproj_op)
+        )
+    except (TypeError, ValueError) as exc:
+        logger.warning(
+            "Could not compose mmproj ModuleOps onto Gemma text-encoder builder "
+            "(mmproj_path=%s): %s. Multimodal I2V prompt enhancement may fall back "
+            "to text-only if the builder does not carry the mmproj path.",
+            mmproj_path, exc,
+        )
+
+
 def install_gguf_component_paths(
     pipeline: object,
     checkpoint_path: object,
     *,
     video_vae_path: str | None = None,
     audio_vae_path: str | None = None,
+    mmproj_path: str | None = None,
 ) -> None:
     """Route non-transformer profile component builders to their safetensors files.
 
@@ -1021,6 +1299,11 @@ def install_gguf_component_paths(
         filename matching. Default None = use heuristic.
     audio_vae_path
         Explicit audio VAE safetensors path. Same override behavior.
+    mmproj_path
+        Explicit mmproj projection path (Phase 3B, plan §9). When given,
+        attached to ``pipeline.prompt_encoder`` and composed into the Gemma
+        text-encoder builder so the mmproj-aware multimodal I2V prompt-
+        enhancement path can run. Default None = no mmproj (text-only degrade).
     """
 
     paths = [str(p) for p in checkpoint_path] if isinstance(checkpoint_path, (list, tuple)) else [str(checkpoint_path)]
@@ -1052,6 +1335,11 @@ def install_gguf_component_paths(
     if audio_decoder is not None and audio_vae is not None:
         _replace_builder_model_path(audio_decoder, "_decoder_builder", audio_vae)
         _replace_builder_model_path(audio_decoder, "_vocoder_builder", audio_vae)
+
+    # Phase 3B (plan §9): attach mmproj projection path for the mmproj-aware
+    # multimodal I2V prompt-enhancement path. Safe no-op without a prompt encoder.
+    if mmproj_path is not None:
+        _attach_mmproj_to_prompt_encoder(pipeline, mmproj_path)
 
 
 # ── GGUF runtime LoRA helpers ─────────────────────────────────────────────

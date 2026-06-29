@@ -1793,6 +1793,7 @@ def test_gguf_call_patch_gguf_path_calls_llama_cpp_then_original(
         prompt: str,
         max_new_tokens: int = 512,
         seed: int = 10,
+        **kwargs: object,
     ) -> str:
         llama_called.append((model_path, prompt, max_new_tokens, seed))
         return f"ENHANCED:{prompt}"
@@ -1847,6 +1848,7 @@ def test_gguf_call_patch_non_gguf_passthrough(
         prompt: str,
         max_new_tokens: int = 512,
         seed: int = 10,
+        **kwargs: object,
     ) -> str:
         llama_called.append((model_path, prompt, max_new_tokens, seed))
         return f"ENHANCED:{prompt}"
@@ -1871,15 +1873,15 @@ def test_gguf_call_patch_non_gguf_passthrough(
     assert result == ["hello world"]
 
 
-def test_gguf_call_patch_image_enhance_runs_llama_cpp_and_drops_image(
+def test_gguf_call_patch_image_no_mmproj_degrades_text_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """GGUF + enhance_prompt_image: llama.cpp runs on text, original called with enhance=False and image=None.
+    """GGUF + image + NO mmproj: no raise; text-only degrade; original called
+    with image dropped and enhance_first_prompt=False.
 
-    The GGUF vision tower is stripped to Identity, so image-conditioned PyTorch
-    Gemma enhancement must never run. The patch should still enhance the text
-    prompt via llama.cpp and forward enhance_first_prompt=False /
-    enhance_prompt_image=None to the original __call__.
+    Phase 3B replaces the stale GGUF I2V hard-fail with an observable text-only
+    degrade. The image is dropped from PROMPT enhancement only — image
+    conditioning proceeds via the normal images= path.
     """
     from ltx_pipelines.utils import blocks
     from services.patches.gguf_loader_fix import _install_llama_cpp_prompt_encoder_call_patch
@@ -1898,15 +1900,23 @@ def test_gguf_call_patch_image_enhance_runs_llama_cpp_and_drops_image(
     monkeypatch.setattr(blocks.PromptEncoder, "__call__", recording)
     _install_llama_cpp_prompt_encoder_call_patch()
 
-    llama_called: list[tuple[object, ...]] = []
+    llama_called: list[dict[str, object]] = []
 
     def fake_enhance(
         model_path: str,
         prompt: str,
         max_new_tokens: int = 512,
         seed: int = 10,
+        *,
+        image_path: str | None = None,
+        mmproj_path: str | None = None,
     ) -> str:
-        llama_called.append((model_path, prompt, max_new_tokens, seed))
+        llama_called.append({
+            "model_path": model_path,
+            "prompt": prompt,
+            "image_path": image_path,
+            "mmproj_path": mmproj_path,
+        })
         return f"ENHANCED:{prompt}"
 
     monkeypatch.setattr(
@@ -1914,6 +1924,7 @@ def test_gguf_call_patch_image_enhance_runs_llama_cpp_and_drops_image(
         fake_enhance,
     )
 
+    # No _ltx_desktop_llama_cpp_mmproj_path on the encoder → text-only degrade.
     encoder = SimpleNamespace(_ltx_desktop_llama_cpp_model_path="/fake/gemma.gguf")
 
     result = blocks.PromptEncoder.__call__(
@@ -1924,13 +1935,200 @@ def test_gguf_call_patch_image_enhance_runs_llama_cpp_and_drops_image(
         enhance_prompt_seed=42,
     )
 
+    # Helper called once with image_path forwarded but mmproj_path=None (degrade).
     assert len(llama_called) == 1
-    assert llama_called[0][0] == "/fake/gemma.gguf"
-    assert llama_called[0][1] == "hello world"
+    assert llama_called[0]["image_path"] == "/path/to/image.png"
+    assert llama_called[0]["mmproj_path"] is None
+    # Original called with image dropped and enhance disabled.
     assert recorded["kwargs"].get("enhance_first_prompt") is False
     assert recorded["kwargs"].get("enhance_prompt_image") is None
     assert "ENHANCED:hello world" in recorded["prompts"][0]
     assert result == ["ENHANCED:hello world"]
+
+
+def test_gguf_call_patch_image_with_mmproj_routes_multimodal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GGUF + image + mmproj: helper called with both image_path and mmproj_path;
+    no raise; original called with image dropped and enhance_first_prompt=False."""
+    from ltx_pipelines.utils import blocks
+    from services.patches.gguf_loader_fix import _install_llama_cpp_prompt_encoder_call_patch
+
+    recorded: dict[str, object] = {}
+
+    def recording(
+        self: object,
+        prompts: list[str],
+        **kwargs: object,
+    ) -> list[object]:
+        recorded["prompts"] = list(prompts)
+        recorded["kwargs"] = kwargs
+        return [prompts[0]]
+
+    monkeypatch.setattr(blocks.PromptEncoder, "__call__", recording)
+    _install_llama_cpp_prompt_encoder_call_patch()
+
+    llama_called: list[dict[str, object]] = []
+
+    def fake_enhance(
+        model_path: str,
+        prompt: str,
+        max_new_tokens: int = 512,
+        seed: int = 10,
+        *,
+        image_path: str | None = None,
+        mmproj_path: str | None = None,
+    ) -> str:
+        llama_called.append({
+            "model_path": model_path,
+            "image_path": image_path,
+            "mmproj_path": mmproj_path,
+        })
+        return f"ENHANCED:{prompt}"
+
+    monkeypatch.setattr(
+        "services.patches.gguf_loader_fix._enhance_prompt_with_llama_cpp",
+        fake_enhance,
+    )
+
+    encoder = SimpleNamespace(
+        _ltx_desktop_llama_cpp_model_path="/fake/gemma.gguf",
+        _ltx_desktop_llama_cpp_mmproj_path="/fake/mmproj-BF16.gguf",
+    )
+
+    blocks.PromptEncoder.__call__(
+        encoder,
+        ["hello world"],
+        enhance_first_prompt=True,
+        enhance_prompt_image="/path/to/image.png",
+        enhance_prompt_seed=42,
+    )
+
+    assert len(llama_called) == 1
+    assert llama_called[0]["image_path"] == "/path/to/image.png"
+    assert llama_called[0]["mmproj_path"] == "/fake/mmproj-BF16.gguf"
+    assert recorded["kwargs"].get("enhance_first_prompt") is False
+    assert recorded["kwargs"].get("enhance_prompt_image") is None
+
+
+def test_gguf_enhance_patch_image_with_model_path_degrades_text_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GemmaTextEncoder._enhance with image + GGUF model_path degrades to text-only.
+
+    Phase 3B: the vision tower is stripped in the GGUF build, so the patched
+    ``_enhance`` never calls original_enhance with an image (no stripped-vision
+    path) and never raises. It degrades to text-only llama.cpp enhancement
+    (image tensor dropped from prompt enhancement; image conditioning proceeds
+    via the normal images= path).
+    """
+    from ltx_core.text_encoders.gemma.encoders.base_encoder import GemmaTextEncoder
+    from services.patches.gguf_loader_fix import _install_llama_cpp_enhance_patch
+
+    # Capture the real _enhance as original; the patched version must not call
+    # it when image is present and model_path is set.
+    original_called: list[int] = []
+
+    def fake_original(
+        self: GemmaTextEncoder,
+        messages: list[dict[str, object]],
+        image: object = None,
+        max_new_tokens: int = 512,
+        seed: int = 10,
+    ) -> str:
+        original_called.append(1)
+        return "should-not-be-called"
+
+    monkeypatch.setattr(GemmaTextEncoder, "_enhance", fake_original)
+    _install_llama_cpp_enhance_patch()
+
+    llama_called: list[dict[str, object]] = []
+
+    def fake_enhance(
+        model_path: str,
+        prompt: str,
+        max_new_tokens: int = 512,
+        seed: int = 10,
+        **kwargs: object,
+    ) -> str:
+        llama_called.append({"model_path": model_path, "prompt": prompt})
+        return "TEXT-ONLY-ENHANCED"
+
+    monkeypatch.setattr(
+        "services.patches.gguf_loader_fix._enhance_prompt_with_llama_cpp",
+        fake_enhance,
+    )
+
+    encoder = GemmaTextEncoder.__new__(GemmaTextEncoder)
+    encoder._ltx_desktop_llama_cpp_model_path = "/fake/gemma.gguf"  # type: ignore[attr-defined]
+
+    # The patched _enhance is the one installed by _install_llama_cpp_enhance_patch.
+    # It should degrade to the inline text-only llama.cpp path (not raise).
+    # Monkeypatch the llama_cpp import so it doesn't try to actually load llama_cpp.
+    import sys
+    from types import ModuleType
+
+    fake_llama_cpp = ModuleType("llama_cpp")
+
+    class _FakeLlama:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        def create_chat_completion(self, **kwargs: object) -> dict:
+            return {"choices": [{"message": {"content": "INLINE-ENHANCED"}}]}
+
+        def close(self) -> None:
+            pass
+
+    fake_llama_cpp.Llama = _FakeLlama  # type: ignore[attr-defined]
+    fake_llama_cpp.llama_supports_gpu_offload = lambda: True  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "llama_cpp", fake_llama_cpp)
+
+    image_tensor = torch.zeros(1, 3, 8, 8)
+    # Must not raise; image is dropped, text-only inline path runs.
+    result = GemmaTextEncoder._enhance(  # type: ignore[method-assign]
+        encoder,
+        [{"role": "user", "content": "hi"}],
+        image=image_tensor,
+    )
+
+    # Original stripped-vision path never called.
+    assert len(original_called) == 0
+    # Inline text-only llama.cpp path produced a result.
+    assert result == "INLINE-ENHANCED"
+
+
+def test_gguf_enhance_patch_non_gguf_image_calls_original(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-GGUF (no model_path) + image: original_enhance runs (real vision tower)."""
+    from ltx_core.text_encoders.gemma.encoders.base_encoder import GemmaTextEncoder
+    from services.patches.gguf_loader_fix import _install_llama_cpp_enhance_patch
+
+    original_called: list[int] = []
+
+    def fake_original(
+        self: GemmaTextEncoder,
+        messages: list[dict[str, object]],
+        image: object = None,
+        max_new_tokens: int = 512,
+        seed: int = 10,
+    ) -> str:
+        original_called.append(1)
+        return "enhanced"
+
+    monkeypatch.setattr(GemmaTextEncoder, "_enhance", fake_original)
+    _install_llama_cpp_enhance_patch()
+
+    encoder = GemmaTextEncoder.__new__(GemmaTextEncoder)  # no _ltx_desktop_llama_cpp_model_path
+
+    result = GemmaTextEncoder._enhance(  # type: ignore[method-assign]
+        encoder,
+        [{"role": "user", "content": "hi"}],
+        image=torch.zeros(1, 3, 8, 8),
+    )
+    assert result == "enhanced"
+    assert len(original_called) == 1
 
 
 def test_patched_init_empty_gemma_root_skips_find_gemma_gguf(
@@ -2026,3 +2224,399 @@ class TestT2VConditioningPatch:
 
         # original: fn("REAL_ENCODER") → enc is the sentinel
         assert result == "REAL_ENCODER_0_1"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3B: install_gguf_component_paths mmproj attach + lazy multimodal
+# ---------------------------------------------------------------------------
+
+
+def test_install_gguf_component_paths_attaches_mmproj_to_prompt_encoder() -> None:
+    """mmproj_path sets _ltx_desktop_llama_cpp_mmproj_path on pipeline.prompt_encoder."""
+    pipe = SimpleNamespace(
+        prompt_encoder=SimpleNamespace(),
+    )
+
+    install_gguf_component_paths(
+        pipe,
+        ("/checkpoint.safetensors",),
+        mmproj_path="/fake/mmproj-BF16.gguf",
+    )
+
+    assert getattr(
+        pipe.prompt_encoder, "_ltx_desktop_llama_cpp_mmproj_path", None
+    ) == "/fake/mmproj-BF16.gguf"
+
+
+def test_install_gguf_component_paths_mmproj_composes_module_ops_on_builder() -> None:
+    """mmproj_path appends a llama_cpp_mmproj_attach ModuleOps to the Gemma builder."""
+    from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder
+    from ltx_core.model.transformer import LTXModelConfigurator
+
+    builder = SingleGPUModelBuilder(
+        model_path="/fake/gemma.gguf",
+        model_class_configurator=LTXModelConfigurator,
+    )
+    pipe = SimpleNamespace(
+        prompt_encoder=SimpleNamespace(_text_encoder_builder=builder),
+    )
+
+    install_gguf_component_paths(
+        pipe,
+        ("/checkpoint.safetensors",),
+        mmproj_path="/fake/mmproj-BF16.gguf",
+    )
+
+    # mmproj attr set on the prompt encoder.
+    assert pipe.prompt_encoder._ltx_desktop_llama_cpp_mmproj_path == "/fake/mmproj-BF16.gguf"
+    # ModuleOps composed onto the builder.
+    updated_builder = pipe.prompt_encoder._text_encoder_builder
+    mmproj_ops = [op for op in updated_builder.module_ops if op.name == "llama_cpp_mmproj_attach"]
+    assert len(mmproj_ops) == 1
+    # Existing ops preserved.
+    assert updated_builder.model_path == "/fake/gemma.gguf"
+
+
+def test_install_gguf_component_paths_mmproj_idempotent_on_builder() -> None:
+    """Calling twice with the same mmproj path does not append a duplicate op."""
+    from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder
+    from ltx_core.model.transformer import LTXModelConfigurator
+
+    builder = SingleGPUModelBuilder(
+        model_path="/fake/gemma.gguf",
+        model_class_configurator=LTXModelConfigurator,
+    )
+    pipe = SimpleNamespace(
+        prompt_encoder=SimpleNamespace(_text_encoder_builder=builder),
+    )
+
+    install_gguf_component_paths(
+        pipe, ("/c.safetensors",), mmproj_path="/fake/mmproj.gguf"
+    )
+    install_gguf_component_paths(
+        pipe, ("/c.safetensors",), mmproj_path="/fake/mmproj.gguf"
+    )
+
+    mmproj_ops = [
+        op for op in pipe.prompt_encoder._text_encoder_builder.module_ops
+        if op.name == "llama_cpp_mmproj_attach"
+    ]
+    assert len(mmproj_ops) == 1
+
+
+def test_install_gguf_component_paths_no_mmproj_is_noop_on_prompt_encoder() -> None:
+    """Without mmproj_path, prompt_encoder is untouched (no attr set)."""
+    pipe = SimpleNamespace(prompt_encoder=SimpleNamespace())
+
+    install_gguf_component_paths(pipe, ("/c.safetensors",))
+
+    assert not hasattr(pipe.prompt_encoder, "_ltx_desktop_llama_cpp_mmproj_path")
+
+
+def test_install_gguf_component_paths_mmproj_safe_without_prompt_encoder() -> None:
+    """mmproj_path with no prompt_encoder on the pipeline is a safe no-op."""
+    pipe = SimpleNamespace()
+    # Must not raise.
+    install_gguf_component_paths(pipe, ("/c.safetensors",), mmproj_path="/m.gguf")
+
+
+def test_llama_cpp_mmproj_op_attaches_path_to_gemma_encoder() -> None:
+    """The ModuleOps mutator sets _ltx_desktop_llama_cpp_mmproj_path on the module."""
+    from ltx_core.text_encoders.gemma.encoders.base_encoder import GemmaTextEncoder
+    from services.patches.gguf_loader_fix import _llama_cpp_mmproj_op
+
+    op = _llama_cpp_mmproj_op("/fake/mmproj.gguf")
+    assert op.name == "llama_cpp_mmproj_attach"
+
+    module = GemmaTextEncoder.__new__(GemmaTextEncoder)
+    assert not hasattr(module, "_ltx_desktop_llama_cpp_mmproj_path")
+    op.mutator(module)
+    assert module._ltx_desktop_llama_cpp_mmproj_path == "/fake/mmproj.gguf"  # type: ignore[attr-defined]
+
+
+def test_resolve_multimodal_chat_handler_returns_none_when_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When llama_cpp multimodal handlers are not importable, resolver returns None."""
+    import sys
+
+    # Remove any cached llama_cpp modules so the resolver's __import__ fails.
+    for mod in list(sys.modules):
+        if mod == "llama_cpp" or mod.startswith("llama_cpp."):
+            monkeypatch.delitem(sys.modules, mod, raising=False)
+
+    # Make __import__ raise ImportError for llama_cpp paths.
+    real_import = __import__
+
+    def fake_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "llama_cpp" or name.startswith("llama_cpp."):
+            raise ImportError(f"simulated: {name} not available")
+        return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
+
+    from services.patches.gguf_loader_fix import _resolve_multimodal_chat_handler
+
+    assert _resolve_multimodal_chat_handler() is None
+
+
+def test_image_to_data_uri_reads_local_file(tmp_path: Path) -> None:
+    """_image_to_data_uri produces a base64 data URI from a local image file."""
+    from services.patches.gguf_loader_fix import _image_to_data_uri
+
+    image_path = tmp_path / "test.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nfake-png-data")
+
+    uri = _image_to_data_uri(str(image_path))
+    assert uri.startswith("data:image/png;base64,")
+    import base64
+    decoded = base64.b64decode(uri.removeprefix("data:image/png;base64,"))
+    assert decoded == b"\x89PNG\r\n\x1a\nfake-png-data"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3B blocker fix: MTMDChatHandler resolution + multimodal enhance helper
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_multimodal_chat_handler_finds_mtmd_in_llama_chat_format(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolver finds ``llama_cpp.llama_chat_format.MTMDChatHandler`` — the
+    current viable path (verified against pinned llama-cpp-python 0.3.31)."""
+    import sys
+    from types import ModuleType
+
+    # Build a fake llama_cpp.llama_chat_format module carrying MTMDChatHandler.
+    fake_chat_format = ModuleType("llama_cpp.llama_chat_format")
+
+    class MTMDChatHandler:  # noqa: N801 — mirrors real class name
+        pass
+
+    fake_chat_format.MTMDChatHandler = MTMDChatHandler  # type: ignore[attr-defined]
+
+    fake_llama_cpp = ModuleType("llama_cpp")
+    fake_llama_cpp.llama_chat_format = fake_chat_format  # type: ignore[attr-defined]
+
+    # Clear any cached real modules so the resolver picks up the fakes.
+    for mod in list(sys.modules):
+        if mod == "llama_cpp" or mod.startswith("llama_cpp."):
+            monkeypatch.delitem(sys.modules, mod, raising=False)
+
+    monkeypatch.setitem(sys.modules, "llama_cpp", fake_llama_cpp)
+    monkeypatch.setitem(sys.modules, "llama_cpp.llama_chat_format", fake_chat_format)
+
+    from services.patches.gguf_loader_fix import _resolve_multimodal_chat_handler
+
+    resolved = _resolve_multimodal_chat_handler()
+    assert resolved is MTMDChatHandler
+
+
+def test_resolve_multimodal_chat_handler_prefers_gemma3_when_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When both MTMDChatHandler and Gemma3ChatHandler exist in llama_chat_format,
+    Gemma3ChatHandler is checked before MTMD (preference order is explicit)."""
+    import sys
+    from types import ModuleType
+
+    fake_chat_format = ModuleType("llama_cpp.llama_chat_format")
+
+    class Gemma3ChatHandler:  # noqa: N801
+        pass
+
+    class MTMDChatHandler:  # noqa: N801
+        pass
+
+    fake_chat_format.Gemma3ChatHandler = Gemma3ChatHandler  # type: ignore[attr-defined]
+    fake_chat_format.MTMDChatHandler = MTMDChatHandler  # type: ignore[attr-defined]
+
+    fake_llama_cpp = ModuleType("llama_cpp")
+    fake_llama_cpp.llama_chat_format = fake_chat_format  # type: ignore[attr-defined]
+
+    for mod in list(sys.modules):
+        if mod == "llama_cpp" or mod.startswith("llama_cpp."):
+            monkeypatch.delitem(sys.modules, mod, raising=False)
+
+    monkeypatch.setitem(sys.modules, "llama_cpp", fake_llama_cpp)
+    monkeypatch.setitem(sys.modules, "llama_cpp.llama_chat_format", fake_chat_format)
+
+    from services.patches.gguf_loader_fix import _resolve_multimodal_chat_handler
+
+    # MTMDChatHandler is checked first (the current viable path), so it wins
+    # even though Gemma3ChatHandler is also present.
+    assert _resolve_multimodal_chat_handler() is MTMDChatHandler
+
+
+def test_resolve_multimodal_chat_handler_does_not_use_stale_chat_handler_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The resolver must not prefer the stale ``llama_chat_handler`` submodule
+    when ``llama_chat_format.MTMDChatHandler`` is available."""
+    import sys
+    from types import ModuleType
+
+    fake_chat_format = ModuleType("llama_cpp.llama_chat_format")
+
+    class MTMDChatHandler:  # noqa: N801
+        pass
+
+    fake_chat_format.MTMDChatHandler = MTMDChatHandler  # type: ignore[attr-defined]
+
+    # A stale llama_chat_handler with a DIFFERENT class must not win.
+    fake_chat_handler = ModuleType("llama_cpp.llama_chat_handler")
+
+    class StaleHandler:
+        pass
+
+    fake_chat_handler.MTMDChatHandler = StaleHandler  # type: ignore[attr-defined]
+
+    fake_llama_cpp = ModuleType("llama_cpp")
+    fake_llama_cpp.llama_chat_format = fake_chat_format  # type: ignore[attr-defined]
+    fake_llama_cpp.llama_chat_handler = fake_chat_handler  # type: ignore[attr-defined]
+
+    for mod in list(sys.modules):
+        if mod == "llama_cpp" or mod.startswith("llama_cpp."):
+            monkeypatch.delitem(sys.modules, mod, raising=False)
+
+    monkeypatch.setitem(sys.modules, "llama_cpp", fake_llama_cpp)
+    monkeypatch.setitem(sys.modules, "llama_cpp.llama_chat_format", fake_chat_format)
+    monkeypatch.setitem(sys.modules, "llama_cpp.llama_chat_handler", fake_chat_handler)
+
+    from services.patches.gguf_loader_fix import _resolve_multimodal_chat_handler
+
+    assert _resolve_multimodal_chat_handler() is MTMDChatHandler
+
+
+def test_enhance_prompt_with_llama_cpp_multimodal_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Helper-level multimodal success: fake Llama + fake handler; the helper
+    calls ``create_chat_completion`` with an ``image_url`` data-URI block and
+    uses the chat handler. Returns the enhanced text."""
+    import sys
+    from types import ModuleType
+
+    image_path = tmp_path / "input.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+
+    # Fake multimodal chat handler.
+    class _FakeChatHandler:
+        def __init__(self, *, clip_model_path: str, verbose: bool = False) -> None:
+            self.clip_model_path = clip_model_path
+            self.verbose = verbose
+
+    # Fake Llama that records the messages + chat_handler.
+    recorded: dict[str, object] = {}
+
+    class _FakeLlama:
+        def __init__(self, **kwargs: object) -> None:
+            self.chat_handler = None
+
+        def create_chat_completion(self, *, messages: object, **kwargs: object) -> dict:
+            recorded["messages"] = messages
+            recorded["chat_handler_type"] = type(self.chat_handler).__name__
+            return {"choices": [{"message": {"content": "MULTIMODAL-ENHANCED"}}]}
+
+        def close(self) -> None:
+            pass
+
+    # Stub llama_cpp so the helper's import + resolver succeed.
+    fake_llama_cpp = ModuleType("llama_cpp")
+    fake_llama_cpp.Llama = _FakeLlama  # type: ignore[attr-defined]
+    fake_llama_cpp.llama_supports_gpu_offload = lambda: True  # type: ignore[attr-defined]
+
+    fake_chat_format = ModuleType("llama_cpp.llama_chat_format")
+    fake_chat_format.MTMDChatHandler = _FakeChatHandler  # type: ignore[attr-defined]
+    fake_llama_cpp.llama_chat_format = fake_chat_format  # type: ignore[attr-defined]
+
+    for mod in list(sys.modules):
+        if mod == "llama_cpp" or mod.startswith("llama_cpp."):
+            monkeypatch.delitem(sys.modules, mod, raising=False)
+    monkeypatch.setitem(sys.modules, "llama_cpp", fake_llama_cpp)
+    monkeypatch.setitem(sys.modules, "llama_cpp.llama_chat_format", fake_chat_format)
+
+    from services.patches.gguf_loader_fix import _enhance_prompt_with_llama_cpp
+
+    result = _enhance_prompt_with_llama_cpp(
+        "/fake/gemma.gguf",
+        "a cat sitting on a chair",
+        max_new_tokens=128,
+        seed=7,
+        image_path=str(image_path),
+        mmproj_path="/fake/mmproj-BF16.gguf",
+    )
+
+    assert result == "MULTIMODAL-ENHANCED"
+    # The chat handler was attached.
+    assert recorded["chat_handler_type"] == "_FakeChatHandler"
+    # messages payload contained an image_url data URI block.
+    messages = recorded["messages"]
+    assert isinstance(messages, list)
+    user_msg = messages[1]
+    assert user_msg["role"] == "user"
+    content = user_msg["content"]
+    assert isinstance(content, list)
+    image_block = next(c for c in content if c.get("type") == "image_url")
+    url = image_block["image_url"]["url"]
+    assert isinstance(url, str) and url.startswith("data:image/")
+    # Text block retained alongside the image.
+    text_block = next(c for c in content if c.get("type") == "text")
+    assert "a cat sitting on a chair" in text_block["text"]
+
+
+def test_enhance_prompt_with_llama_cpp_multimodal_error_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Errors from the actual ``create_chat_completion`` call must propagate
+    (not be swallowed into text-only degrade). Only handler import/setup
+    unavailability degrades."""
+    import sys
+    from types import ModuleType
+
+    image_path = tmp_path / "input.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+
+    class _FakeChatHandler:
+        def __init__(self, *, clip_model_path: str, verbose: bool = False) -> None:
+            pass
+
+    class _InferenceError(RuntimeError):
+        pass
+
+    class _FakeLlama:
+        def __init__(self, **kwargs: object) -> None:
+            self.chat_handler = None
+
+        def create_chat_completion(self, **kwargs: object) -> dict:
+            raise _InferenceError("simulated CUDA OOM during inference")
+
+        def close(self) -> None:
+            pass
+
+    fake_llama_cpp = ModuleType("llama_cpp")
+    fake_llama_cpp.Llama = _FakeLlama  # type: ignore[attr-defined]
+    fake_llama_cpp.llama_supports_gpu_offload = lambda: True  # type: ignore[attr-defined]
+
+    fake_chat_format = ModuleType("llama_cpp.llama_chat_format")
+    fake_chat_format.MTMDChatHandler = _FakeChatHandler  # type: ignore[attr-defined]
+    fake_llama_cpp.llama_chat_format = fake_chat_format  # type: ignore[attr-defined]
+
+    for mod in list(sys.modules):
+        if mod == "llama_cpp" or mod.startswith("llama_cpp."):
+            monkeypatch.delitem(sys.modules, mod, raising=False)
+    monkeypatch.setitem(sys.modules, "llama_cpp", fake_llama_cpp)
+    monkeypatch.setitem(sys.modules, "llama_cpp.llama_chat_format", fake_chat_format)
+
+    from services.patches.gguf_loader_fix import _enhance_prompt_with_llama_cpp
+
+    # The inference error propagates — it is NOT swallowed into text-only.
+    with pytest.raises(_InferenceError, match="simulated CUDA OOM"):
+        _enhance_prompt_with_llama_cpp(
+            "/fake/gemma.gguf",
+            "prompt",
+            image_path=str(image_path),
+            mmproj_path="/fake/mmproj-BF16.gguf",
+        )

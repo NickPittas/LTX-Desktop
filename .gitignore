@@ -91,3 +91,6 @@ resources/vc_redist.x64.exe
 # Pix Agent
 .pi/
 .pi-lens/
+
+# Local OpenCode planning/codemap state
+.slim/

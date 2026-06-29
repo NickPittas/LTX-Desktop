@@ -12,11 +12,15 @@ from runtime_config.model_download_specs import UPSAMPLER_CP_ID, resolve_model_p
 
 
 def _activate_split_profile(test_state, tmp_path: Path):
-    """Create a Kijai split profile directly in state and activate it."""
+    """Create a Kijai split profile directly in state and activate it.
+
+    Transformer filename carries the ``distilled`` base-family signal so the
+    Phase 3D base-family router resolves it as a distilled fast pipeline.
+    """
     d = tmp_path / "kijai"
     d.mkdir()
     files = {
-        "transformer.safetensors": b"x",
+        "ltx-2.3-22b-distilled-transformer.safetensors": b"x",
         "tp.safetensors": b"x",
         "ec.safetensors": b"x",
         "vvae.safetensors": b"x",
@@ -27,7 +31,8 @@ def _activate_split_profile(test_state, tmp_path: Path):
     for name, content in files.items():
         p = d / name
         p.write_bytes(content)
-        paths[name.rsplit(".", 1)[0]] = str(p)
+        key = "transformer" if name.startswith("ltx-") else name.rsplit(".", 1)[0]
+        paths[key] = str(p)
 
     profile = ModelProfilePayload(
         id="kijai-split",
@@ -50,10 +55,14 @@ def _activate_split_profile(test_state, tmp_path: Path):
 
 
 def _activate_official_profile(test_state, tmp_path: Path):
-    """Create an official monolith profile and activate it."""
+    """Create an official monolith profile and activate it.
+
+    Uses the canonical official LTX-2.3 distilled transformer filename so the
+    Phase 3D base-family router resolves it as a distilled fast pipeline.
+    """
     d = tmp_path / "official"
     d.mkdir()
-    transformer = d / "model.safetensors"
+    transformer = d / "ltx-2.3-22b-distilled.safetensors"
     transformer.write_bytes(b"x")
     upsampler = d / "upsampler.safetensors"
     upsampler.write_bytes(b"x")
@@ -107,11 +116,17 @@ class TestLtxSplitSafetensorsIntegration:
 
 
 def _activate_gguf_profile(test_state, tmp_path: Path):
-    """Create a GGUF transformer profile directly in state and activate it."""
+    """Create a GGUF transformer profile directly in state and activate it.
+
+    Uses a distilled GGUF filename so the Phase 3D base-family router resolves
+    it as a distilled base — these tests exercise format/streaming/compile
+    behavior, not the dev distilled-LoRA requirement (covered separately by
+    ``TestDevDistilledLoraRouting``).
+    """
     d = tmp_path / "gguf"
     d.mkdir()
     files = {
-        "transformer.gguf": b"GGUF",
+        "ltx-2.3-22b-distilled-Q4_K_M.gguf": b"GGUF",
         "tp.safetensors": b"x",
         "ec.safetensors": b"x",
         "vvae.safetensors": b"x",
@@ -122,7 +137,8 @@ def _activate_gguf_profile(test_state, tmp_path: Path):
     for name, content in files.items():
         p = d / name
         p.write_bytes(content)
-        paths[name.rsplit(".", 1)[0]] = str(p)
+        key = "transformer" if name.endswith(".gguf") else name.rsplit(".", 1)[0]
+        paths[key] = str(p)
 
     profile = ModelProfilePayload(
         id="gguf-profile",
@@ -340,8 +356,10 @@ def _activate_profile_with_upsampler(test_state, tmp_path: Path, upsampler_path:
     The transformer is irrelevant to these tests; we only care about upsampler
     resolution. We write a placeholder transformer on disk so other resolver
     code paths don't blow up, but the assertions only check upsampler behavior.
+    The filename carries the ``distilled`` signal so the Phase 3D base-family
+    router does not reject the profile as unknown.
     """
-    transformer = tmp_path / "transformer.safetensors"
+    transformer = tmp_path / "ltx-2.3-22b-distilled.safetensors"
     transformer.write_bytes(b"x")
     profile = ModelProfilePayload(
         id="upsampler-resolution",
@@ -420,3 +438,211 @@ class TestUpsamplerRuntimeResolution:
         assert exc_info.value.code == "UPSCALER_REQUIRED"
         # Pipeline construction never happened.
         assert fake_services.fast_video_pipeline.last_upsampler_path is None
+
+
+# ============================================================
+# Phase 3D: dev-vs-distilled fast pipeline routing
+# ============================================================
+
+
+def _write_distilled_lora_files(test_state, which: str = "1_1") -> str:
+    """Write a canonical distilled LoRA under ``<models_dir>/adapters/`` and
+    return its absolute path.
+
+    ``which`` selects v1.1 (``"1_1"``) or v1.0 (``"1_0"``).
+    """
+    from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
+
+    role = "distilled_lora_384_1_1" if which == "1_1" else "distilled_lora_384"
+    adapter = OFFICIAL_LTX23_ADAPTERS[role]  # type: ignore[index]
+    models_dir: Path = test_state.config.default_models_dir
+    path = models_dir / "adapters" / adapter.filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"distilled-lora")
+    return str(path)
+
+
+def _activate_dev_profile(
+    test_state,
+    tmp_path: Path,
+    *,
+    official_adapters: dict[str, str] | None = None,
+):
+    """Create + activate a dev base profile (official monolith transformer)."""
+    d = tmp_path / "dev"
+    d.mkdir()
+    transformer = d / "ltx-2.3-22b-dev.safetensors"
+    transformer.write_bytes(b"x")
+    upsampler = d / "upsampler.safetensors"
+    upsampler.write_bytes(b"x")
+    profile = ModelProfilePayload(
+        id="dev-profile",
+        name="Dev",
+        source="official",
+        components=ModelComponentPaths(
+            transformer=str(transformer),
+            transformer_format="official_safetensors",
+            upsampler=str(upsampler),
+            text_encoder_format="api",
+            official_adapters=official_adapters or {},
+        ),
+    )
+    test_state.state.model_profiles = [profile]
+    test_state.state.active_model_profile_id = "dev-profile"
+    return profile
+
+
+def _activate_unknown_profile(test_state, tmp_path: Path):
+    """Create + activate a profile whose transformer has no family signal."""
+    d = tmp_path / "unknown"
+    d.mkdir()
+    transformer = d / "custom-model.safetensors"
+    transformer.write_bytes(b"x")
+    upsampler = d / "upsampler.safetensors"
+    upsampler.write_bytes(b"x")
+    profile = ModelProfilePayload(
+        id="unknown-profile",
+        name="Unknown",
+        source="custom",
+        components=ModelComponentPaths(
+            transformer=str(transformer),
+            transformer_format="official_safetensors",
+            upsampler=str(upsampler),
+            text_encoder_format="api",
+        ),
+    )
+    test_state.state.model_profiles = [profile]
+    test_state.state.active_model_profile_id = "unknown-profile"
+    return profile
+
+
+class TestDevDistilledLoraRouting:
+    """Phase 3D (plan §12): dev base routes to TI2VidTwoStagesPipeline and
+    requires a distilled LoRA. Distilled base keeps the existing DistilledPipeline
+    route. Unknown base fails with an actionable HTTPError.
+    """
+
+    def test_dev_profile_with_explicit_lora_passes_path(
+        self, test_state, tmp_path, fake_services
+    ):
+        explicit = tmp_path / "explicit-distilled-lora.safetensors"
+        explicit.write_bytes(b"lora")
+        _activate_dev_profile(
+            test_state, tmp_path,
+            official_adapters={"distilled_lora_384_1_1": str(explicit)},
+        )
+
+        test_state.pipelines.load_gpu_pipeline("fast")
+
+        fake = fake_services.fast_video_pipeline
+        assert fake.last_base_family == "dev"
+        assert fake.last_distilled_lora_path == str(explicit)
+
+    def test_dev_profile_with_canonical_fallback_lora(
+        self, test_state, tmp_path, fake_services
+    ):
+        # No explicit adapter; canonical v1.1 file exists on disk.
+        canonical = _write_distilled_lora_files(test_state, which="1_1")
+        _activate_dev_profile(test_state, tmp_path)
+
+        test_state.pipelines.load_gpu_pipeline("fast")
+
+        fake = fake_services.fast_video_pipeline
+        assert fake.last_base_family == "dev"
+        assert fake.last_distilled_lora_path == canonical
+
+    def test_dev_profile_falls_back_to_v1_when_v1_1_missing(
+        self, test_state, tmp_path, fake_services
+    ):
+        from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
+
+        canonical_v1 = _write_distilled_lora_files(test_state, which="1_0")
+        _activate_dev_profile(test_state, tmp_path)
+
+        test_state.pipelines.load_gpu_pipeline("fast")
+
+        fake = fake_services.fast_video_pipeline
+        assert fake.last_base_family == "dev"
+        assert fake.last_distilled_lora_path == canonical_v1
+        # v1.1 canonical must NOT exist on disk for this test.
+        models_dir: Path = test_state.config.default_models_dir
+        v1_1 = models_dir / "adapters" / OFFICIAL_LTX23_ADAPTERS["distilled_lora_384_1_1"].filename  # type: ignore[index]
+        assert not v1_1.exists()
+
+    def test_dev_profile_missing_lora_raises_409_with_placement_path(
+        self, test_state, tmp_path, fake_services
+    ):
+        # No explicit adapter; no canonical files on disk.
+        _activate_dev_profile(test_state, tmp_path)
+
+        with pytest.raises(HTTPError) as exc_info:
+            test_state.pipelines.load_gpu_pipeline("fast")
+
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.code == "DISTILLED_LORA_REQUIRED"
+        # Message must include the canonical placement path(s).
+        from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
+
+        models_dir: Path = test_state.config.default_models_dir
+        expected_v1_1 = str(
+            models_dir / "adapters" / OFFICIAL_LTX23_ADAPTERS["distilled_lora_384_1_1"].filename  # type: ignore[index]
+        )
+        assert expected_v1_1 in exc_info.value.detail
+        # Pipeline construction never happened.
+        assert fake_services.fast_video_pipeline.last_distilled_lora_path is None
+
+    def test_distilled_profile_passes_no_lora_and_remains_distilled(
+        self, test_state, tmp_path, fake_services
+    ):
+        _activate_official_profile(test_state, tmp_path)  # distilled monolith
+        test_state.pipelines.load_gpu_pipeline("fast")
+
+        fake = fake_services.fast_video_pipeline
+        assert fake.last_base_family == "distilled"
+        # Distilled route never constructs a dev LoRA.
+        assert fake.last_distilled_lora_path is None
+
+    def test_unknown_family_raises_409_before_heavy_load(
+        self, test_state, tmp_path, fake_services
+    ):
+        _activate_unknown_profile(test_state, tmp_path)
+
+        with pytest.raises(HTTPError) as exc_info:
+            test_state.pipelines.load_gpu_pipeline("fast")
+
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.code == "UNSUPPORTED_MODEL_BASE_FAMILY"
+        # Pipeline construction never happened.
+        assert fake_services.fast_video_pipeline.last_base_family is None
+
+    def test_dev_route_skips_torch_compile(
+        self, test_state, tmp_path, fake_services
+    ):
+        """Dev route is not torch.compile-enabled in the initial wiring.
+
+        The handler checks supports_torch_compile() before invoking
+        compile_transformer(); the dev route must skip compile silently
+        (no compile call) consistent with GGUF skip behavior.
+        """
+        _write_distilled_lora_files(test_state, which="1_1")
+        _activate_dev_profile(test_state, tmp_path)
+        test_state.state.app_settings.use_torch_compile = True
+
+        test_state.pipelines.load_gpu_pipeline("fast")
+
+        fake = fake_services.fast_video_pipeline
+        assert fake.last_base_family == "dev"
+        assert fake.compile_calls == 0
+
+    def test_dev_canonical_fallback_path_joins_cache_key(
+        self, test_state, tmp_path, fake_services
+    ):
+        """When the dev route falls back to a canonical LoRA, the cache key
+        must include the effective fallback path so toggling the on-disk
+        canonical file invalidates the pipeline cache."""
+        canonical = _write_distilled_lora_files(test_state, which="1_1")
+        _activate_dev_profile(test_state, tmp_path)
+
+        state = test_state.pipelines.load_gpu_pipeline("fast")
+        # Cache key must reflect the effective fallback LoRA path.
+        assert canonical in state.cache_key

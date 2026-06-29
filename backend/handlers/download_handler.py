@@ -356,7 +356,7 @@ class DownloadHandler(StateHandlerBase):
         session_id: DownloadSessionId,
     ) -> None:
         spec = get_model_cp_spec(cp_id)
-        self.start_file(cp_id, spec.name, session_id)
+        self.start_file(cp_id, spec.remote_name, session_id)
         progress_cb = self._make_progress_callback(cp_id, session_id)
 
         resolve_downloading_dir(models_dir).mkdir(parents=True, exist_ok=True)
@@ -371,7 +371,7 @@ class DownloadHandler(StateHandlerBase):
         else:
             self._model_downloader.download_file(
                 repo_id=spec.repo_id,
-                filename=spec.name,
+                filename=spec.remote_name,
                 local_dir=str(resolve_downloading_path(models_dir, cp_id)),
                 on_progress=progress_cb,
                 token=hf_token,

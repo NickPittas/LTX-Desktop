@@ -920,6 +920,81 @@ class TestIcLoraWorkflowGating:
         assert_http_error(response, status_code=400, code="HTTP_400",
                           message="LipDub requires audio conditioning and lip-sync pipeline which is not wired yet")
 
+    def _setup_ingredients_api_encoding(self, test_state, fake_services, create_fake_model_files):
+        """Wire API text encoding for an ingredients (image-only) workflow."""
+        from types import SimpleNamespace
+
+        create_fake_model_files()
+        test_state.state.app_settings.ltx_api_key = "test-key"
+        test_state.state.app_settings.use_local_text_encoder = False
+        fake_services.ic_lora_pipeline.bind_singleton(fake_services.ic_lora_pipeline)
+        # prepare_text_encoding → encode_via_api must return a truthy result.
+        fake_services.text_encoder.encode_responses.append(
+            SimpleNamespace(video_context="fake_tensor", audio_context=None)
+        )
+
+        adapter_dir = test_state.config.default_models_dir / "adapters"
+        adapter_dir.mkdir(parents=True, exist_ok=True)
+        adapter_file = adapter_dir / "ingredients.safetensors"
+        adapter_file.write_bytes(b"\x00" * 1024)
+
+        profile = ModelProfilePayload(
+            id="ingredients-profile",
+            name="Ingredients Profile",
+            source="official",
+            components=ModelComponentPaths(
+                official_adapters={"ingredients": str(adapter_file)},
+            ),
+        )
+        test_state.state.model_profiles = [profile]
+        test_state.state.active_model_profile_id = "ingredients-profile"
+
+    def test_ingredients_image_workflow_uses_i2v_enhancer_setting(
+        self, client, test_state, fake_services, create_fake_model_files
+    ):
+        """Ingredients (image-only) workflow consults prompt_enhancer_enabled_i2v, not t2v.
+
+        With i2v ON and t2v OFF, enhancement must still be requested (i2v wins)
+        — proving image workflows no longer silently use the T2V setting.
+        """
+        self._setup_ingredients_api_encoding(test_state, fake_services, create_fake_model_files)
+        test_state.state.app_settings.prompt_enhancer_enabled_i2v = True
+        test_state.state.app_settings.prompt_enhancer_enabled_t2v = False
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "prompt": "test prompt",
+                "images": [{"path": "/fake/img.png", "frame": 0, "strength": 1.0}],
+                "adapter_id": "ingredients",
+            },
+        )
+        assert response.status_code == 200, response.text
+
+        assert len(fake_services.text_encoder.encode_calls) == 1
+        assert fake_services.text_encoder.encode_calls[0]["enhance_prompt"] is True
+
+    def test_ingredients_image_workflow_ignores_t2v_enhancer_setting(
+        self, client, test_state, fake_services, create_fake_model_files
+    ):
+        """Image workflow must not consult t2v: with i2v OFF and t2v ON, no enhancement."""
+        self._setup_ingredients_api_encoding(test_state, fake_services, create_fake_model_files)
+        test_state.state.app_settings.prompt_enhancer_enabled_i2v = False
+        test_state.state.app_settings.prompt_enhancer_enabled_t2v = True
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "prompt": "test prompt",
+                "images": [{"path": "/fake/img.png", "frame": 0, "strength": 1.0}],
+                "adapter_id": "ingredients",
+            },
+        )
+        assert response.status_code == 200, response.text
+
+        assert len(fake_services.text_encoder.encode_calls) == 1
+        assert fake_services.text_encoder.encode_calls[0]["enhance_prompt"] is False
+
     def test_hdr_generates_with_proper_artifacts(self, client, test_state, create_fake_model_files):
         """HDR adapter dispatches to the HDR path and succeeds when artifacts are present."""
         create_fake_model_files()

@@ -220,3 +220,183 @@ class TestResolveComponents:
         )
         resolved = resolve_components(profile)
         assert resolved.upsampler_path is None
+
+    # ------------------------------------------------------------------
+    # Phase 3A (plan §9 Option A): mmproj projection path plumbing
+    # ------------------------------------------------------------------
+
+    def test_mmproj_path_none_by_default(self):
+        """Profiles without mmproj resolve mmproj_path=None."""
+        profile = _profile(
+            components={
+                "transformer": "/m/transformer.safetensors",
+                "transformer_format": "official_safetensors",
+            }
+        )
+        resolved = resolve_components(profile)
+        assert resolved.mmproj_path is None
+
+    def test_mmproj_path_carried_through(self):
+        """An explicit mmproj path is plumbed through resolve_components()."""
+        profile = _profile(
+            components={
+                "transformer": "/m/ltx.gguf",
+                "transformer_format": "gguf",
+                "text_encoder_root": "/m/gemma-gguf",
+                "text_encoder_format": "gguf",
+                "mmproj": "/m/gemma-3-12b-it-qat-GGUF/mmproj-BF16.gguf",
+            }
+        )
+        resolved = resolve_components(profile)
+        assert resolved.mmproj_path == "/m/gemma-3-12b-it-qat-GGUF/mmproj-BF16.gguf"
+
+    def test_cache_key_includes_mmproj(self):
+        """components.mmproj participates in the cache key so toggling it
+        invalidates the pipeline cache (relevant once the multimodal path
+        is wired)."""
+        base_components = {
+            "transformer": "/m/transformer.safetensors",
+            "transformer_format": "official_safetensors",
+        }
+        without_mmproj = _profile(components={**base_components}, profile_id="p1")
+        with_mmproj = _profile(
+            components={
+                **base_components,
+                "mmproj": "/m/mmproj-BF16.gguf",
+            },
+            profile_id="p1",  # same id — only mmproj differs
+        )
+        key_without = resolve_components(without_mmproj).cache_key
+        key_with = resolve_components(with_mmproj).cache_key
+        assert key_without != key_with
+        assert "/m/mmproj-BF16.gguf" in key_with
+        # Empty string sentinel for absent mmproj.
+        assert "" in key_without
+
+    # ------------------------------------------------------------------
+    # Phase 3D (plan §12): base_family inference + distilled LoRA plumbing
+    # ------------------------------------------------------------------
+
+    def test_base_family_distilled_inferred_from_path(self):
+        profile = _profile(
+            components={
+                "transformer": "/m/ltx-2.3-22b-distilled.safetensors",
+                "transformer_format": "official_safetensors",
+            }
+        )
+        assert resolve_components(profile).base_family == "distilled"
+
+    def test_base_family_dev_inferred_from_path(self):
+        profile = _profile(
+            components={
+                "transformer": "/m/ltx-2.3-22b-dev.safetensors",
+                "transformer_format": "official_safetensors",
+            }
+        )
+        assert resolve_components(profile).base_family == "dev"
+
+    def test_base_family_dev_inferred_from_gguf_path(self):
+        profile = _profile(
+            components={
+                "transformer": "/m/ltx-2.3-22b-dev-Q4_K_M.gguf",
+                "transformer_format": "gguf",
+            }
+        )
+        assert resolve_components(profile).base_family == "dev"
+
+    def test_base_family_distilled_lora_adapter_does_not_imply_distilled_base(self):
+        """``distilled-lora`` / ``distilled_lora`` is an adapter, not a base."""
+        for path in (
+            "/m/ltx-2.3-22b-distilled-lora-384.safetensors",
+            "/m/ltx-2.3-22b-distilled_lora-384-1.1.safetensors",
+            "/m/adapters/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+        ):
+            profile = _profile(
+                components={
+                    "transformer": path,
+                    "transformer_format": "official_safetensors",
+                }
+            )
+            assert resolve_components(profile).base_family == "unknown", path
+
+    def test_base_family_unknown_for_generic_filename(self):
+        profile = _profile(
+            components={
+                "transformer": "/m/custom-model.safetensors",
+                "transformer_format": "official_safetensors",
+            }
+        )
+        assert resolve_components(profile).base_family == "unknown"
+
+    def test_distilled_lora_path_none_by_default(self):
+        profile = _profile(
+            components={
+                "transformer": "/m/ltx-2.3-22b-dev.safetensors",
+                "transformer_format": "official_safetensors",
+            }
+        )
+        assert resolve_components(profile).distilled_lora_path is None
+
+    def test_distilled_lora_path_extracts_explicit_v1_1(self):
+        profile = _profile(
+            components={
+                "transformer": "/m/ltx-2.3-22b-dev.safetensors",
+                "transformer_format": "official_safetensors",
+                "official_adapters": {
+                    "distilled_lora_384": "/m/old.safetensors",
+                    "distilled_lora_384_1_1": "/m/new.safetensors",
+                },
+            }
+        )
+        # v1.1 wins over v1.0
+        assert resolve_components(profile).distilled_lora_path == "/m/new.safetensors"
+
+    def test_distilled_lora_path_extracts_explicit_v1_when_v1_1_absent(self):
+        profile = _profile(
+            components={
+                "transformer": "/m/ltx-2.3-22b-dev.safetensors",
+                "transformer_format": "official_safetensors",
+                "official_adapters": {
+                    "distilled_lora_384": "/m/old.safetensors",
+                },
+            }
+        )
+        assert resolve_components(profile).distilled_lora_path == "/m/old.safetensors"
+
+    def test_cache_key_includes_base_family(self):
+        base_components = {
+            "transformer_format": "official_safetensors",
+        }
+        dev_profile = _profile(
+            components={**base_components, "transformer": "/m/ltx-2.3-22b-dev.safetensors"},
+            profile_id="p1",
+        )
+        distilled_profile = _profile(
+            components={**base_components, "transformer": "/m/ltx-2.3-22b-distilled.safetensors"},
+            profile_id="p1",  # same id, different family
+        )
+        # Different transformer path already differentiates, but assert the
+        # family token is present in the key.
+        dev_key = resolve_components(dev_profile).cache_key
+        distilled_key = resolve_components(distilled_profile).cache_key
+        assert "dev" in dev_key
+        assert "distilled" in distilled_key
+        assert dev_key != distilled_key
+
+    def test_cache_key_includes_explicit_distilled_lora_path(self):
+        base = {
+            "transformer": "/m/ltx-2.3-22b-dev.safetensors",
+            "transformer_format": "official_safetensors",
+        }
+        without_lora = _profile(components={**base}, profile_id="p1")
+        with_lora = _profile(
+            components={
+                **base,
+                "official_adapters": {"distilled_lora_384_1_1": "/m/distilled-lora.safetensors"},
+            },
+            profile_id="p1",  # same id — only LoRA differs
+        )
+        key_without = resolve_components(without_lora).cache_key
+        key_with = resolve_components(with_lora).cache_key
+        assert key_without != key_with
+        assert "/m/distilled-lora.safetensors" in key_with

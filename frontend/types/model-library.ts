@@ -8,6 +8,7 @@ export type UnknownFile = components['schemas']['UnknownFile']
 export type ArtifactStatus = ModelLibraryArtifact['status']
 export type ArtifactSupportStatus = ModelLibraryArtifact['support_status']
 export type ArtifactKind = ModelLibraryArtifact['artifact_kind']
+export type CatalogSection = ModelLibraryArtifact['section']
 export type ContentPieceId = NonNullable<ModelLibraryArtifact['cp_id']>
 export type AdapterId = NonNullable<ModelLibraryArtifact['adapter_id']>
 

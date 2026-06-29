@@ -25,6 +25,7 @@ import type {
   ArtifactKind,
   ArtifactStatus,
   ArtifactSupportStatus,
+  CatalogSection,
   ModelLibraryArtifact,
   ModelDownloadProgressResponse,
   ContentPieceId,
@@ -49,6 +50,15 @@ const KIND_LABELS: Record<ArtifactKind, string> = {
   pose_processor: 'Pose Processor',
   person_detector: 'Person Detector',
   image_gen_model: 'Image Generation',
+}
+
+const SECTION_ORDER: CatalogSection[] = ['full', 'kijai', 'gguf', 'addons']
+
+const SECTION_LABELS: Record<CatalogSection, { label: string; description: string }> = {
+  full: { label: 'Full', description: 'Core model files needed for local workflows' },
+  kijai: { label: 'Kijai', description: 'Alternative Kijai FP8 builds' },
+  gguf: { label: 'GGUF', description: 'Quantized GGUF model variants' },
+  addons: { label: 'Add-ons & Controls', description: 'Optional adapters, controls, and utility models' },
 }
 
 function formatBytes(bytes: number | null | undefined): string {
@@ -443,6 +453,19 @@ function ArtifactRow({
   )
 }
 
+function SectionHeader({ section, count }: { section: CatalogSection; count: number }) {
+  const info = SECTION_LABELS[section]
+  return (
+    <div className="flex items-center justify-between py-2 px-3 border-b border-zinc-700/50 bg-zinc-900/80">
+      <div className="flex flex-col gap-0.5">
+        <span className="text-xs font-semibold text-white">{info.label}</span>
+        <span className="text-[10px] text-zinc-500">{info.description}</span>
+      </div>
+      <span className="text-[10px] text-zinc-500">{count} {count === 1 ? 'file' : 'files'}</span>
+    </div>
+  )
+}
+
 function GroupHeader({ kind, count }: { kind: ArtifactKind; count: number }) {
   return (
     <div className="sticky top-0 z-10 flex items-center justify-between py-2 px-3 bg-zinc-900/95 backdrop-blur border-y border-zinc-800">
@@ -542,7 +565,7 @@ export function ModelLibraryPanel({ isOpen }: ModelLibraryPanelProps) {
   }, [catalog])
 
   const groupedArtifacts = useMemo(() => {
-    if (!catalog?.artifacts) return new Map<ArtifactKind, ModelLibraryArtifact[]>()
+    if (!catalog?.artifacts) return new Map<CatalogSection, Map<ArtifactKind, ModelLibraryArtifact[]>>()
     const query = search.trim().toLowerCase()
     const filtered = catalog.artifacts.filter((a) => {
       const matchesStatus =
@@ -560,17 +583,25 @@ export function ModelLibraryPanel({ isOpen }: ModelLibraryPanelProps) {
       return matchesStatus && matchesSearch
     })
     const sorted = [...filtered].sort((a, b) => {
+      const sectionOrder = SECTION_ORDER.indexOf(a.section) - SECTION_ORDER.indexOf(b.section)
+      if (sectionOrder !== 0) return sectionOrder
       const kindOrder = a.artifact_kind.localeCompare(b.artifact_kind)
       if (kindOrder !== 0) return kindOrder
       const statusDiff = statusOrder(a.status) - statusOrder(b.status)
       if (statusDiff !== 0) return statusDiff
       return a.filename.localeCompare(b.filename)
     })
-    const groups = new Map<ArtifactKind, ModelLibraryArtifact[]>()
+    const groups = new Map<CatalogSection, Map<ArtifactKind, ModelLibraryArtifact[]>>()
     for (const artifact of sorted) {
-      const list = groups.get(artifact.artifact_kind) ?? []
+      const section = artifact.section
+      let sectionMap = groups.get(section)
+      if (!sectionMap) {
+        sectionMap = new Map<ArtifactKind, ModelLibraryArtifact[]>()
+        groups.set(section, sectionMap)
+      }
+      const list = sectionMap.get(artifact.artifact_kind) ?? []
       list.push(artifact)
-      groups.set(artifact.artifact_kind, list)
+      sectionMap.set(artifact.artifact_kind, list)
     }
     return groups
   }, [catalog, search, statusFilter])
@@ -816,23 +847,36 @@ export function ModelLibraryPanel({ isOpen }: ModelLibraryPanelProps) {
           renderEmptyState()
         )
       ) : (
-        <div className="space-y-4">
-          {Array.from(groupedArtifacts.entries()).map(([kind, artifacts]) => (
-            <div key={kind} className="space-y-1">
-              <GroupHeader kind={kind} count={artifacts.length} />
-              <div className="space-y-1.5">
-                {artifacts.map((artifact) => (
-                  <ArtifactRow
-                    key={`${artifact.filename}-${artifact.canonical_relative_path}`}
-                    artifact={artifact}
-                    modelsDir={catalog?.models_dir ?? ''}
-                    onDownload={handleStartDownload}
-                    isDownloading={isDownloading}
-                  />
-                ))}
+        <div className="space-y-6">
+          {Array.from(groupedArtifacts.entries()).map(([section, sectionArtifacts]) => {
+            const sectionCount = Array.from(sectionArtifacts.values()).reduce(
+              (sum, list) => sum + list.length,
+              0,
+            )
+            return (
+              <div key={section} className="space-y-2">
+                <SectionHeader section={section} count={sectionCount} />
+                <div className="space-y-4">
+                  {Array.from(sectionArtifacts.entries()).map(([kind, artifacts]) => (
+                    <div key={`${section}-${kind}`} className="space-y-1">
+                      <GroupHeader kind={kind} count={artifacts.length} />
+                      <div className="space-y-1.5">
+                        {artifacts.map((artifact) => (
+                          <ArtifactRow
+                            key={`${artifact.filename}-${artifact.canonical_relative_path}`}
+                            artifact={artifact}
+                            modelsDir={catalog?.models_dir ?? ''}
+                            onDownload={handleStartDownload}
+                            isDownloading={isDownloading}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
 
