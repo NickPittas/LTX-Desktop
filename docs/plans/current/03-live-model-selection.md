@@ -7,6 +7,59 @@ without leaving their current profile as the default/advanced fallback. This is
 the latest agreed architecture; it supersedes any older "global model switch"
 framing in the archived plans.
 
+## Status (2026-06-29) — implemented & validated at code/test/build level (uncommitted)
+
+Phases 1–4 are implemented and validated. Step 4 is **no longer "pending"**;
+it is **code/test/build-complete but uncommitted**, with only an optional live
+smoke and the commit/push decision remaining. Phase 5 (A2V / IC-LoRA / retake)
+remains **deferred by design**.
+
+### Completed this session
+
+- **Prior HDR commit `d42f226` pushed to `main`.**
+- **Phase 1 — backend contract / options endpoint.** `model_selection` request
+  field added; admin-guarded `GET /api/models/model-options` returns
+  backend-owned option DTOs (workflow-aware, scanner-derived). OpenAPI
+  regenerated.
+- **Phase 2 — T2V/I2V request-scoped resolver + cache/text-cache threading.**
+  Bad/unsupported selections reject with a clear error; A2V and the API
+  profile reject when a selection is present; pipeline cache key includes the
+  selection + effective component paths; text prompt cache includes model
+  identity so GGUF-vs-full-Gemma text encoders do not leak across selections.
+- **Phase 4 — frontend prompt-box Model popover.** Renders backend-owned
+  options only (grouped, with disabled reasons shown verbatim — no inference);
+  `Auto` / current-profile default; `model_selection` is sent **only** for
+  video T2V/I2V; A2V/API and other deferred modes clear/disable the field.
+
+### Oracle backend-review blockers fixed
+
+- Extra fields forbidden on `model_selection`-bearing requests (camelCase
+  `modelSelection` now 422s instead of being silently ignored).
+- GGUF options are enabled only when **runtime-ready** (not merely installed).
+- Distilled override clears split sidecars (no stale sidecar leak).
+- Effective distilled LoRA path is part of the cache key.
+- Selection-specific rejections run **before** generic spec validation, so
+  errors are precise.
+
+### Validation evidence
+
+- `rtk npx pnpm backend:test -- tests/test_generation.py tests/test_ltx_components.py tests/test_models.py` → **175 passed**.
+- Full backend suite (run earlier by the fixer) → **987 passed**.
+- `rtk npx pnpm typecheck` → **passed** (TypeScript + Pyright, 0 errors).
+- `rtk npx pnpm build:frontend` → **passed**.
+- `openapi:generate` is **idempotent**. Note: `openapi:check` exits non-zero
+  **only while the working tree is dirty** — the generated OpenAPI necessarily
+  differs from HEAD until the change is committed; this is expected, not a
+  failure.
+
+### Remaining before Step 4 is fully closed
+
+- **Optional** real T2V/I2V live smoke — code/test/build validation is already
+  green, so the smoke is confirmation, not a gate.
+- **Commit / push decision** — Step 4 work is currently **uncommitted**.
+- **Phase 5 (A2V / IC-LoRA / retake)** remains deferred by design until the
+  core T2V/I2V path + cache-key hardening have held up in real use.
+
 ## Agreed architecture
 
 ### Frontend — prompt-box compact Model popover

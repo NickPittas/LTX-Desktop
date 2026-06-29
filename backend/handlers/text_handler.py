@@ -6,12 +6,14 @@ from threading import RLock
 from typing import TYPE_CHECKING
 
 from _routes._errors import HTTPError
+from api_types import ModelCheckpointID
 from handlers.base import StateHandlerBase, with_state_lock
 from runtime_config.model_download_specs import (
     get_downloaded_ltx_model_id,
     get_existing_cp_path,
     get_ltx_model_spec,
     is_cp_downloaded,
+    resolve_model_path,
 )
 from state.app_state_types import AppState, TextEncodingResult
 
@@ -38,14 +40,22 @@ class TextHandler(StateHandlerBase):
         return bool(c.text_encoder_root) and c.text_encoder_format in ("hf_folder", "gguf", "safetensors")
 
     @with_state_lock
-    def _get_cached_prompt(self, prompt: str, enhance_prompt: bool) -> TextEncodingResult | None:
+    def _get_cached_prompt(
+        self, prompt: str, enhance_prompt: bool, model_identity: str
+    ) -> TextEncodingResult | None:
         te = self.state.text_encoder
         if te is None:
             return None
-        return te.prompt_cache.get((prompt.strip(), enhance_prompt))
+        return te.prompt_cache.get((prompt.strip(), enhance_prompt, model_identity))
 
     @with_state_lock
-    def _cache_prompt(self, prompt: str, enhance_prompt: bool, result: TextEncodingResult) -> None:
+    def _cache_prompt(
+        self,
+        prompt: str,
+        enhance_prompt: bool,
+        model_identity: str,
+        result: TextEncodingResult,
+    ) -> None:
         te = self.state.text_encoder
         if te is None:
             return
@@ -54,7 +64,7 @@ class TextHandler(StateHandlerBase):
         if max_size <= 0:
             return
 
-        key = (prompt.strip(), enhance_prompt)
+        key = (prompt.strip(), enhance_prompt, model_identity)
         if key in te.prompt_cache:
             del te.prompt_cache[key]
         elif len(te.prompt_cache) >= max_size:
@@ -70,8 +80,44 @@ class TextHandler(StateHandlerBase):
     def clear_api_embeddings(self) -> None:
         self._set_api_embeddings(None)
 
-    def should_use_local_encoding(self) -> bool:
-        """Decide whether to use local text encoding based on availability."""
+    def _selected_checkpoint_path(self, model_selection: ModelCheckpointID | None) -> str | None:
+        """Canonical placement path for a present selection (no existence check).
+
+        Selection is validated/installed-checked by the pipeline handler before
+        text encoding runs, so this only resolves the canonical path string.
+        """
+        if model_selection is None:
+            return None
+        return str(resolve_model_path(self.models_dir, model_selection))
+
+    def _effective_model_identity(self, model_selection: ModelCheckpointID | None) -> str:
+        """Effective base model identity used to namespace prompt/API caches.
+
+        Preference order: selected checkpoint canonical path → active profile
+        transformer path → downloaded LTX model id. Including this in the cache
+        key ensures prompt embeddings never leak across live model selections
+        (Step 4 / Phase 2).
+        """
+        if model_selection is not None:
+            return str(resolve_model_path(self.models_dir, model_selection))
+        profile_id = self.state.active_model_profile_id
+        if profile_id is not None:
+            profile = next((p for p in self.state.model_profiles if p.id == profile_id), None)
+            if profile is not None and profile.components.transformer:
+                return profile.components.transformer
+        model_id = get_downloaded_ltx_model_id(self.models_dir)
+        return model_id or ""
+
+    def should_use_local_encoding(
+        self, model_selection: ModelCheckpointID | None = None
+    ) -> bool:
+        """Decide whether to use local text encoding based on availability.
+
+        Text-encoder availability is orthogonal to the base video transformer
+        selection, so ``model_selection`` does not change the result; it is
+        accepted for call-site symmetry with the other text methods.
+        """
+        del model_selection
         if self._active_profile_provides_local_encoder():
             return True
 
@@ -88,7 +134,12 @@ class TextHandler(StateHandlerBase):
             return settings.use_local_text_encoder  # setting is tiebreaker for legacy official models only
         return local_available  # use whichever is available
 
-    def prepare_text_encoding(self, prompt: str, enhance_prompt: bool) -> None:
+    def prepare_text_encoding(
+        self,
+        prompt: str,
+        enhance_prompt: bool,
+        model_selection: ModelCheckpointID | None = None,
+    ) -> None:
         """Validate settings and prepare text embeddings for a generation run.
 
         Raises RuntimeError with a prefixed message if text encoding is
@@ -111,9 +162,13 @@ class TextHandler(StateHandlerBase):
                 "Either enter an LTX API Key in Settings, or enable the Local Text Encoder."
             )
 
-        use_local = self.should_use_local_encoding()
-        gemma_root = self.resolve_gemma_root()
-        embeddings = self._prepare_api_embeddings(prompt, enhance_prompt)
+        use_local = self.should_use_local_encoding(model_selection)
+        gemma_root = self.resolve_gemma_root(model_selection)
+        model_identity = self._effective_model_identity(model_selection)
+        selected_checkpoint_path = self._selected_checkpoint_path(model_selection)
+        embeddings = self._prepare_api_embeddings(
+            prompt, enhance_prompt, model_identity, selected_checkpoint_path
+        )
 
         if not use_local and embeddings is None and gemma_root is None:
             raise RuntimeError(
@@ -121,7 +176,13 @@ class TextHandler(StateHandlerBase):
                 "Please download the text encoder from Settings or check your API key."
             )
 
-    def resolve_gemma_root(self) -> str | None:
+    def resolve_gemma_root(
+        self, model_selection: ModelCheckpointID | None = None
+    ) -> str | None:
+        # The text-encoder root is independent of the base video transformer
+        # selection, so ``model_selection`` does not change the result; accepted
+        # for call-site symmetry.
+        del model_selection
         if not self.should_use_local_encoding():
             return None
         profile_id = self.state.active_model_profile_id
@@ -134,7 +195,13 @@ class TextHandler(StateHandlerBase):
             return None
         return str(get_existing_cp_path(self.models_dir, get_ltx_model_spec(model_id).text_encoder_cp))
 
-    def _prepare_api_embeddings(self, prompt: str, enhance_prompt: bool) -> TextEncodingResult | None:
+    def _prepare_api_embeddings(
+        self,
+        prompt: str,
+        enhance_prompt: bool,
+        model_identity: str,
+        selected_checkpoint_path: str | None,
+    ) -> TextEncodingResult | None:
         if self.should_use_local_encoding():
             self.clear_api_embeddings()
             return None
@@ -144,7 +211,7 @@ class TextHandler(StateHandlerBase):
             self.clear_api_embeddings()
             return None
 
-        cached = self._get_cached_prompt(prompt, enhance_prompt)
+        cached = self._get_cached_prompt(prompt, enhance_prompt, model_identity)
         if cached is not None:
             self._set_api_embeddings(cached)
             return cached
@@ -153,17 +220,23 @@ class TextHandler(StateHandlerBase):
         if te is None:
             return None
 
-        model_id = get_downloaded_ltx_model_id(self.models_dir)
-        if model_id is None:
-            raise HTTPError(409, "NO_DOWNLOADED_LTX_MODEL")
+        # API embedding checkpoint path follows the live selection when present;
+        # otherwise the legacy downloaded distilled model checkpoint is used.
+        if selected_checkpoint_path is not None:
+            checkpoint_path = selected_checkpoint_path
+        else:
+            model_id = get_downloaded_ltx_model_id(self.models_dir)
+            if model_id is None:
+                raise HTTPError(409, "NO_DOWNLOADED_LTX_MODEL")
+            checkpoint_path = str(get_existing_cp_path(self.models_dir, get_ltx_model_spec(model_id).model_cp))
 
         encoded = te.service.encode_via_api(
             prompt=prompt,
             api_key=settings.ltx_api_key,
-            checkpoint_path=str(get_existing_cp_path(self.models_dir, get_ltx_model_spec(model_id).model_cp)),
+            checkpoint_path=checkpoint_path,
             enhance_prompt=enhance_prompt,
         )
         if encoded is not None:
-            self._cache_prompt(prompt, enhance_prompt, encoded)
+            self._cache_prompt(prompt, enhance_prompt, model_identity, encoded)
             self._set_api_embeddings(encoded)
         return encoded

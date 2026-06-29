@@ -165,6 +165,9 @@ export function useGeneration(): UseGenerationReturn {
       if (settings.outputFormat && settings.outputFormat !== 'mp4') {
         body.output_format = settings.outputFormat
       }
+      if (settings.modelSelection) {
+        body.model_selection = settings.modelSelection
+      }
       if (imagePath) {
         body.imagePath = imagePath
       }

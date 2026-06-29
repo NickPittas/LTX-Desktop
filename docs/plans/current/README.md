@@ -50,7 +50,7 @@ records status only and does not change sequencing.
 | 1 — Finish / reconcile uncommitted code (`01-finish-uncommitted-code.md`) | 🔄 in-progress | IC-LoRA/text-handler validation, GGUF helper decision (resolved: removed), Electron logging ride-along. **HDR gate/status: the Lane D "option (a) temporary re-gate" is OBSOLETE — a wrong-turn superseded by user clarification (2026-06-29).** HDR is no longer parked behind a re-gate; it is **`supported`** as of Step 2 (smoke passed). Step 1's own reconcile items (commit-staging sign-off) remain; the HDR gate is no longer a blocker. |
 | 2 — HDR closeout, validation, and status cleanup (`02-hdr-completion-and-testing.md`) | ✅ completed | HDR is **`supported`**. All four implementation lanes (A backend/API, B SDR proxy encoder, C scanner/resolver flip + tests, D UI proxy preview + EXR reveal) landed. **End-to-end smoke PASSED (2026-06-29):** real HDR generation succeeded after the audio-context fix — endpoint **200**; **9 linear EXR frames** at `…/outputs/hdr_20260629_145849_645d0893_exr`; SDR proxy `…/hdr_20260629_145849_645d0893_exr_proxy.mp4` = **H.264, yuv420p, BT.709, 512×512, 9 frames**. Prior validation: **238 targeted backend tests**, `pnpm typecheck`, `pnpm build:frontend` all passed. Step 3 (commit) unblocked. |
 | 3 — Commit validated current work | ⏳ pending (unblocked) | Steps 1 & 2 done and HDR is `supported`; stage enumerated files only; no push without explicit confirmation. |
-| 4 — Live model selection / request-scoped profile switching (`03-live-model-selection.md`) | ⏳ pending | Backend contract first, then request-scoped resolver + cache-key hardening, then frontend popover. |
+| 4 — Live model selection / request-scoped profile switching (`03-live-model-selection.md`) | ✅ implemented / validated (uncommitted) | Phases 1–4 landed: backend `model_selection` request field + admin-guarded `GET /api/models/model-options` (workflow-aware, scanner-derived DTOs); T2V/I2V request-scoped resolver + pipeline cache key + text-cache threading with reject-on-bad-selection (A2V/API reject when selection present); frontend prompt-box Model popover (backend-owned options, disabled reasons verbatim, no inference, request-scoped for video T2V/I2V only). Oracle backend-review blockers fixed (extra fields → 422, GGUF options runtime-gated, distilled sidecar/LoRA-path cache correctness, selection-specific rejections before spec validation). Validation (2026-06-29): 175 targeted + 987 full backend tests passed; `typecheck` (TS + Pyright 0 errors) + `build:frontend` green; `openapi:generate` idempotent. Remaining: optional real T2V/I2V smoke + commit/push decision. Phase 5 (A2V/IC-LoRA/retake) deferred by design. |
 | 5 — Deferred and stale follow-ups (`04-deferred-and-stale-followups.md`) | ⏳ pending | Pulled in deliberately, not opportunistically. |
 
 ---
@@ -61,7 +61,7 @@ records status only and does not change sequencing.
 |---|---|---|
 | 1 | [01-finish-uncommitted-code.md](01-finish-uncommitted-code.md) | Reconcile/validate the current uncommitted working-tree changes before anything new. |
 | 2 | [02-hdr-completion-and-testing.md](02-hdr-completion-and-testing.md) | HDR IC-LoRA is **implemented** and **validated** in the backend/UI path; **HDR is `supported`** — implementation lanes A–D landed and the **real-asset end-to-end smoke passed** (2026-06-29: endpoint 200; 9 linear EXR frames + H.264 yuv420p BT.709 512×512 9-frame SDR proxy). Prior validation: 238 targeted backend tests + `typecheck` + `build:frontend`. Step 3 (commit) is unblocked. |
-| 3 | [03-live-model-selection.md](03-live-model-selection.md) | Live, request-scoped model selection with backend-owned options; prompt-box Model popover. |
+| 3 | [03-live-model-selection.md](03-live-model-selection.md) | Live, request-scoped model selection with backend-owned options; prompt-box Model popover. **Status (2026-06-29): implemented & validated at code/test/build level (uncommitted)** — Phases 1–4 landed (backend `model_selection` + admin-guarded `GET /api/models/model-options`; T2V/I2V resolver + pipeline/text cache-key threading; frontend prompt-box Model popover). Validation: 175 targeted + 987 full backend tests, `typecheck`, `build:frontend` all green. Remaining: optional real T2V/I2V smoke + commit/push decision. Phase 5 deferred by design. |
 | 4 | [04-deferred-and-stale-followups.md](04-deferred-and-stale-followups.md) | Explicit backlog of deferred / superseded items so they are not accidentally reopened. |
 
 ---
@@ -95,6 +95,22 @@ Work proceeds top-to-bottom. Later steps depend on earlier ones.
 4. **Live model selection / request-scoped profile switching** — see
    `03-live-model-selection.md`. Build the backend contract first, then
    request-scoped resolver context, T2V/I2V first, then the frontend popover.
+   **Status (2026-06-29): Phases 1–4 implemented & validated at the
+   code/test/build level (uncommitted)** — backend `model_selection` request
+   field + admin-guarded `GET /api/models/model-options` (workflow-aware,
+   scanner-derived); T2V/I2V request-scoped resolver + pipeline cache key +
+   text-prompt-cache threading, with reject-on-bad-selection (A2V/API reject
+   when a selection is present); frontend prompt-box Model popover rendering
+   backend-owned options only (disabled reasons verbatim, no inference;
+   `model_selection` sent for video T2V/I2V only, cleared/disabled for A2V/API
+   and deferred modes). Oracle backend-review blockers fixed (extra fields →
+   422, GGUF options enabled only when runtime-ready, distilled override clears
+   split sidecars, effective distilled LoRA path in cache key, selection-specific
+   rejections before generic spec validation). Validation: 175 targeted + 987
+   full backend tests passed; `typecheck` (TS + Pyright 0 errors) +
+   `build:frontend` green; `openapi:generate` idempotent. Remaining: optional
+   real T2V/I2V live smoke + commit/push decision. Phase 5 (A2V/IC-LoRA/retake)
+   stays deferred by design.
 5. **Deferred follow-ups** — see `04-deferred-and-stale-followups.md`. Pulled in
    deliberately, not opportunistically.
 

@@ -699,6 +699,61 @@ class ModelLibraryScanResponse(BaseModel):
 
 
 # ============================================================
+# Model Selection (live model switching — Step 4 / Phase 1)
+# ============================================================
+
+#: Workflow context for the backend-owned model-options endpoint. The backend
+#: decides which workflows are eligible for live model selection in Phase 1
+#: (text-to-video, image-to-video). Other workflows enumerate the same base
+#: transformer candidates but are uniformly disabled with an unsupported-
+#: workflow reason.
+ModelSelectionWorkflow: TypeAlias = Literal[
+    "text-to-video",
+    "image-to-video",
+    "audio-to-video",
+    "ic-lora",
+    "retake",
+]
+
+
+class ModelSelectionOption(BaseModel):
+    """A single selectable base video transformer candidate for a workflow.
+
+    All catalog-like fields (label/group/section/variant_group/repo/downloadable/
+    canonical paths) are derived from
+    :func:`runtime_config.model_download_specs.get_model_cp_spec`; no filesystem
+    paths are hardcoded here. ``installed`` reflects the canonical placement
+    under the effective models dir; ``disabled_reason`` encodes either a missing
+    checkpoint (supported workflow) or an unsupported workflow.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: ModelCheckpointID
+    label: str
+    group: str
+    section: CatalogSection
+    variant_group: str
+    installed: bool
+    disabled_reason: str | None = None
+    repo_id: str
+    source_url: str
+    canonical_relative_path: str
+    expected_absolute_path: str
+    downloadable: bool
+
+
+class ModelSelectionOptionsResponse(BaseModel):
+    """Backend-owned response for ``GET /api/models/model-options``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workflow: ModelSelectionWorkflow
+    models_dir: str
+    options: list[ModelSelectionOption]
+
+
+# ============================================================
 # Request Models
 # ============================================================
 
@@ -730,11 +785,21 @@ class GenerateVideoModelsSpecsResponse(BaseModel):
 
 
 class GenerateVideoRequest(BaseModel):
-    model_config = ConfigDict(strict=True)
+    # ``extra="forbid"`` rejects unknown keys (e.g. a stale/misspelled
+    # ``modelSelection`` camelCase field) with 422 instead of silently ignoring
+    # them and falling back to no-selection behavior. Strict mode is preserved.
+    model_config = ConfigDict(strict=True, extra="forbid")
 
     prompt: NonEmptyPrompt
     resolution: LTXVideoGenResolution = "1080p"
     model: LTXVideoGenPipeline = "fast"
+    # Live model selection (Step 4 / Phase 1): optional explicit base video
+    # transformer checkpoint. ``None`` preserves the legacy ``model``-based
+    # fast/pro routing — the two fields are NOT mutually concepts today;
+    # ``model`` keeps driving the pipeline. Phase 1 only establishes the DTO
+    # contract (acceptance/rejection); runtime routing arrives in Phase 2.
+    # Strict mode still 422s on an unknown literal or a non-string type.
+    model_selection: ModelCheckpointID | None = None
     cameraMotion: VideoCameraMotion = "none"
     negativePrompt: str = ""
     duration: LTXVideoGenDuration = 5

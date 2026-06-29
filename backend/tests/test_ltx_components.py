@@ -400,3 +400,150 @@ class TestResolveComponents:
         key_with = resolve_components(with_lora).cache_key
         assert key_without != key_with
         assert "/m/distilled-lora.safetensors" in key_with
+
+
+# ------------------------------------------------------------------
+# Step 4 / Phase 2: live model selection transformer override
+# ------------------------------------------------------------------
+
+
+class TestSelectedTransformerOverride:
+    """Live selection overrides only the transformer, reusing profile sidecars."""
+
+    def _split_profile(self) -> ModelProfilePayload:
+        return _profile(
+            components={
+                "transformer": "/m/ltx-2.3-22b-dev-orig.gguf",
+                "transformer_format": "gguf",
+                "text_projection": "/m/tp.safetensors",
+                "embeddings_connector": "/m/ec.safetensors",
+                "video_vae": "/m/vvae.safetensors",
+                "audio_vae": "/m/avae.safetensors",
+                "upsampler": "/m/ups.safetensors",
+                "text_encoder_root": "/m/gemma-gguf",
+                "text_encoder_format": "gguf",
+                "mmproj": "/m/mmproj-BF16.gguf",
+                "official_adapters": {"distilled_lora_384_1_1": "/m/distilled-lora.safetensors"},
+            },
+            profile_id="split-profile",
+        )
+
+    def test_distilled_override_changes_transformer_format_and_family(self):
+        profile = self._split_profile()
+        resolved = resolve_components(
+            profile,
+            selected_transformer_path="/m/ltx-2.3-22b-distilled.safetensors",
+            selected_cp_id="ltx-2.3-22b-distilled",
+        )
+        assert resolved.transformer_path == "/m/ltx-2.3-22b-distilled.safetensors"
+        assert resolved.transformer_format == "safetensors"
+        assert resolved.base_family == "distilled"
+        # Phase 1 safetensors selection = distilled monolith (single builder path).
+        assert resolved.checkpoint_paths_for_filtered_builders == (
+            "/m/ltx-2.3-22b-distilled.safetensors",
+        )
+        assert checkpoint_path_arg(resolved) == "/m/ltx-2.3-22b-distilled.safetensors"
+
+    def test_dev_gguf_override_changes_transformer_format_and_family(self):
+        profile = self._split_profile()
+        resolved = resolve_components(
+            profile,
+            selected_transformer_path="/m/ltx-2.3-22b-dev-Q4_K_M.gguf",
+            selected_cp_id="ltx-2.3-22b-dev-gguf-q4-k-m",
+        )
+        assert resolved.transformer_path == "/m/ltx-2.3-22b-dev-Q4_K_M.gguf"
+        assert resolved.transformer_format == "gguf"
+        assert resolved.base_family == "dev"
+        # Split build: selected transformer first, then profile sidecars.
+        assert resolved.checkpoint_paths_for_filtered_builders == (
+            "/m/ltx-2.3-22b-dev-Q4_K_M.gguf",
+            "/m/tp.safetensors",
+            "/m/ec.safetensors",
+            "/m/vvae.safetensors",
+            "/m/avae.safetensors",
+        )
+
+    def test_override_preserves_profile_sidecar_components(self):
+        profile = self._split_profile()
+        resolved = resolve_components(
+            profile,
+            selected_transformer_path="/m/ltx-2.3-22b-dev-Q6_K.gguf",
+            selected_cp_id="ltx-2.3-22b-dev-gguf-q6-k",
+        )
+        # Sidecars are reused from the active profile unchanged.
+        assert resolved.profile_id == "split-profile"
+        assert resolved.upsampler_path == "/m/ups.safetensors"
+        assert resolved.gemma_root == "/m/gemma-gguf"
+        assert resolved.text_projection_path == "/m/tp.safetensors"
+        assert resolved.embeddings_connector_path == "/m/ec.safetensors"
+        assert resolved.video_vae_path == "/m/vvae.safetensors"
+        assert resolved.audio_vae_path == "/m/avae.safetensors"
+        assert resolved.mmproj_path == "/m/mmproj-BF16.gguf"
+        assert resolved.distilled_lora_path == "/m/distilled-lora.safetensors"
+
+    def test_distilled_override_from_split_profile_clears_sidecar_paths(self):
+        """A distilled/monolith selection override must not look like a split
+        profile: split sidecar builder paths/fields are cleared while the
+        selected GGUF (split) override preserves them."""
+        profile = self._split_profile()
+        distilled = resolve_components(
+            profile,
+            selected_transformer_path="/m/ltx-2.3-22b-distilled.safetensors",
+            selected_cp_id="ltx-2.3-22b-distilled",
+        )
+        # Monolith build: single builder path only.
+        assert distilled.transformer_format == "safetensors"
+        assert distilled.checkpoint_paths_for_filtered_builders == (
+            "/m/ltx-2.3-22b-distilled.safetensors",
+        )
+        # Split sidecar fields cleared — the bundle is not a split profile.
+        assert distilled.text_projection_path is None
+        assert distilled.embeddings_connector_path is None
+        assert distilled.video_vae_path is None
+        assert distilled.audio_vae_path is None
+        # Non-builder metadata is preserved.
+        assert distilled.upsampler_path == "/m/ups.safetensors"
+        assert distilled.gemma_root == "/m/gemma-gguf"
+        assert distilled.mmproj_path == "/m/mmproj-BF16.gguf"
+
+        # Contrast: a GGUF (split) override from the same profile keeps sidecars.
+        gguf = resolve_components(
+            profile,
+            selected_transformer_path="/m/ltx-2.3-22b-dev-Q4_K_M.gguf",
+            selected_cp_id="ltx-2.3-22b-dev-gguf-q4-k-m",
+        )
+        assert gguf.transformer_format == "gguf"
+        assert gguf.text_projection_path == "/m/tp.safetensors"
+        assert gguf.embeddings_connector_path == "/m/ec.safetensors"
+        assert gguf.video_vae_path == "/m/vvae.safetensors"
+        assert gguf.audio_vae_path == "/m/avae.safetensors"
+
+    def test_cache_key_includes_selection_marker_and_differs_from_no_selection(self):
+        profile = self._split_profile()
+        base_key = resolve_components(profile).cache_key
+        selected_key = resolve_components(
+            profile,
+            selected_transformer_path="/m/ltx-2.3-22b-distilled.safetensors",
+            selected_cp_id="ltx-2.3-22b-distilled",
+        ).cache_key
+        assert base_key != selected_key
+        assert "model_selection" in selected_key
+        assert "ltx-2.3-22b-distilled" in selected_key
+        assert "/m/ltx-2.3-22b-distilled.safetensors" in selected_key
+        # No-selection key carries no selection marker.
+        assert "model_selection" not in base_key
+
+    def test_cache_key_differs_between_distilled_and_gguf_selection(self):
+        profile = self._split_profile()
+        distilled_key = resolve_components(
+            profile,
+            selected_transformer_path="/m/ltx-2.3-22b-distilled.safetensors",
+            selected_cp_id="ltx-2.3-22b-distilled",
+        ).cache_key
+        gguf_key = resolve_components(
+            profile,
+            selected_transformer_path="/m/ltx-2.3-22b-dev-Q4_K_M.gguf",
+            selected_cp_id="ltx-2.3-22b-dev-gguf-q4-k-m",
+        ).cache_key
+        assert distilled_key != gguf_key
+        assert "ltx-2.3-22b-dev-gguf-q4-k-m" in gguf_key

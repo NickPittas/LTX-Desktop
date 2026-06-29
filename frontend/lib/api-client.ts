@@ -408,6 +408,14 @@ export class ApiClient {
 
   static getModelCatalog = makeEndpointClient('/api/models/catalog', 'get', { admin: true })
 
+  static getModelSelectionOptions(
+    query: QueryFor<'/api/models/model-options', 'get'>,
+    init?: RequestInit,
+  ): Promise<EndpointResult<'/api/models/model-options', 'get'>> {
+    const path = `/api/models/model-options${buildQueryString(query as Record<string, unknown>)}`
+    return requestEndpointResult('/api/models/model-options', 'get', [] as const, init, path, backendAdminFetch)
+  }
+
   static startModelDownload = makeEndpointClient('/api/models/download', 'post', { admin: true })
 
   static cancelModelDownload = makeEndpointClient('/api/models/download/cancel', 'post', { admin: true })

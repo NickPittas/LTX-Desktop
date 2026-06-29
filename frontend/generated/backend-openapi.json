@@ -960,6 +960,7 @@
         "type": "object"
       },
       "GenerateVideoRequest": {
+        "additionalProperties": false,
         "properties": {
           "aspectRatio": {
             "default": "16:9",
@@ -1048,6 +1049,45 @@
             ],
             "title": "Model",
             "type": "string"
+          },
+          "model_selection": {
+            "anyOf": [
+              {
+                "enum": [
+                  "ltx-2.3-22b-distilled",
+                  "ltx-2.3-spatial-upscaler-x2-1.0",
+                  "ltx-2.3-22b-ic-lora-union-control-ref0.5",
+                  "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5",
+                  "ltx-2.3-22b-ic-lora-ingredients-0.9",
+                  "ltx-2.3-22b-ic-lora-water-simulation-0.9",
+                  "ltx-2.3-22b-ic-lora-decompression-0.9",
+                  "ltx-2.3-22b-ic-lora-deblur-0.9",
+                  "ltx-2.3-22b-ic-lora-colorization-0.9",
+                  "ltx-2.3-22b-ic-lora-day-to-night-0.9",
+                  "ltx-2.3-22b-ic-lora-in-outpainting-0.9",
+                  "ltx-2.3-22b-ic-lora-instant-shave-0.9",
+                  "ltx-2.3-22b-ic-lora-cross-eyed-0.9",
+                  "ltx-2.3-22b-ic-lora-hdr-0.9",
+                  "ltx-2.3-22b-ic-lora-hdr-scene-emb",
+                  "ltx-2.3-22b-ic-lora-lipdub-0.9",
+                  "dpt-hybrid-midas",
+                  "yolox-l-torchscript",
+                  "dw-ll-ucoco-384-bs5",
+                  "gemma-3-12b-it-qat-q4_0-unquantized",
+                  "z-image-turbo",
+                  "ltx-2.3-22b-dev-gguf-q4-k-m",
+                  "ltx-2.3-22b-dev-gguf-ud-q4-k-m",
+                  "ltx-2.3-22b-dev-gguf-q6-k",
+                  "ltx-2.3-22b-dev-gguf-ud-q5-k-m",
+                  "gemma-3-12b-it-qat-gguf-mmproj"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Selection"
           },
           "negativePrompt": {
             "default": "",
@@ -3142,6 +3182,151 @@
         "title": "ModelProfilesResponse",
         "type": "object"
       },
+      "ModelSelectionOption": {
+        "additionalProperties": false,
+        "description": "A single selectable base video transformer candidate for a workflow.\n\nAll catalog-like fields (label/group/section/variant_group/repo/downloadable/\ncanonical paths) are derived from\n:func:`runtime_config.model_download_specs.get_model_cp_spec`; no filesystem\npaths are hardcoded here. ``installed`` reflects the canonical placement\nunder the effective models dir; ``disabled_reason`` encodes either a missing\ncheckpoint (supported workflow) or an unsupported workflow.",
+        "properties": {
+          "canonical_relative_path": {
+            "title": "Canonical Relative Path",
+            "type": "string"
+          },
+          "disabled_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disabled Reason"
+          },
+          "downloadable": {
+            "title": "Downloadable",
+            "type": "boolean"
+          },
+          "expected_absolute_path": {
+            "title": "Expected Absolute Path",
+            "type": "string"
+          },
+          "group": {
+            "title": "Group",
+            "type": "string"
+          },
+          "id": {
+            "enum": [
+              "ltx-2.3-22b-distilled",
+              "ltx-2.3-spatial-upscaler-x2-1.0",
+              "ltx-2.3-22b-ic-lora-union-control-ref0.5",
+              "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5",
+              "ltx-2.3-22b-ic-lora-ingredients-0.9",
+              "ltx-2.3-22b-ic-lora-water-simulation-0.9",
+              "ltx-2.3-22b-ic-lora-decompression-0.9",
+              "ltx-2.3-22b-ic-lora-deblur-0.9",
+              "ltx-2.3-22b-ic-lora-colorization-0.9",
+              "ltx-2.3-22b-ic-lora-day-to-night-0.9",
+              "ltx-2.3-22b-ic-lora-in-outpainting-0.9",
+              "ltx-2.3-22b-ic-lora-instant-shave-0.9",
+              "ltx-2.3-22b-ic-lora-cross-eyed-0.9",
+              "ltx-2.3-22b-ic-lora-hdr-0.9",
+              "ltx-2.3-22b-ic-lora-hdr-scene-emb",
+              "ltx-2.3-22b-ic-lora-lipdub-0.9",
+              "dpt-hybrid-midas",
+              "yolox-l-torchscript",
+              "dw-ll-ucoco-384-bs5",
+              "gemma-3-12b-it-qat-q4_0-unquantized",
+              "z-image-turbo",
+              "ltx-2.3-22b-dev-gguf-q4-k-m",
+              "ltx-2.3-22b-dev-gguf-ud-q4-k-m",
+              "ltx-2.3-22b-dev-gguf-q6-k",
+              "ltx-2.3-22b-dev-gguf-ud-q5-k-m",
+              "gemma-3-12b-it-qat-gguf-mmproj"
+            ],
+            "title": "Id",
+            "type": "string"
+          },
+          "installed": {
+            "title": "Installed",
+            "type": "boolean"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          },
+          "section": {
+            "enum": [
+              "full",
+              "kijai",
+              "gguf",
+              "addons"
+            ],
+            "title": "Section",
+            "type": "string"
+          },
+          "source_url": {
+            "title": "Source Url",
+            "type": "string"
+          },
+          "variant_group": {
+            "title": "Variant Group",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "group",
+          "section",
+          "variant_group",
+          "installed",
+          "repo_id",
+          "source_url",
+          "canonical_relative_path",
+          "expected_absolute_path",
+          "downloadable"
+        ],
+        "title": "ModelSelectionOption",
+        "type": "object"
+      },
+      "ModelSelectionOptionsResponse": {
+        "additionalProperties": false,
+        "description": "Backend-owned response for ``GET /api/models/model-options``.",
+        "properties": {
+          "models_dir": {
+            "title": "Models Dir",
+            "type": "string"
+          },
+          "options": {
+            "items": {
+              "$ref": "#/components/schemas/ModelSelectionOption"
+            },
+            "title": "Options",
+            "type": "array"
+          },
+          "workflow": {
+            "enum": [
+              "text-to-video",
+              "image-to-video",
+              "audio-to-video",
+              "ic-lora",
+              "retake"
+            ],
+            "title": "Workflow",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow",
+          "models_dir",
+          "options"
+        ],
+        "title": "ModelSelectionOptionsResponse",
+        "type": "object"
+      },
       "ModelStatusItem": {
         "properties": {
           "downloaded": {
@@ -5091,6 +5276,66 @@
           }
         },
         "summary": "Route Ltx Recommendation",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/models/model-options": {
+      "get": {
+        "description": "Backend-owned model-options catalog for live model selection.\n\nAdmin-guarded like ``/api/models/catalog`` because the response exposes\nabsolute placement paths and mirrors catalog-like data. Read-only: never\nmutates or downloads.",
+        "operationId": "route_model_options_api_models_model_options_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "workflow",
+            "required": true,
+            "schema": {
+              "enum": [
+                "text-to-video",
+                "image-to-video",
+                "audio-to-video",
+                "ic-lora",
+                "retake"
+              ],
+              "title": "Workflow",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelSelectionOptionsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPErrorResponse"
+                }
+              }
+            },
+            "description": "Client Error"
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPErrorResponse"
+                }
+              }
+            },
+            "description": "Server Error"
+          }
+        },
+        "summary": "Route Model Options",
         "tags": [
           "models"
         ]

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from api_types import ModelComponentPaths, ModelProfilePayload
 from services.ltx_api_client.ltx_api_client import LTXAPIClientError
+from runtime_config.model_download_specs import resolve_model_path
 from state.app_state_types import GpuSlot, VideoPipelineState
 from tests.http_error_assertions import assert_http_error
 from tests.fakes.services import FakeFastVideoPipeline
@@ -1429,6 +1430,263 @@ class TestEmptyPromptRejected:
     def test_missing_image_prompt_rejected(self, client):
         r = client.post("/api/generate-image", json={})
         assert r.status_code == 422
+
+
+class TestModelSelectionDto:
+    """Step 4 / Phase 1: ``model_selection`` DTO contract only.
+
+    Phase 1 establishes acceptance/rejection of the optional field. It is NOT
+    routed yet — when present and valid it simply runs like current behavior.
+    Runtime routing (and any bad/unsupported handling) arrives in Phase 2.
+    """
+
+    def test_omitted_still_works(self, client, test_state, fake_services, create_fake_model_files):
+        create_fake_model_files()
+        _enable_local_text_encoding(test_state)
+
+        r = client.post("/api/generate", json=_T2V_JSON)
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "complete"
+
+    def test_null_still_works(self, client, test_state, fake_services, create_fake_model_files):
+        create_fake_model_files()
+        _enable_local_text_encoding(test_state)
+
+        r = client.post("/api/generate", json={**_T2V_JSON, "model_selection": None})
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "complete"
+
+    def test_valid_candidate_literal_accepted_by_request_validation(
+        self, client, test_state, fake_services, create_fake_model_files
+    ):
+        # Distilled is the transformer installed by create_fake_model_files, so a
+        # valid candidate runs like current behavior (no Phase 1 routing change).
+        create_fake_model_files()
+        _enable_local_text_encoding(test_state)
+
+        r = client.post(
+            "/api/generate",
+            json={**_T2V_JSON, "model_selection": "ltx-2.3-22b-distilled"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "complete"
+
+    def test_invalid_string_value_rejected_with_422(self, client):
+        r = client.post(
+            "/api/generate",
+            json={**_T2V_JSON, "model_selection": "not-a-real-model"},
+        )
+        assert r.status_code == 422
+
+    def test_wrong_type_rejected_with_422(self, client):
+        # Strict mode: an int is neither a matching literal nor None → 422.
+        r = client.post(
+            "/api/generate",
+            json={**_T2V_JSON, "model_selection": 123},
+        )
+        assert r.status_code == 422
+
+    def test_camelcase_model_selection_field_rejected(self, client):
+        # extra="forbid": a stale/misspelled camelCase ``modelSelection`` must
+        # 422 instead of being silently ignored and falling back to no-selection.
+        r = client.post(
+            "/api/generate",
+            json={**_T2V_JSON, "modelSelection": "ltx-2.3-22b-distilled"},
+        )
+        assert r.status_code == 422
+
+
+class TestModelSelectionRouting:
+    """Step 4 / Phase 2: runtime model_selection resolver + cache hardening.
+
+    Only absent/None falls back to current behavior; present-but-bad/unsupported
+    selections reject clearly. T2V/I2V only (A2V rejects).
+    """
+
+    def test_selected_distilled_routes_and_records_selected_checkpoint_path(
+        self, client, test_state, fake_services, create_fake_model_files
+    ):
+        create_fake_model_files()
+        _enable_local_text_encoding(test_state)
+
+        r = client.post(
+            "/api/generate",
+            json={**_T2V_JSON, "model_selection": "ltx-2.3-22b-distilled"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "complete"
+
+        expected = str(
+            resolve_model_path(test_state.config.default_models_dir, "ltx-2.3-22b-distilled")
+        )
+        assert fake_services.fast_video_pipeline.last_checkpoint_path == expected
+
+    def test_selected_missing_gguf_rejects_with_not_installed(
+        self, client, test_state, create_fake_model_files
+    ):
+        # Distilled bundle installed, but the GGUF candidate is not.
+        create_fake_model_files()
+
+        r = client.post(
+            "/api/generate",
+            json={**_T2V_JSON, "model_selection": "ltx-2.3-22b-dev-gguf-q4-k-m"},
+        )
+        canonical = str(
+            resolve_model_path(
+                test_state.config.default_models_dir, "ltx-2.3-22b-dev-gguf-q4-k-m"
+            )
+        )
+        assert r.status_code == 409
+        payload = r.json()
+        assert payload["code"] == "MODEL_SELECTION_NOT_INSTALLED"
+        assert canonical in payload["message"]
+
+    def test_present_model_selection_with_audio_rejects_as_unsupported_for_a2v(
+        self, client, test_state, create_fake_model_files, tmp_path
+    ):
+        create_fake_model_files()
+        audio_file = tmp_path / "test_audio.wav"
+        _write_test_wav(audio_file)
+
+        r = client.post(
+            "/api/generate",
+            json={
+                **_T2V_JSON,
+                "audioPath": str(audio_file),
+                "model_selection": "ltx-2.3-22b-distilled",
+            },
+        )
+        assert r.status_code == 409
+        payload = r.json()
+        assert payload["code"] == "MODEL_SELECTION_UNSUPPORTED_FOR_A2V"
+
+    def test_non_base_cp_literal_rejects_with_unsupported_selection(self, client):
+        # Valid ModelCheckpointID but not a selectable base video transformer.
+        r = client.post(
+            "/api/generate",
+            json={**_T2V_JSON, "model_selection": "ltx-2.3-spatial-upscaler-x2-1.0"},
+        )
+        assert r.status_code == 422
+        payload = r.json()
+        assert payload["code"] == "UNSUPPORTED_MODEL_SELECTION"
+
+    def test_switching_selection_changes_pipeline_cache(
+        self, client, test_state, fake_services, create_fake_model_files, tmp_path
+    ):
+        """Create/load once for distilled, then a different dev GGUF selection
+        causes a new pipeline/cache key (cache miss → new ``create()``).
+
+        Uses an active profile with split components so the dev GGUF selection
+        can resolve its sidecars; the distilled LoRA is provided canonically so
+        the dev route can build.
+        """
+        # Active profile with split sidecar components (reuses the GGUF helper).
+        paths = _make_gguf_profile(test_state, tmp_path)
+        # Distilled monolith + upscaler + text encoder installed canonically.
+        create_fake_model_files()
+
+        # Install the selected dev GGUF candidate at its canonical placement path.
+        gguf_cp = "ltx-2.3-22b-dev-gguf-q4-k-m"
+        gguf_path = resolve_model_path(test_state.config.default_models_dir, gguf_cp)
+        gguf_path.parent.mkdir(parents=True, exist_ok=True)
+        gguf_path.write_bytes(b"GGUF-Q4")
+
+        # Canonical distilled LoRA required by the dev route.
+        distilled_lora = (
+            test_state.config.default_models_dir
+            / "adapters"
+            / "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
+        )
+        distilled_lora.parent.mkdir(parents=True, exist_ok=True)
+        distilled_lora.write_bytes(b"LORA")
+
+        # Gen 1: select distilled → override produces a distilled monolith build.
+        r1 = client.post(
+            "/api/generate",
+            json={**_T2V_JSON, "model_selection": "ltx-2.3-22b-distilled"},
+        )
+        assert r1.status_code == 200, r1.text
+        distilled_expected = str(
+            resolve_model_path(test_state.config.default_models_dir, "ltx-2.3-22b-distilled")
+        )
+        assert fake_services.fast_video_pipeline.last_checkpoint_path == distilled_expected
+        assert fake_services.fast_video_pipeline.last_base_family == "distilled"
+
+        # Gen 2: select a different installed dev GGUF → cache key differs → the
+        # fast pipeline is recreated with the GGUF split build (new path tuple),
+        # proving the selection switch invalidated the cache.
+        r2 = client.post(
+            "/api/generate",
+            json={**_T2V_JSON, "model_selection": gguf_cp},
+        )
+        assert r2.status_code == 200, r2.text
+        assert fake_services.fast_video_pipeline.last_base_family == "dev"
+        # Split build tuple: selected GGUF + profile sidecars.
+        assert fake_services.fast_video_pipeline.last_checkpoint_path == (
+            str(gguf_path),
+            paths["tp"],
+            paths["ec"],
+            paths["vvae"],
+            paths["avae"],
+        )
+        # The distilled str recorded in Gen 1 was overwritten by the new create.
+        assert fake_services.fast_video_pipeline.last_checkpoint_path != distilled_expected
+
+    def test_dev_cache_key_uses_effective_distilled_lora_with_stale_explicit(
+        self, test_state, tmp_path
+    ):
+        """The dev cache key must reflect the ACTUAL effective distilled LoRA
+        path even when an explicit (stale) path is present and the handler
+        falls back to canonical. Removing the canonical fallback must change
+        the key."""
+        _make_gguf_profile(test_state, tmp_path)
+        # Point the explicit distilled LoRA at a non-existent (stale) file.
+        test_state.state.model_profiles[0].components.official_adapters[
+            "distilled_lora_384_1_1"
+        ] = str(tmp_path / "does-not-exist.safetensors")
+
+        gguf_cp = "ltx-2.3-22b-dev-gguf-q4-k-m"
+        gguf_path = resolve_model_path(test_state.config.default_models_dir, gguf_cp)
+        gguf_path.parent.mkdir(parents=True, exist_ok=True)
+        gguf_path.write_bytes(b"GGUF")
+
+        canonical_lora = (
+            test_state.config.default_models_dir
+            / "adapters"
+            / "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
+        )
+        canonical_lora.parent.mkdir(parents=True, exist_ok=True)
+        canonical_lora.write_bytes(b"LORA")
+
+        # Effective path = canonical fallback (explicit is stale) → key reflects it.
+        key = test_state.pipelines._current_cache_key(model_selection=gguf_cp)
+        assert str(canonical_lora) in key
+
+        # Remove the canonical fallback → effective path becomes None → key changes
+        # and no longer carries the canonical path.
+        canonical_lora.unlink()
+        key_after = test_state.pipelines._current_cache_key(model_selection=gguf_cp)
+        assert str(canonical_lora) not in key_after
+        assert key != key_after
+
+    def test_present_model_selection_rejects_in_forced_api_mode(self, client, test_state, fake_services):
+        # Forced API mode (local generations unsupported) + a present selection
+        # must reject clearly instead of silently routing to the API. The guard
+        # runs BEFORE generic spec validation, so _T2V_JSON's 540p (which would
+        # otherwise fail api spec validation) surfaces the selection-specific
+        # error, not a masked spec error.
+        test_state.config.local_generations_mode = "unsupported"
+        test_state.state.app_settings.ltx_api_key = "api-key"
+
+        r = client.post(
+            "/api/generate",
+            json={**_T2V_JSON, "model_selection": "ltx-2.3-22b-distilled"},
+        )
+        assert r.status_code == 409
+        payload = r.json()
+        assert payload["code"] == "MODEL_SELECTION_UNSUPPORTED_FOR_API_GENERATIONS"
+        # The API client must never have been called.
+        assert len(fake_services.ltx_api_client.text_to_video_calls) == 0
 
 
 class TestEnhancePromptFlag:

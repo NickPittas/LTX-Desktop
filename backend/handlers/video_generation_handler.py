@@ -22,6 +22,7 @@ from api_types import (
     GenerateVideoRequest,
     GenerateVideoResponse,
     ImageConditioningInput,
+    ModelCheckpointID,
     OutputFormat,
     VideoCameraMotion,
 )
@@ -100,6 +101,29 @@ class VideoGenerationHandler(StateHandlerBase):
             force_api_generations=self.config.force_api_generations,
             settings=self.state.app_settings,
         )
+        audio_path = normalize_optional_path(req.audioPath)
+
+        # Selection-specific guards come BEFORE generic spec validation so a
+        # present ``model_selection`` surfaces the right error instead of being
+        # masked by an unrelated spec failure (and there is no silent fallback
+        # when the field is present). Request-scoped selection is a local
+        # T2V/I2V-only feature (Step 4 / Phase 2).
+        if req.model_selection is not None:
+            if use_api_specs:
+                raise HTTPError(
+                    409,
+                    "Request-scoped model selection is only supported for local "
+                    "text-to-video and image-to-video generation; it cannot be "
+                    "used with API generations.",
+                    code="MODEL_SELECTION_UNSUPPORTED_FOR_API_GENERATIONS",
+                )
+            if audio_path:
+                raise HTTPError(
+                    409,
+                    "Live model selection is not supported for audio-to-video generation.",
+                    code="MODEL_SELECTION_UNSUPPORTED_FOR_A2V",
+                )
+
         validation_error = validate_generate_video_request(req, use_api_specs=use_api_specs)
         if validation_error is not None:
             raise HTTPError(422, validation_error, code="INVALID_VIDEO_GENERATION_SPEC")
@@ -114,7 +138,6 @@ class VideoGenerationHandler(StateHandlerBase):
         duration = req.duration
         fps = req.fps
 
-        audio_path = normalize_optional_path(req.audioPath)
         if audio_path:
             return self._generate_a2v(req, duration, fps, audio_path=audio_path)
 
@@ -160,7 +183,7 @@ class VideoGenerationHandler(StateHandlerBase):
         # from prompt enhancement only; image conditioning proceeds normally).
 
         try:
-            self._pipelines.load_gpu_pipeline("fast")
+            self._pipelines.load_gpu_pipeline("fast", model_selection=req.model_selection)
             self._generation.start_generation(generation_id)
 
             output_path = self.generate_video(
@@ -174,6 +197,7 @@ class VideoGenerationHandler(StateHandlerBase):
                 camera_motion=req.cameraMotion,
                 negative_prompt=req.negativePrompt,
                 output_format=req.output_format or OutputFormat.MP4,
+                model_selection=req.model_selection,
             )
             proxy_path = make_proxy_output_path(output_path, req.output_format or OutputFormat.MP4)
 
@@ -205,6 +229,7 @@ class VideoGenerationHandler(StateHandlerBase):
         camera_motion: VideoCameraMotion,
         negative_prompt: str,
         output_format: OutputFormat = OutputFormat.MP4,
+        model_selection: ModelCheckpointID | None = None,
     ) -> str:
         t_total_start = time.perf_counter()
         gen_mode = "i2v" if image is not None else "t2v"
@@ -217,7 +242,7 @@ class VideoGenerationHandler(StateHandlerBase):
 
         self._generation.update_progress("loading_model", 5, 0, total_steps)
         t_load_start = time.perf_counter()
-        pipeline_state = self._pipelines.load_gpu_pipeline("fast")
+        pipeline_state = self._pipelines.load_gpu_pipeline("fast", model_selection=model_selection)
         t_load_end = time.perf_counter()
         logger.info("[%s] Pipeline load: %.2fs", gen_mode, t_load_end - t_load_start)
 
@@ -239,14 +264,14 @@ class VideoGenerationHandler(StateHandlerBase):
 
         try:
             settings = self.state.app_settings
-            use_api_encoding = not self._text.should_use_local_encoding()
+            use_api_encoding = not self._text.should_use_local_encoding(model_selection)
             enhance_setting = settings.prompt_enhancer_enabled_i2v if image is not None else settings.prompt_enhancer_enabled_t2v
             api_enhance = use_api_encoding and enhance_setting
             pipeline_enhance = (not use_api_encoding) and enhance_setting
 
             encoding_method = "api" if use_api_encoding else "local"
             t_text_start = time.perf_counter()
-            self._text.prepare_text_encoding(enhanced_prompt, enhance_prompt=api_enhance)
+            self._text.prepare_text_encoding(enhanced_prompt, enhance_prompt=api_enhance, model_selection=model_selection)
             t_text_end = time.perf_counter()
             logger.info("[%s] Text encoding (%s): %.2fs", gen_mode, encoding_method, t_text_end - t_text_start)
 

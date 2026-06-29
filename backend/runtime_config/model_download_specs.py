@@ -28,6 +28,23 @@ logger = logging.getLogger(__name__)
 ALL_MODEL_CP_IDS = cast(tuple[ModelCheckpointID, ...], get_args(ModelCheckpointID))
 ALL_LTX_LOCAL_MODEL_IDS = cast(tuple[LTXLocalModelId, ...], get_args(LTXLocalModelId))
 
+#: Live model selection (Step 4): base video transformer CP candidates that can
+#: be selected at request time, in display order. Centralized here so the
+#: model-options endpoint (``ModelsHandler.get_model_selection_options``) and
+#: the resolver/validation (``PipelinesHandler``) share one source of truth.
+SELECTABLE_BASE_VIDEO_CP_IDS: tuple[ModelCheckpointID, ...] = (
+    "ltx-2.3-22b-distilled",
+    "ltx-2.3-22b-dev-gguf-q4-k-m",
+    "ltx-2.3-22b-dev-gguf-ud-q4-k-m",
+    "ltx-2.3-22b-dev-gguf-q6-k",
+    "ltx-2.3-22b-dev-gguf-ud-q5-k-m",
+)
+
+
+def is_selectable_base_video_cp(cp_id: ModelCheckpointID) -> bool:
+    """True if ``cp_id`` is a live-selectable base video transformer."""
+    return cp_id in SELECTABLE_BASE_VIDEO_CP_IDS
+
 
 @dataclass(frozen=True, slots=True)
 class ModelCheckpointSpec:

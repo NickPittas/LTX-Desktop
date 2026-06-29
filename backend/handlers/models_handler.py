@@ -25,6 +25,10 @@ from api_types import (
     LTXLocalModelId,
     ModelCheckpointID,
     ModelLibraryScanResponse,
+    ModelProfilePayload,
+    ModelSelectionOption,
+    ModelSelectionOptionsResponse,
+    ModelSelectionWorkflow,
     TextEncoderRecommendationResponse,
 )
 from handlers.base import StateHandlerBase
@@ -35,6 +39,8 @@ from runtime_config.model_download_specs import (
     IMG_GEN_MODEL_CP_ID,
     LTXLocalModelRelevant,
     OFFICIAL_LTX23_ADAPTERS,
+    SELECTABLE_BASE_VIDEO_CP_IDS,
+    UPSAMPLER_CP_ID,
     AdapterComponent,
     get_downloaded_ltx_model_id,
     get_ic_loras_cp_ids,
@@ -46,6 +52,7 @@ from runtime_config.model_download_specs import (
     get_model_cp_spec,
     is_cp_downloaded,
     delete_cp_path,
+    resolve_model_path,
 )
 
 if TYPE_CHECKING:
@@ -71,6 +78,39 @@ _TYPED_ADAPTER_FIELD: dict[str, str] = {
     "lipdub": "ic_lora_lipdub",
     "in_outpainting": "ic_lora_in_outpainting",
 }
+
+
+# ---- Live model selection (Step 4 / Phase 1) ----
+# Phase 1 enumerates base video transformer candidates only. The candidate list
+# is centralized in ``SELECTABLE_BASE_VIDEO_CP_IDS`` (shared with the resolver);
+# only the semantic ``group`` label and workflow-gating reasons are handler-owned.
+# No filesystem paths are hardcoded here.
+
+# Workflows eligible for live model selection in Phase 1.
+_LIVE_MODEL_SELECTION_SUPPORTED_WORKFLOWS: frozenset[ModelSelectionWorkflow] = frozenset[ModelSelectionWorkflow]({
+    "text-to-video",
+    "image-to-video",
+})
+
+_LIVE_MODEL_SELECTION_UNSUPPORTED_REASON: str = (
+    "Live model selection is currently available for text-to-video and image-to-video only"
+)
+
+_LIVE_MODEL_SELECTION_NOT_INSTALLED_REASON: str = "Model checkpoint is not installed"
+
+# Dev/GGUF selections need an active split-component profile (the runtime loads
+# the GGUF transformer plus profile-provided sidecars). Used by the model-
+# options endpoint to disable dev/GGUF candidates that cannot actually run yet.
+_LIVE_MODEL_SELECTION_DEV_REQUIRES_PROFILE_REASON: str = (
+    "Requires an active model profile with split components "
+    "(text projection, embeddings connector, VAEs), a usable upscaler, "
+    "and a distilled LoRA"
+)
+
+# Semantic grouping label shared by every Phase 1 candidate (all are base video
+# transformer choices). Kept as a constant so the frontend renders a single
+# group; finer-grained variant grouping comes from ``variant_group``.
+_LIVE_MODEL_SELECTION_BASE_GROUP: str = "Base video model"
 
 
 class ModelsHandler(StateHandlerBase):
@@ -398,3 +438,129 @@ class ModelsHandler(StateHandlerBase):
         with self._lock:
             models_dir = self.models_dir
         return scan_models(models_dir)
+
+    def _active_profile(self) -> ModelProfilePayload | None:
+        profile_id = self.state.active_model_profile_id
+        if profile_id is None:
+            return None
+        return next((p for p in self.state.model_profiles if p.id == profile_id), None)
+
+    def _canonical_distilled_lora_exists(self, models_dir: Path) -> bool:
+        """True if any official canonical distilled LoRA is installed (read-only)."""
+        for role in ("distilled_lora_384_1_1", "distilled_lora_384"):
+            adapter = OFFICIAL_LTX23_ADAPTERS.get(role)  # type: ignore[arg-type]
+            if adapter is not None and (models_dir / "adapters" / adapter.filename).is_file():
+                return True
+        return False
+
+    def _dev_option_disabled_reason(self, models_dir: Path) -> str | None:
+        """Read-only runtime-readiness check for a dev/GGUF selection.
+
+        Returns ``None`` when the selection is runnable, else a clear disabled
+        reason. Mirrors the hard requirements the fast-pipeline load path
+        enforces for a dev/GGUF base: an active split-component profile
+        providing the sidecars the GGUF/split builder needs, a usable spatial
+        upscaler, and a resolvable distilled LoRA (explicit-existing or
+        canonical fallback). Text-encoder availability is intentionally NOT
+        gated here — it is a global requirement shared with the distilled route
+        and handled separately. Never mutates the filesystem.
+        """
+        profile = self._active_profile()
+        if profile is None:
+            return _LIVE_MODEL_SELECTION_DEV_REQUIRES_PROFILE_REASON
+        c = profile.components
+        missing_sidecars = [
+            label
+            for label, val in (
+                ("text projection", c.text_projection),
+                ("embeddings connector", c.embeddings_connector),
+                ("video VAE", c.video_vae),
+                ("audio VAE", c.audio_vae),
+            )
+            if not (val and Path(val).is_file())
+        ]
+        if missing_sidecars:
+            return "Active profile is missing split components: " + ", ".join(missing_sidecars)
+        upsampler_ok = bool(c.upsampler and Path(c.upsampler).is_file()) or is_cp_downloaded(
+            models_dir, UPSAMPLER_CP_ID
+        )
+        if not upsampler_ok:
+            return (
+                "No usable spatial upscaler (profile upsampler missing and "
+                "canonical upscaler not installed)"
+            )
+        explicit_lora_ok = False
+        for role in ("distilled_lora_384_1_1", "distilled_lora_384"):
+            candidate = c.official_adapters.get(role)
+            if candidate and Path(candidate).is_file():
+                explicit_lora_ok = True
+                break
+        if not explicit_lora_ok and not self._canonical_distilled_lora_exists(models_dir):
+            return "Dev base model requires a distilled LoRA adapter (none installed)"
+        return None
+
+    def get_model_selection_options(
+        self, workflow: ModelSelectionWorkflow
+    ) -> ModelSelectionOptionsResponse:
+        """Read-only enumeration of base video transformer candidates.
+
+        Catalog-like metadata (label/group/section/variant_group/repo/
+        downloadable/canonical paths) is derived from
+        :func:`get_model_cp_spec` and :func:`resolve_model_path`; ``installed``
+        is derived from :func:`is_cp_downloaded`. Never mutates or downloads.
+
+        Gating:
+        - Supported workflows (``text-to-video``, ``image-to-video``):
+          * distilled candidate is enabled iff installed.
+          * dev/GGUF candidates are enabled iff installed AND runtime-ready
+            (active split-component profile + usable upscaler + resolvable
+            distilled LoRA); otherwise enumerated but disabled with a clear
+            reason — never fake support.
+        - All other workflows enumerate the same candidates but disable every
+          option with ``_LIVE_MODEL_SELECTION_UNSUPPORTED_REASON``.
+        """
+        # Snapshot the effective models dir under lock (matches scan_model_library);
+        # filesystem presence checks are read-only and run outside the lock.
+        with self._lock:
+            models_dir = self.models_dir
+
+        workflow_supported = workflow in _LIVE_MODEL_SELECTION_SUPPORTED_WORKFLOWS
+
+        options: list[ModelSelectionOption] = []
+        for cp_id in SELECTABLE_BASE_VIDEO_CP_IDS:
+            spec = get_model_cp_spec(cp_id)
+            installed = is_cp_downloaded(models_dir, cp_id)
+            if not workflow_supported:
+                disabled_reason: str | None = _LIVE_MODEL_SELECTION_UNSUPPORTED_REASON
+            elif not installed:
+                disabled_reason = _LIVE_MODEL_SELECTION_NOT_INSTALLED_REASON
+            elif cp_id == "ltx-2.3-22b-distilled":
+                # Distilled monolith runs via the legacy path too — enabled.
+                disabled_reason = None
+            else:
+                # Dev/GGUF: require runtime readiness (split profile + upscaler
+                # + distilled LoRA). Read-only; never mutates.
+                disabled_reason = self._dev_option_disabled_reason(models_dir)
+
+            options.append(
+                ModelSelectionOption(
+                    id=cp_id,
+                    label=spec.display_name or spec.description or spec.name,
+                    group=_LIVE_MODEL_SELECTION_BASE_GROUP,
+                    section=spec.section,
+                    variant_group=spec.variant_group,
+                    installed=installed,
+                    disabled_reason=disabled_reason,
+                    repo_id=spec.repo_id,
+                    source_url=f"https://huggingface.co/{spec.repo_id}",
+                    canonical_relative_path=str(spec.relative_path),
+                    expected_absolute_path=str(resolve_model_path(models_dir, cp_id)),
+                    downloadable=spec.downloadable,
+                )
+            )
+
+        return ModelSelectionOptionsResponse(
+            workflow=workflow,
+            models_dir=str(models_dir),
+            options=options,
+        )

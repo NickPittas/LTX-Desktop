@@ -483,6 +483,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/models/model-options": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Route Model Options
+         * @description Backend-owned model-options catalog for live model selection.
+         *
+         *     Admin-guarded like ``/api/models/catalog`` because the response exposes
+         *     absolute placement paths and mirrors catalog-like data. Read-only: never
+         *     mutates or downloads.
+         */
+        get: operations["route_model_options_api_models_model_options_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/models/text-encoder-recommendation": {
         parameters: {
             query?: never;
@@ -935,6 +959,8 @@ export interface components {
              * @enum {string}
              */
             model: "fast" | "pro";
+            /** Model Selection */
+            model_selection?: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5" | "ltx-2.3-22b-ic-lora-ingredients-0.9" | "ltx-2.3-22b-ic-lora-water-simulation-0.9" | "ltx-2.3-22b-ic-lora-decompression-0.9" | "ltx-2.3-22b-ic-lora-deblur-0.9" | "ltx-2.3-22b-ic-lora-colorization-0.9" | "ltx-2.3-22b-ic-lora-day-to-night-0.9" | "ltx-2.3-22b-ic-lora-in-outpainting-0.9" | "ltx-2.3-22b-ic-lora-instant-shave-0.9" | "ltx-2.3-22b-ic-lora-cross-eyed-0.9" | "ltx-2.3-22b-ic-lora-hdr-0.9" | "ltx-2.3-22b-ic-lora-hdr-scene-emb" | "ltx-2.3-22b-ic-lora-lipdub-0.9" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo" | "ltx-2.3-22b-dev-gguf-q4-k-m" | "ltx-2.3-22b-dev-gguf-ud-q4-k-m" | "ltx-2.3-22b-dev-gguf-q6-k" | "ltx-2.3-22b-dev-gguf-ud-q5-k-m" | "gemma-3-12b-it-qat-gguf-mmproj") | null;
             /**
              * Negativeprompt
              * @default
@@ -1625,6 +1651,64 @@ export interface components {
             active_model_profile_id?: string | null;
             /** Profiles */
             profiles?: components["schemas"]["ModelProfilePayload"][];
+        };
+        /**
+         * ModelSelectionOption
+         * @description A single selectable base video transformer candidate for a workflow.
+         *
+         *     All catalog-like fields (label/group/section/variant_group/repo/downloadable/
+         *     canonical paths) are derived from
+         *     :func:`runtime_config.model_download_specs.get_model_cp_spec`; no filesystem
+         *     paths are hardcoded here. ``installed`` reflects the canonical placement
+         *     under the effective models dir; ``disabled_reason`` encodes either a missing
+         *     checkpoint (supported workflow) or an unsupported workflow.
+         */
+        ModelSelectionOption: {
+            /** Canonical Relative Path */
+            canonical_relative_path: string;
+            /** Disabled Reason */
+            disabled_reason?: string | null;
+            /** Downloadable */
+            downloadable: boolean;
+            /** Expected Absolute Path */
+            expected_absolute_path: string;
+            /** Group */
+            group: string;
+            /**
+             * Id
+             * @enum {string}
+             */
+            id: "ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5" | "ltx-2.3-22b-ic-lora-ingredients-0.9" | "ltx-2.3-22b-ic-lora-water-simulation-0.9" | "ltx-2.3-22b-ic-lora-decompression-0.9" | "ltx-2.3-22b-ic-lora-deblur-0.9" | "ltx-2.3-22b-ic-lora-colorization-0.9" | "ltx-2.3-22b-ic-lora-day-to-night-0.9" | "ltx-2.3-22b-ic-lora-in-outpainting-0.9" | "ltx-2.3-22b-ic-lora-instant-shave-0.9" | "ltx-2.3-22b-ic-lora-cross-eyed-0.9" | "ltx-2.3-22b-ic-lora-hdr-0.9" | "ltx-2.3-22b-ic-lora-hdr-scene-emb" | "ltx-2.3-22b-ic-lora-lipdub-0.9" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo" | "ltx-2.3-22b-dev-gguf-q4-k-m" | "ltx-2.3-22b-dev-gguf-ud-q4-k-m" | "ltx-2.3-22b-dev-gguf-q6-k" | "ltx-2.3-22b-dev-gguf-ud-q5-k-m" | "gemma-3-12b-it-qat-gguf-mmproj";
+            /** Installed */
+            installed: boolean;
+            /** Label */
+            label: string;
+            /** Repo Id */
+            repo_id: string;
+            /**
+             * Section
+             * @enum {string}
+             */
+            section: "full" | "kijai" | "gguf" | "addons";
+            /** Source Url */
+            source_url: string;
+            /** Variant Group */
+            variant_group: string;
+        };
+        /**
+         * ModelSelectionOptionsResponse
+         * @description Backend-owned response for ``GET /api/models/model-options``.
+         */
+        ModelSelectionOptionsResponse: {
+            /** Models Dir */
+            models_dir: string;
+            /** Options */
+            options: components["schemas"]["ModelSelectionOption"][];
+            /**
+             * Workflow
+             * @enum {string}
+             */
+            workflow: "text-to-video" | "image-to-video" | "audio-to-video" | "ic-lora" | "retake";
         };
         /** ModelStatusItem */
         ModelStatusItem: {
@@ -3002,6 +3086,46 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LtxDownloadRecommendationResponse"] | components["schemas"]["LtxUpgradeRecommendationResponse"] | components["schemas"]["LtxOkRecommendationResponse"];
+                };
+            };
+            /** @description Client Error */
+            "4XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPErrorResponse"];
+                };
+            };
+            /** @description Server Error */
+            "5XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPErrorResponse"];
+                };
+            };
+        };
+    };
+    route_model_options_api_models_model_options_get: {
+        parameters: {
+            query: {
+                workflow: "text-to-video" | "image-to-video" | "audio-to-video" | "ic-lora" | "retake";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelSelectionOptionsResponse"];
                 };
             };
             /** @description Client Error */

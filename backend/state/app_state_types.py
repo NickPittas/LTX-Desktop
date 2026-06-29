@@ -88,14 +88,18 @@ class CachedTextEncoder(Protocol):
         ...
 
 
-def _new_prompt_cache() -> dict[tuple[str, bool], TextEncodingResult]:
+def _new_prompt_cache() -> dict[tuple[str, bool, str], TextEncodingResult]:
     return {}
 
 
 @dataclass
 class TextEncoderState:
     service: TextEncoder
-    prompt_cache: dict[tuple[str, bool], TextEncodingResult] = field(default_factory=_new_prompt_cache)
+    # Key: (prompt, enhance_prompt, model_identity). ``model_identity`` is the
+    # effective base model identity (selected checkpoint path, active profile
+    # transformer, or downloaded model id) so prompt/API embeddings never leak
+    # across live model selections (Step 4 / Phase 2).
+    prompt_cache: dict[tuple[str, bool, str], TextEncodingResult] = field(default_factory=_new_prompt_cache)
     api_embeddings: TextEncodingResult | None = None
     cached_encoder: CachedTextEncoder | None = None
 

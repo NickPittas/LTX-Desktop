@@ -8,20 +8,27 @@ from threading import RLock
 from typing import TYPE_CHECKING
 
 from _routes._errors import HTTPError
-from api_types import LTXLocalModelId
+from api_types import LTXLocalModelId, ModelCheckpointID
 from handlers.base import StateHandlerBase
 from handlers.text_handler import TextHandler
 from runtime_config.model_download_specs import (
     IMG_GEN_MODEL_CP_ID,
     OFFICIAL_LTX23_ADAPTERS,
+    SELECTABLE_BASE_VIDEO_CP_IDS,
     UPSAMPLER_CP_ID,
     get_downloaded_ltx_model_id,
     get_existing_cp_path,
     get_ltx_model_spec,
+    is_cp_downloaded,
     resolve_model_path,
 )
 from runtime_config.runtime_policy import streaming_prefetch_count_for_mode
-from services.ltx_components import ResolvedLtxComponents, checkpoint_path_arg, resolve_components
+from services.ltx_components import (
+    CheckpointPath,
+    ResolvedLtxComponents,
+    checkpoint_path_arg,
+    resolve_components,
+)
 from services.interfaces import (
     A2VPipeline,
     DepthProcessorPipeline,
@@ -87,23 +94,90 @@ class PipelinesHandler(StateHandlerBase):
             case _:
                 return
 
-    def _pipeline_matches_model_type(self, model_type: VideoPipelineModelType) -> bool:
+    def _resolve_selection(self, model_selection: ModelCheckpointID) -> str:
+        """Validate a present ``model_selection`` and return its canonical path.
+
+        Raises clear, actionable HTTP errors (never silent fallback) when the
+        selection is unsupported or not installed:
+
+        - ``UNSUPPORTED_MODEL_SELECTION`` (422): the CP id is a valid
+          ``ModelCheckpointID`` but not a live-selectable base video transformer
+          (e.g. an upscaler or adapter id).
+        - ``MODEL_SELECTION_NOT_INSTALLED`` (409): the candidate is not present
+          under the effective models dir; the message names the exact canonical
+          placement path.
+
+        Called only when ``model_selection`` is present; absent/None selection
+        always falls back to active/current behavior.
+        """
+        if model_selection not in SELECTABLE_BASE_VIDEO_CP_IDS:
+            raise HTTPError(
+                422,
+                (
+                    f"Model selection '{model_selection}' is not a selectable base video "
+                    "transformer. Live model selection supports the LTX-2.3 distilled and "
+                    "dev GGUF base video models only."
+                ),
+                code="UNSUPPORTED_MODEL_SELECTION",
+            )
+        if not is_cp_downloaded(self.models_dir, model_selection):
+            canonical = resolve_model_path(self.models_dir, model_selection)
+            raise HTTPError(
+                409,
+                (
+                    f"Selected model '{model_selection}' is not installed. Install it at the "
+                    f"canonical placement path: {canonical}"
+                ),
+                code="MODEL_SELECTION_NOT_INSTALLED",
+            )
+        return str(resolve_model_path(self.models_dir, model_selection))
+
+    def _pipeline_matches_model_type(
+        self, model_type: VideoPipelineModelType, model_selection: ModelCheckpointID | None = None
+    ) -> bool:
         match self.state.gpu_slot:
             case GpuSlot(active_pipeline=VideoPipelineState(pipeline=pipeline, cache_key=cached_key)):
                 if pipeline.pipeline_kind != model_type:
                     return False
                 # ponytail: cache_key comparison only; richer invalidation lands with split/GGUF
-                expected_key = self._current_cache_key()
+                expected_key = self._current_cache_key(model_selection)
                 return cached_key == expected_key
             case _:
                 return False
 
-    def _current_cache_key(self) -> tuple[str, ...]:
-        components = self._resolve_active_components()
-        if components is not None:
-            return components.cache_key
-        model_id = get_downloaded_ltx_model_id(self.models_dir)
-        return (model_id,) if model_id else ()
+    def _video_cache_key_for_components(
+        self,
+        components: ResolvedLtxComponents | None,
+        model_selection: ModelCheckpointID | None,
+    ) -> tuple[str, ...]:
+        """Effective fast-video cache key for resolved components.
+
+        For dev base families the ACTUAL effective distilled LoRA path is
+        included in the key (explicit-existing preferred, else canonical
+        fallback). The effective path is appended whenever it differs from the
+        explicit path already baked into ``components.cache_key`` — e.g. when
+        the explicit path is stale/missing and the handler falls back to
+        canonical — so the key always reflects the real runtime path and a
+        second ``load_gpu_pipeline`` with the same selection/profile cache-hits.
+        """
+        if components is None:
+            model_id = get_downloaded_ltx_model_id(self.models_dir)
+            if model_id is None:
+                return ()
+            if model_selection is not None:
+                return (model_id, "model_selection", model_selection)
+            return (model_id,)
+        cache_key = components.cache_key
+        if components.base_family == "dev":
+            effective_lora = self._resolve_distilled_lora_path(components)
+            explicit_lora = components.distilled_lora_path
+            if effective_lora is not None and effective_lora != explicit_lora:
+                cache_key = (*cache_key, effective_lora)
+        return cache_key
+
+    def _current_cache_key(self, model_selection: ModelCheckpointID | None = None) -> tuple[str, ...]:
+        components = self._resolve_active_components(model_selection)
+        return self._video_cache_key_for_components(components, model_selection)
 
     def _assert_invariants(self) -> None:
         match self.state.gpu_slot:
@@ -121,17 +195,46 @@ class PipelinesHandler(StateHandlerBase):
             return
         te.service.install_patches(lambda: self.state)
 
-    def _resolve_active_components(self) -> ResolvedLtxComponents | None:
+    def _resolve_active_components(
+        self, model_selection: ModelCheckpointID | None = None
+    ) -> ResolvedLtxComponents | None:
         profile_id = self.state.active_model_profile_id
-        if profile_id is None:
-            return None
-        profile = next(
-            (p for p in self.state.model_profiles if p.id == profile_id),
-            None,
+        profile = (
+            next((p for p in self.state.model_profiles if p.id == profile_id), None)
+            if profile_id is not None
+            else None
         )
-        if profile is None:
-            return None
-        return resolve_components(profile)
+        if profile is not None:
+            if model_selection is None:
+                return resolve_components(profile)
+            selected_path = self._resolve_selection(model_selection)
+            return resolve_components(
+                profile,
+                selected_transformer_path=selected_path,
+                selected_cp_id=model_selection,
+            )
+
+        # No active profile (legacy downloaded-model path).
+        if model_selection is not None:
+            cp_id = model_selection
+            # Validate (unsupported / not installed) before the profile check.
+            self._resolve_selection(cp_id)
+            # Only the distilled monolith can run without an active profile —
+            # it reuses the legacy downloaded bundle (upsampler + text encoder).
+            # Dev/GGUF selections need an active profile with split sidecar
+            # components (text projection, embeddings connector, VAEs); reject
+            # clearly rather than falling through to a deep pipeline failure.
+            if cp_id != "ltx-2.3-22b-distilled":
+                raise HTTPError(
+                    409,
+                    (
+                        f"Live model selection for '{cp_id}' requires an active model profile "
+                        "with split components (text projection, embeddings connector, VAEs). "
+                        "Activate a profile that provides these components and retry."
+                    ),
+                    code="MODEL_SELECTION_REQUIRES_PROFILE",
+                )
+        return None
 
     def _require_downloaded_ltx_model_id(self) -> LTXLocalModelId:
         model_id = get_downloaded_ltx_model_id(self.models_dir)
@@ -223,10 +326,12 @@ class PipelinesHandler(StateHandlerBase):
                 return str(path)
         return None
 
-    def _resolve_checkpoint_paths(self):
+    def _resolve_checkpoint_paths(
+        self, model_selection: ModelCheckpointID | None = None
+    ) -> tuple[CheckpointPath, str | None, str, tuple[str, ...]]:
         """Return (checkpoint_path, gemma_root, upsampler_path, cache_key)."""
-        components = self._resolve_active_components()
-        gemma_root = self._text_handler.resolve_gemma_root()
+        components = self._resolve_active_components(model_selection)
+        gemma_root = self._text_handler.resolve_gemma_root(model_selection)
         if components is not None:
             return (
                 checkpoint_path_arg(components),
@@ -236,6 +341,18 @@ class PipelinesHandler(StateHandlerBase):
             )
         model_id = self._require_downloaded_ltx_model_id()
         spec = get_ltx_model_spec(model_id)
+        if model_selection is not None:
+            # Distilled selected without a profile: use the selected checkpoint
+            # path explicitly (it IS the distilled monolith) and carry the
+            # selection marker in the cache key.
+            selected_path = str(resolve_model_path(self.models_dir, model_selection))
+            cache_key: tuple[str, ...] = (model_id, "model_selection", model_selection)
+            return (
+                selected_path,
+                gemma_root,
+                str(get_existing_cp_path(self.models_dir, spec.upscale_cp)),
+                cache_key,
+            )
         return (
             str(get_existing_cp_path(self.models_dir, spec.model_cp)),
             gemma_root,
@@ -243,8 +360,12 @@ class PipelinesHandler(StateHandlerBase):
             (model_id,),
         )
 
-    def _create_video_pipeline(self, model_type: VideoPipelineModelType) -> VideoPipelineState:
-        checkpoint_path, gemma_root, upsampler_path, cache_key = self._resolve_checkpoint_paths()
+    def _create_video_pipeline(
+        self,
+        model_type: VideoPipelineModelType,
+        model_selection: ModelCheckpointID | None = None,
+    ) -> VideoPipelineState:
+        checkpoint_path, gemma_root, upsampler_path, _resolved_cache_key = self._resolve_checkpoint_paths(model_selection)
         # Fast video pipeline always invokes the spatial upscaler during
         # inference. Fail early with an actionable error instead of letting a
         # FileNotFoundError surface deep inside the diffusers pipeline.
@@ -260,7 +381,7 @@ class PipelinesHandler(StateHandlerBase):
                 ),
                 code="UPSCALER_REQUIRED",
             )
-        components = self._resolve_active_components()
+        components = self._resolve_active_components(model_selection)
         transformer_format = components.transformer_format if components is not None else "safetensors"
 
         # Phase 3D (plan §12): route dev/distilled pipeline selection via
@@ -316,11 +437,9 @@ class PipelinesHandler(StateHandlerBase):
         # Cache key must reflect the effective distilled LoRA path so a dev
         # profile that toggles between explicit and canonical fallback (or
         # whose fallback appears/disappears on disk) invalidates correctly.
-        effective_cache_key = cache_key
-        if base_family == "dev" and distilled_lora_path is not None:
-            explicit_in_key = bool(components is not None and components.distilled_lora_path)
-            if not explicit_in_key:
-                effective_cache_key = (*cache_key, distilled_lora_path)
+        # Computed via the same helper as ``_current_cache_key`` so a second
+        # ``load_gpu_pipeline`` (e.g. inside ``generate_video``) cache-hits.
+        effective_cache_key = self._video_cache_key_for_components(components, model_selection)
 
         state = VideoPipelineState(
             pipeline=pipeline,
@@ -417,12 +536,16 @@ class PipelinesHandler(StateHandlerBase):
         elif should_cleanup:
             self._gpu_cleaner.cleanup()
 
-    def load_gpu_pipeline(self, model_type: VideoPipelineModelType) -> VideoPipelineState:
+    def load_gpu_pipeline(
+        self,
+        model_type: VideoPipelineModelType,
+        model_selection: ModelCheckpointID | None = None,
+    ) -> VideoPipelineState:
         self._install_text_patches_if_needed()
 
         state: VideoPipelineState | None = None
         with self._lock:
-            if self._pipeline_matches_model_type(model_type):
+            if self._pipeline_matches_model_type(model_type, model_selection):
                 match self.state.gpu_slot:
                     case GpuSlot(active_pipeline=VideoPipelineState() as existing_state):
                         state = existing_state
@@ -431,7 +554,7 @@ class PipelinesHandler(StateHandlerBase):
 
         if state is None:
             self._evict_gpu_pipeline_for_swap()
-            state = self._create_video_pipeline(model_type)
+            state = self._create_video_pipeline(model_type, model_selection)
             with self._lock:
                 self.state.gpu_slot = GpuSlot(active_pipeline=state)
                 self._assert_invariants()

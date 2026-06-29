@@ -21,6 +21,8 @@ from api_types import (
     ModelDownloadRequest,
     ModelDownloadStartResponse,
     ModelLibraryScanResponse,
+    ModelSelectionOptionsResponse,
+    ModelSelectionWorkflow,
     StatusResponse,
     TextEncoderRecommendationResponse,
 )
@@ -82,6 +84,22 @@ def route_model_catalog(
     """Read-only scan of the effective models root (admin-guarded, no path param)."""
     guard_admin_permission(request)
     return handler.models.scan_model_library()
+
+
+@router.get("/models/model-options", response_model=ModelSelectionOptionsResponse)
+def route_model_options(
+    request: Request,
+    workflow: ModelSelectionWorkflow = Query(...),
+    handler: AppHandler = Depends(get_state_service),
+) -> ModelSelectionOptionsResponse:
+    """Backend-owned model-options catalog for live model selection.
+
+    Admin-guarded like ``/api/models/catalog`` because the response exposes
+    absolute placement paths and mirrors catalog-like data. Read-only: never
+    mutates or downloads.
+    """
+    guard_admin_permission(request)
+    return handler.models.get_model_selection_options(workflow)
 
 
 @router.get("/models/download/progress", response_model=DownloadProgressResponse)

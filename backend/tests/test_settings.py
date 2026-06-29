@@ -81,7 +81,7 @@ class TestPostSettings:
         te = test_state.state.text_encoder
         assert te is not None
         for i in range(5):
-            te.prompt_cache[(f"key_{i}", False)] = f"value_{i}"  # type: ignore[assignment]
+            te.prompt_cache[(f"key_{i}", False, "model-identity")] = f"value_{i}"  # type: ignore[assignment]
 
         r = client.post("/api/settings", json={"promptCacheSize": 2})
         assert r.status_code == 200

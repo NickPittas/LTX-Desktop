@@ -16,6 +16,7 @@ from runtime_config.model_download_specs import (
     get_ic_loras_cp_ids,
     get_latest_ltx_model_id,
     get_ltx_model_spec,
+    get_model_cp_spec,
     resolve_downloading_dir,
     resolve_downloading_target_path,
     resolve_model_path,
@@ -430,3 +431,235 @@ class TestCheckpointDeletion:
         assert response.status_code == 200
         assert response.json()["status"] == "ok"
         assert not img_gen_path.exists()
+
+
+# ---- Live model selection (Step 4 / Phase 1) ----
+_EXPECTED_MODEL_SELECTION_IDS: list[str] = [
+    "ltx-2.3-22b-distilled",
+    "ltx-2.3-22b-dev-gguf-q4-k-m",
+    "ltx-2.3-22b-dev-gguf-ud-q4-k-m",
+    "ltx-2.3-22b-dev-gguf-q6-k",
+    "ltx-2.3-22b-dev-gguf-ud-q5-k-m",
+]
+_UNSUPPORTED_WORKFLOW_REASON = (
+    "Live model selection is currently available for text-to-video and image-to-video only"
+)
+_NOT_INSTALLED_REASON = "Model checkpoint is not installed"
+
+
+class TestModelSelectionOptions:
+    def test_endpoint_requires_admin_token(self, client):
+        # Valid workflow so param validation passes; guard rejects without token.
+        response = client.get(
+            "/api/models/model-options", params={"workflow": "text-to-video"}
+        )
+        assert_http_error(response, status_code=403, code="HTTP_403", message="Admin token required")
+
+    def test_t2v_enumerates_all_candidates_disabled_when_missing(self, client, test_state):
+        response = client.get(
+            "/api/models/model-options",
+            params={"workflow": "text-to-video"},
+            headers=_ADMIN_HEADERS,
+        )
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["workflow"] == "text-to-video"
+        assert data["models_dir"] == str(test_state.config.default_models_dir)
+
+        options = data["options"]
+        assert [o["id"] for o in options] == _EXPECTED_MODEL_SELECTION_IDS
+
+        for opt in options:
+            # Supported workflow + nothing installed → all missing-disabled.
+            assert opt["installed"] is False
+            assert opt["disabled_reason"] == _NOT_INSTALLED_REASON
+            # Stable catalog-like metadata.
+            assert opt["group"] == "Base video model"
+            assert opt["downloadable"] is True
+            assert opt["source_url"] == f"https://huggingface.co/{opt['repo_id']}"
+            spec = get_model_cp_spec(opt["id"])  # type: ignore[arg-type]
+            assert opt["canonical_relative_path"] == str(spec.relative_path)
+            assert opt["expected_absolute_path"] == str(
+                resolve_model_path(test_state.config.default_models_dir, opt["id"])  # type: ignore[arg-type]
+            )
+
+        # Spot-check the distilled candidate (section=full, empty variant group).
+        distilled = options[0]
+        assert distilled["id"] == "ltx-2.3-22b-distilled"
+        assert distilled["section"] == "full"
+        assert distilled["variant_group"] == ""
+        assert distilled["repo_id"] == "Lightricks/LTX-2.3"
+        assert distilled["label"].startswith("LTX-2.3 22B distilled")
+        assert distilled["source_url"] == "https://huggingface.co/Lightricks/LTX-2.3"
+
+        # Spot-check a GGUF candidate (section=gguf, shared variant group).
+        gguf = options[1]
+        assert gguf["id"] == "ltx-2.3-22b-dev-gguf-q4-k-m"
+        assert gguf["section"] == "gguf"
+        assert gguf["variant_group"] == "ltx-2.3-dev-gguf"
+        assert gguf["repo_id"] == "unsloth/LTX-2.3-GGUF"
+        assert gguf["source_url"] == "https://huggingface.co/unsloth/LTX-2.3-GGUF"
+
+    def test_installed_distilled_is_enabled_missing_gguf_remain_disabled(
+        self, client, test_state, create_fake_model_files
+    ):
+        # create_fake_model_files installs the distilled transformer at its
+        # canonical path (among other bundle files), but no GGUF candidates.
+        create_fake_model_files()
+
+        response = client.get(
+            "/api/models/model-options",
+            params={"workflow": "text-to-video"},
+            headers=_ADMIN_HEADERS,
+        )
+        assert response.status_code == 200, response.text
+        by_id = {o["id"]: o for o in response.json()["options"]}
+
+        distilled = by_id["ltx-2.3-22b-distilled"]
+        assert distilled["installed"] is True
+        assert distilled["disabled_reason"] is None
+
+        for gguf_id in _EXPECTED_MODEL_SELECTION_IDS[1:]:
+            gguf = by_id[gguf_id]
+            assert gguf["installed"] is False
+            assert gguf["disabled_reason"] == _NOT_INSTALLED_REASON
+
+    def test_unsupported_workflow_disables_even_installed_options(self, client, create_fake_model_files):
+        create_fake_model_files()
+
+        response = client.get(
+            "/api/models/model-options",
+            params={"workflow": "retake"},
+            headers=_ADMIN_HEADERS,
+        )
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["workflow"] == "retake"
+        assert [o["id"] for o in data["options"]] == _EXPECTED_MODEL_SELECTION_IDS
+
+        for opt in data["options"]:
+            assert opt["disabled_reason"] == _UNSUPPORTED_WORKFLOW_REASON
+
+        # Distilled is installed on disk, yet disabled because of the workflow.
+        distilled = next(o for o in data["options"] if o["id"] == "ltx-2.3-22b-distilled")
+        assert distilled["installed"] is True
+        assert distilled["disabled_reason"] == _UNSUPPORTED_WORKFLOW_REASON
+
+    def test_installed_gguf_disabled_without_active_profile(
+        self, client, test_state, create_fake_model_files
+    ):
+        # GGUF installed + canonical distilled LoRA + canonical upscaler, but NO
+        # active profile → the dev/GGUF selection cannot run (no split sidecars).
+        create_fake_model_files()
+        gguf_cp = "ltx-2.3-22b-dev-gguf-q4-k-m"
+        gguf_path = resolve_model_path(test_state.config.default_models_dir, gguf_cp)
+        gguf_path.parent.mkdir(parents=True, exist_ok=True)
+        gguf_path.write_bytes(b"GGUF")
+        lora = (
+            test_state.config.default_models_dir
+            / "adapters"
+            / "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
+        )
+        lora.parent.mkdir(parents=True, exist_ok=True)
+        lora.write_bytes(b"LORA")
+
+        response = client.get(
+            "/api/models/model-options",
+            params={"workflow": "text-to-video"},
+            headers=_ADMIN_HEADERS,
+        )
+        assert response.status_code == 200, response.text
+        by_id = {o["id"]: o for o in response.json()["options"]}
+        gguf = by_id[gguf_cp]
+        assert gguf["installed"] is True
+        assert gguf["disabled_reason"] is not None
+        assert "active model profile" in gguf["disabled_reason"].lower()
+
+    def test_installed_gguf_enabled_with_suitable_active_profile(
+        self, client, test_state, tmp_path, create_fake_model_files
+    ):
+        # Active split-component profile + installed GGUF + canonical distilled
+        # LoRA → the dev/GGUF selection is runtime-ready and enabled.
+        create_fake_model_files()  # canonical upscaler + text encoder
+        sidecars: dict[str, str] = {}
+        for name in ("tp", "ec", "vvae", "avae", "ups"):
+            p = tmp_path / f"{name}.safetensors"
+            p.write_bytes(b"x")
+            sidecars[name] = str(p)
+        profile = ModelProfilePayload(
+            id="dev-split",
+            name="Dev Split",
+            source="kijai",
+            components=ModelComponentPaths(
+                transformer="/placeholder-dev.gguf",
+                transformer_format="gguf",
+                text_projection=sidecars["tp"],
+                embeddings_connector=sidecars["ec"],
+                video_vae=sidecars["vvae"],
+                audio_vae=sidecars["avae"],
+                upsampler=sidecars["ups"],
+                text_encoder_root="/placeholder-gemma",
+                text_encoder_format="gguf",
+            ),
+        )
+        test_state.state.model_profiles = [profile]
+        test_state.state.active_model_profile_id = "dev-split"
+
+        gguf_cp = "ltx-2.3-22b-dev-gguf-q4-k-m"
+        gguf_path = resolve_model_path(test_state.config.default_models_dir, gguf_cp)
+        gguf_path.parent.mkdir(parents=True, exist_ok=True)
+        gguf_path.write_bytes(b"GGUF")
+        lora = (
+            test_state.config.default_models_dir
+            / "adapters"
+            / "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
+        )
+        lora.parent.mkdir(parents=True, exist_ok=True)
+        lora.write_bytes(b"LORA")
+
+        response = client.get(
+            "/api/models/model-options",
+            params={"workflow": "text-to-video"},
+            headers=_ADMIN_HEADERS,
+        )
+        assert response.status_code == 200, response.text
+        by_id = {o["id"]: o for o in response.json()["options"]}
+        gguf = by_id[gguf_cp]
+        assert gguf["installed"] is True
+        assert gguf["disabled_reason"] is None
+
+    def test_installed_gguf_disabled_when_profile_missing_sidecars(
+        self, client, test_state, tmp_path, create_fake_model_files
+    ):
+        # Active profile exists but lacks the split sidecars → dev/GGUF disabled
+        # with a clear reason naming the missing components.
+        create_fake_model_files()
+        profile = ModelProfilePayload(
+            id="incomplete",
+            name="Incomplete",
+            source="kijai",
+            components=ModelComponentPaths(
+                transformer="/placeholder-dev.gguf",
+                transformer_format="gguf",
+                # No text_projection / embeddings_connector / VAEs.
+            ),
+        )
+        test_state.state.model_profiles = [profile]
+        test_state.state.active_model_profile_id = "incomplete"
+
+        gguf_cp = "ltx-2.3-22b-dev-gguf-q4-k-m"
+        gguf_path = resolve_model_path(test_state.config.default_models_dir, gguf_cp)
+        gguf_path.parent.mkdir(parents=True, exist_ok=True)
+        gguf_path.write_bytes(b"GGUF")
+
+        response = client.get(
+            "/api/models/model-options",
+            params={"workflow": "text-to-video"},
+            headers=_ADMIN_HEADERS,
+        )
+        assert response.status_code == 200
+        by_id = {o["id"]: o for o in response.json()["options"]}
+        gguf = by_id[gguf_cp]
+        assert gguf["installed"] is True
+        assert gguf["disabled_reason"] is not None
+        assert "split components" in gguf["disabled_reason"].lower()

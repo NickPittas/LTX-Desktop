@@ -13,6 +13,9 @@ import { useVideoGenerationModelSpecs } from '../hooks/use-video-generation-mode
 import { createLocalGenerationError, type GenerationError } from '../lib/generation-errors'
 import { useRetake } from '../hooks/use-retake'
 import { useIcLora } from '../hooks/use-ic-lora'
+import { useModelSelectionOptions } from '../hooks/use-model-selection-options'
+import type { ModelCheckpointID, ModelSelectionOption, ModelSelectionWorkflow } from '../lib/model-selection'
+import { findModelOption, groupModelOptions, isModelOptionSelectable } from '../lib/model-selection'
 import type { ICLoraConditioningType } from '../components/ICLoraPanel'
 import type { Asset } from '../types/project-model'
 import { GenerationErrorDialog } from '../components/GenerationErrorDialog'
@@ -357,6 +360,165 @@ function SettingsDropdown({
   )
 }
 
+// Compact model-selection popover for the prompt bar.
+function ModelSelectionPopover({
+  options,
+  selectedId,
+  onChange,
+  disabled,
+  isLoading,
+  errorMessage,
+}: {
+  options: ModelSelectionOption[]
+  selectedId: ModelCheckpointID | null
+  onChange: (id: ModelCheckpointID | null) => void
+  disabled?: boolean
+  isLoading?: boolean
+  errorMessage?: string | null
+}) {
+  const [isOpen, setIsOpen] = useState(false)
+  const popoverRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        setIsOpen(false)
+      }
+    }
+    if (isOpen) {
+      document.addEventListener('mousedown', handleClickOutside)
+    }
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [isOpen])
+
+  const selectedOption = findModelOption(options, selectedId)
+  const triggerLabel = selectedOption ? selectedOption.label : 'Auto'
+  const grouped = groupModelOptions(options)
+
+  return (
+    <div ref={popoverRef} className="relative">
+      <button
+        onClick={() => !disabled && setIsOpen(!isOpen)}
+        disabled={disabled}
+        className={`flex shrink-0 items-center gap-1 whitespace-nowrap px-2 py-1.5 rounded-md transition-colors ${
+          disabled
+            ? 'cursor-not-allowed text-zinc-600'
+            : isOpen
+              ? 'bg-zinc-700 hover:bg-zinc-700'
+              : 'hover:bg-zinc-800'
+        }`}
+      >
+        <span className="text-zinc-500 text-[10px]">MODEL</span>
+        <span className="text-zinc-300 font-medium">{triggerLabel}</span>
+        {isLoading ? (
+          <span className="w-3 h-3 border-2 border-zinc-600 border-t-zinc-400 rounded-full animate-spin" />
+        ) : (
+          <ChevronUp className="h-3 w-3 text-zinc-500" />
+        )}
+      </button>
+
+      {isOpen && !disabled && (
+        <div className="absolute bottom-full left-0 mb-2 bg-zinc-800 border border-zinc-700 rounded-md p-2 min-w-[260px] max-w-[320px] shadow-xl z-[9999]">
+          <div className="flex items-center justify-between text-[10px] text-zinc-500 uppercase tracking-wider mb-2">
+            <span>Select checkpoint</span>
+            <span className="text-zinc-600">Current profile when Auto</span>
+          </div>
+
+          {errorMessage && (
+            <div className="mb-2 px-2 py-1.5 rounded bg-red-500/10 text-[11px] text-red-400">
+              {errorMessage}
+            </div>
+          )}
+
+          <div className="space-y-2 max-h-[320px] overflow-y-auto [scrollbar-gutter:stable]">
+            <button
+              onClick={() => { onChange(null); setIsOpen(false) }}
+              className={`w-full flex items-center justify-between px-2 py-2 rounded-md transition-colors text-left ${
+                selectedId === null ? 'bg-white/20 hover:bg-white/25' : 'hover:bg-zinc-700'
+              }`}
+            >
+              <span className={`text-sm ${selectedId === null ? 'text-white font-medium' : 'text-zinc-300'}`}>
+                Auto
+              </span>
+              <span className="text-[10px] text-zinc-500">Current profile</span>
+              {selectedId === null && (
+                <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+              )}
+            </button>
+
+            <div className="h-px bg-zinc-700/60 my-1" />
+
+            {grouped.map((section) => (
+              <div key={section.section}>
+                <div className="px-2 pt-1 pb-1 text-[10px] font-semibold text-zinc-500 uppercase tracking-wider">
+                  {section.sectionLabel}
+                </div>
+                {section.groups.map((group) => (
+                  <div key={`${section.section}-${group.variantGroup}-${group.group}`}>
+                    {group.variantGroup && group.variantGroup !== group.group && (
+                      <div className="px-2 pt-1.5 pb-0.5 text-[10px] text-zinc-600">
+                        {group.variantGroup}
+                      </div>
+                    )}
+                    <div className="space-y-0.5">
+                      {group.options.map((option) => {
+                        const isSelected = option.id === selectedId
+                        const isDisabled = Boolean(option.disabled_reason)
+                        return (
+                          <button
+                            key={option.id}
+                            onClick={() => {
+                              if (isDisabled) return
+                              onChange(option.id)
+                              setIsOpen(false)
+                            }}
+                            disabled={isDisabled}
+                            className={`w-full flex flex-col px-2 py-1.5 rounded-md transition-colors text-left ${
+                              isDisabled
+                                ? 'cursor-not-allowed opacity-60'
+                                : isSelected
+                                  ? 'bg-white/20 hover:bg-white/25'
+                                  : 'hover:bg-zinc-700'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className={`text-sm ${isSelected ? 'text-white font-medium' : 'text-zinc-300'}`}>
+                                {option.label}
+                              </span>
+                              {isSelected && !isDisabled && (
+                                <svg className="w-4 h-4 text-white shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                </svg>
+                              )}
+                            </div>
+                            <span className="text-[10px] text-zinc-500 leading-tight">
+                              {isDisabled
+                                ? option.disabled_reason
+                                : option.downloadable && !option.installed
+                                  ? `${option.repo_id} • place at ${option.canonical_relative_path}`
+                                  : !option.installed
+                                    ? `Missing • ${option.canonical_relative_path}`
+                                    : option.group !== option.label
+                                      ? option.group
+                                      : ''}
+                            </span>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // Lightricks brand icon
 function LightricksIcon({ className }: { className?: string }) {
   return (
@@ -439,6 +601,7 @@ function PromptBar({
     variations: number
     audio?: boolean
     outputFormat?: OutputFormat
+    modelSelection?: ModelCheckpointID | null
   }
   onSettingsChange: (settings: any) => void
   videoModelSpecs: VideoGenerationModelSpecItem[]
@@ -471,6 +634,30 @@ function PromptBar({
     && resolvedVideoOptions.hasCompatibleOptions
     && resolvedVideoOptions.fpsOptions.length > 1,
   )
+
+  const modelSelectionWorkflow: ModelSelectionWorkflow | null = (() => {
+    if (isRetake || isIcLora || isApiMode) return null
+    if (mode !== 'video') return null
+    if (inputAudio) return null
+    return inputImage ? 'image-to-video' : 'text-to-video'
+  })()
+  const {
+    options: modelSelectionOptions,
+    isLoading: isLoadingModelSelectionOptions,
+    errorMessage: modelSelectionErrorMessage,
+  } = useModelSelectionOptions(modelSelectionWorkflow)
+
+  useEffect(() => {
+    if (!modelSelectionWorkflow && settings.modelSelection) {
+      onSettingsChange({ ...settings, modelSelection: null })
+      return
+    }
+    if (!modelSelectionWorkflow || !settings.modelSelection) return
+    const selected = findModelOption(modelSelectionOptions, settings.modelSelection)
+    if (selected && !isModelOptionSelectable(selected)) {
+      onSettingsChange({ ...settings, modelSelection: null })
+    }
+  }, [modelSelectionOptions, modelSelectionWorkflow, settings, settings.modelSelection, onSettingsChange])
 
   const formatValue = settings.outputFormat || 'mp4'
   const formatOptions = OUTPUT_FORMAT_OPTIONS.map((option) => ({
@@ -888,6 +1075,17 @@ function PromptBar({
 
             <div className="w-px h-4 bg-zinc-700 mx-0.5" />
 
+            <ModelSelectionPopover
+              options={modelSelectionOptions}
+              selectedId={settings.modelSelection ?? null}
+              onChange={(id) => onSettingsChange({ ...settings, modelSelection: id })}
+              disabled={!modelSelectionWorkflow || isLoadingModelSelectionOptions}
+              isLoading={isLoadingModelSelectionOptions}
+              errorMessage={modelSelectionErrorMessage}
+            />
+
+            <div className="w-px h-4 bg-zinc-700 mx-0.5" />
+
             {formatDropdown}
 
             <div className="w-px h-4 bg-zinc-700 mx-0.5" />
@@ -1040,6 +1238,7 @@ const DEFAULT_VIDEO_SETTINGS = {
   variations: 1,
   audio: true,
   outputFormat: 'mp4' as OutputFormat,
+  modelSelection: null as ModelCheckpointID | null,
 }
 
 export function GenSpace() {
@@ -1638,6 +1837,7 @@ export function GenSpace() {
           imageAspectRatio: videoSettings.aspectRatio,
           imageSteps: 4,
           outputFormat: settings.outputFormat,
+          modelSelection: audioPath ? null : settings.modelSelection,
         },
         audioPath,
       )
