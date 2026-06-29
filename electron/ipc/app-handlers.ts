@@ -114,6 +114,7 @@ export function registerAppHandlers(): void {
       || targetUrl.pathname === '/api/models/adapters/status'
       || targetUrl.pathname === '/api/models/adapters/recommendation'
       || targetUrl.pathname === '/api/models/catalog'
+      || targetUrl.pathname === '/api/models/model-options'
       || targetUrl.pathname === '/api/models/download'
       || targetUrl.pathname === '/api/models/download/cancel'
       || targetUrl.pathname === '/api/models/delete'

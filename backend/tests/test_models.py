@@ -628,6 +628,62 @@ class TestModelSelectionOptions:
         assert gguf["installed"] is True
         assert gguf["disabled_reason"] is None
 
+    def test_installed_gguf_enabled_when_embeddings_connector_optional(
+        self, client, test_state, tmp_path, create_fake_model_files
+    ):
+        # QuantStack-like profile: embeddings_connector is null but the runtime
+        # treats it as optional, so a dev/GGUF selection must still be enabled
+        # when the required sidecars (text projection, VAEs) + upscaler +
+        # distilled LoRA are available.
+        create_fake_model_files()  # canonical upscaler + text encoder
+        sidecars: dict[str, str] = {}
+        for name in ("tp", "vvae", "avae", "ups"):
+            p = tmp_path / f"{name}.safetensors"
+            p.write_bytes(b"x")
+            sidecars[name] = str(p)
+        profile = ModelProfilePayload(
+            id="quantstack-like",
+            name="QuantStack-like",
+            source="quantstack",
+            components=ModelComponentPaths(
+                transformer="/placeholder-dev.gguf",
+                transformer_format="gguf",
+                text_projection=sidecars["tp"],
+                embeddings_connector=None,  # optional — must not disable
+                video_vae=sidecars["vvae"],
+                audio_vae=sidecars["avae"],
+                upsampler=sidecars["ups"],
+                text_encoder_root="/placeholder-gemma",
+                text_encoder_format="gguf",
+            ),
+        )
+        test_state.state.model_profiles = [profile]
+        test_state.state.active_model_profile_id = "quantstack-like"
+
+        gguf_cp = "ltx-2.3-22b-dev-gguf-q4-k-m"
+        gguf_path = resolve_model_path(test_state.config.default_models_dir, gguf_cp)
+        gguf_path.parent.mkdir(parents=True, exist_ok=True)
+        gguf_path.write_bytes(b"GGUF")
+        lora = (
+            test_state.config.default_models_dir
+            / "adapters"
+            / "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
+        )
+        lora.parent.mkdir(parents=True, exist_ok=True)
+        lora.write_bytes(b"LORA")
+
+        response = client.get(
+            "/api/models/model-options",
+            params={"workflow": "text-to-video"},
+            headers=_ADMIN_HEADERS,
+        )
+        assert response.status_code == 200, response.text
+        by_id = {o["id"]: o for o in response.json()["options"]}
+        gguf = by_id[gguf_cp]
+        assert gguf["installed"] is True
+        # embeddings_connector absent must NOT disable the option.
+        assert gguf["disabled_reason"] is None
+
     def test_installed_gguf_disabled_when_profile_missing_sidecars(
         self, client, test_state, tmp_path, create_fake_model_files
     ):

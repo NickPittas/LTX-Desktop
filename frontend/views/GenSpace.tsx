@@ -408,7 +408,7 @@ function ModelSelectionPopover({
               : 'hover:bg-zinc-800'
         }`}
       >
-        <span className="text-zinc-500 text-[10px]">MODEL</span>
+        <span className="text-zinc-500 text-[10px]">Model</span>
         <span className="text-zinc-300 font-medium">{triggerLabel}</span>
         {isLoading ? (
           <span className="w-3 h-3 border-2 border-zinc-600 border-t-zinc-400 rounded-full animate-spin" />
@@ -423,6 +423,13 @@ function ModelSelectionPopover({
             <span>Select checkpoint</span>
             <span className="text-zinc-600">Current profile when Auto</span>
           </div>
+
+          <p className="mb-2 px-1 text-[10px] leading-snug text-zinc-400">
+            Auto uses the active model profile. Pick an installed option to override it for this generation.
+          </p>
+          <p className="mb-2 px-1 text-[10px] leading-snug text-zinc-500">
+            The Fast pipeline setting controls generation speed and quality, not your model profile.
+          </p>
 
           {errorMessage && (
             <div className="mb-2 px-2 py-1.5 rounded bg-red-500/10 text-[11px] text-red-400">

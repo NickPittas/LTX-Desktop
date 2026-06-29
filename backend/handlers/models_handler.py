@@ -103,8 +103,7 @@ _LIVE_MODEL_SELECTION_NOT_INSTALLED_REASON: str = "Model checkpoint is not insta
 # options endpoint to disable dev/GGUF candidates that cannot actually run yet.
 _LIVE_MODEL_SELECTION_DEV_REQUIRES_PROFILE_REASON: str = (
     "Requires an active model profile with split components "
-    "(text projection, embeddings connector, VAEs), a usable upscaler, "
-    "and a distilled LoRA"
+    "(text projection, VAEs), a usable upscaler, and a distilled LoRA"
 )
 
 # Semantic grouping label shared by every Phase 1 candidate (all are base video
@@ -459,21 +458,25 @@ class ModelsHandler(StateHandlerBase):
         Returns ``None`` when the selection is runnable, else a clear disabled
         reason. Mirrors the hard requirements the fast-pipeline load path
         enforces for a dev/GGUF base: an active split-component profile
-        providing the sidecars the GGUF/split builder needs, a usable spatial
-        upscaler, and a resolvable distilled LoRA (explicit-existing or
-        canonical fallback). Text-encoder availability is intentionally NOT
-        gated here — it is a global requirement shared with the distilled route
-        and handled separately. Never mutates the filesystem.
+        providing the sidecars the GGUF/split builder needs (text projection,
+        video VAE, audio VAE — the embeddings connector is optional and treated
+        as falsey/omitted by the builder), a usable spatial upscaler, and a
+        resolvable distilled LoRA (explicit-existing or canonical fallback).
+        Text-encoder availability is intentionally NOT gated here — it is a
+        global requirement shared with the distilled route and handled
+        separately. Never mutates the filesystem.
         """
         profile = self._active_profile()
         if profile is None:
             return _LIVE_MODEL_SELECTION_DEV_REQUIRES_PROFILE_REASON
         c = profile.components
+        # Embeddings connector is intentionally optional: the runtime
+        # ``builder_paths`` filters falsey values and the GGUF component install
+        # path does not require it (e.g. QuantStack profiles set it to null).
         missing_sidecars = [
             label
             for label, val in (
                 ("text projection", c.text_projection),
-                ("embeddings connector", c.embeddings_connector),
                 ("video VAE", c.video_vae),
                 ("audio VAE", c.audio_vae),
             )

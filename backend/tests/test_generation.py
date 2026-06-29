@@ -1669,6 +1669,67 @@ class TestModelSelectionRouting:
         assert str(canonical_lora) not in key_after
         assert key != key_after
 
+    def test_dev_gguf_selection_routes_with_optional_embeddings_connector(
+        self, client, test_state, fake_services, tmp_path, create_fake_model_files
+    ):
+        """QuantStack-like profile (embeddings_connector=null) must still route a
+        dev GGUF selection — the runtime builder treats the connector as
+        optional. The build tuple omits the connector path."""
+        create_fake_model_files()  # canonical upscaler + text encoder
+        d = tmp_path / "quantstack"
+        d.mkdir()
+        sidecars: dict[str, str] = {}
+        for name in ("ltx-2.3-22b-dev.gguf", "tp.safetensors", "vvae.safetensors", "avae.safetensors", "ups.safetensors", "gemma.gguf"):
+            p = d / name
+            p.write_bytes(b"x")
+            key = "transformer" if name.startswith("ltx-") else name.rsplit(".", 1)[0]
+            sidecars[key] = str(p)
+
+        profile = ModelProfilePayload(
+            id="quantstack",
+            name="QuantStack",
+            source="quantstack",
+            components=ModelComponentPaths(
+                transformer=sidecars["transformer"],
+                transformer_format="gguf",
+                text_projection=sidecars["tp"],
+                embeddings_connector=None,  # optional
+                video_vae=sidecars["vvae"],
+                audio_vae=sidecars["avae"],
+                upsampler=sidecars["ups"],
+                text_encoder_root=sidecars["gemma"],
+                text_encoder_format="gguf",
+            ),
+        )
+        test_state.state.model_profiles = [profile]
+        test_state.state.active_model_profile_id = "quantstack"
+
+        gguf_cp = "ltx-2.3-22b-dev-gguf-q4-k-m"
+        gguf_path = resolve_model_path(test_state.config.default_models_dir, gguf_cp)
+        gguf_path.parent.mkdir(parents=True, exist_ok=True)
+        gguf_path.write_bytes(b"GGUF")
+        lora = (
+            test_state.config.default_models_dir
+            / "adapters"
+            / "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
+        )
+        lora.parent.mkdir(parents=True, exist_ok=True)
+        lora.write_bytes(b"LORA")
+
+        r = client.post("/api/generate", json={**_T2V_JSON, "model_selection": gguf_cp})
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "complete"
+
+        pipeline = fake_services.fast_video_pipeline
+        assert pipeline.last_base_family == "dev"
+        # Build tuple: selected GGUF + text projection + VAEs only (no connector).
+        assert pipeline.last_checkpoint_path == (
+            str(gguf_path),
+            sidecars["tp"],
+            sidecars["vvae"],
+            sidecars["avae"],
+        )
+
     def test_present_model_selection_rejects_in_forced_api_mode(self, client, test_state, fake_services):
         # Forced API mode (local generations unsupported) + a present selection
         # must reject clearly instead of silently routing to the API. The guard

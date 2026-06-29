@@ -222,14 +222,14 @@ class PipelinesHandler(StateHandlerBase):
             # Only the distilled monolith can run without an active profile —
             # it reuses the legacy downloaded bundle (upsampler + text encoder).
             # Dev/GGUF selections need an active profile with split sidecar
-            # components (text projection, embeddings connector, VAEs); reject
-            # clearly rather than falling through to a deep pipeline failure.
+            # components (text projection, VAEs; embeddings connector optional);
+            # reject clearly rather than falling through to a deep pipeline failure.
             if cp_id != "ltx-2.3-22b-distilled":
                 raise HTTPError(
                     409,
                     (
                         f"Live model selection for '{cp_id}' requires an active model profile "
-                        "with split components (text projection, embeddings connector, VAEs). "
+                        "with split components (text projection, VAEs). "
                         "Activate a profile that provides these components and retry."
                     ),
                     code="MODEL_SELECTION_REQUIRES_PROFILE",
