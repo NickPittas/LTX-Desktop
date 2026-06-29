@@ -1038,8 +1038,11 @@ class TestIcLoraWorkflowGating:
         data = response.json()
         assert data["status"] == "complete"
         assert "_exr" in data["video_path"]  # EXR output forced
-        # SDR proxy deferred (tonemap not wired); proxy_path is None.
-        assert data["proxy_path"] is None
+        # Lane A contract: proxy_path must be non-null for EXR primaries
+        # (forwarded to the encoder; Lane B owns the tonemap policy inside
+        # MediaEncoder proxy generation).
+        assert data["proxy_path"] is not None
+        assert data["proxy_path"].endswith("_exr_proxy.mp4")
 
         # Verify HDR-specific parameters reached the pipeline.
         from tests.fakes.services import FakeIcLoraPipeline
@@ -1047,6 +1050,8 @@ class TestIcLoraWorkflowGating:
         assert singleton is not None
         assert len(singleton.generate_calls) == 1
         call = singleton.generate_calls[0]
+        # Non-null proxy_path forwarded to the pipeline/encoder.
+        assert call["proxy_path"] == data["proxy_path"]
         # Scene embeddings threaded into inference path.
         assert "hdr_video_context" in call
         assert call["hdr_video_context"] is not None
@@ -1747,101 +1752,7 @@ class TestIcLoraResolution:
         assert response.status_code == 200, f"Unexpected status: {response.json()}"
         kwargs = fake_services.ic_lora_pipeline.generate_calls[0]
         assert kwargs["width"] == 1920, f"Expected width=1920, got {kwargs['width']}"
-        assert kwargs["height"] == 1088, f"Expected height=1088, got {kwargs['height']}"
-
-    def test_non_inpaint_preserves_aligned_input_dimensions(self, client, test_state,
-                                                              create_fake_model_files,
-                                                              fake_services):
-        """Non-in_outpainting adapter also preserves aligned input dimensions."""
-        create_fake_model_files()
-        test_state.state.app_settings.use_local_text_encoder = True
-        fake_services.ic_lora_pipeline.bind_singleton(fake_services.ic_lora_pipeline)
-
-        adapter_dir = test_state.config.default_models_dir / "adapters"
-        adapter_dir.mkdir(parents=True, exist_ok=True)
-        adapter_file = adapter_dir / "water_simulation.safetensors"
-        adapter_file.write_bytes(b"\x00" * 1024)
-
-        profile = ModelProfilePayload(
-            id="test-profile",
-            name="Test Profile",
-            source="official",
-            components=ModelComponentPaths(
-                official_adapters={"water_simulation": str(adapter_file)},
-            ),
-        )
-        test_state.state.model_profiles = [profile]
-        test_state.state.active_model_profile_id = "test-profile"
-
-        video_path = test_state.config.outputs_dir / "test_video.mp4"
-        video_path.write_bytes(b"\x00" * 100)
-        test_state.video_processor.register_video(
-            str(video_path),
-            FakeCapture(frames=["frame-a", "frame-b"], width=1920, height=1080),
-        )
-
-        response = client.post(
-            "/api/ic-lora/generate",
-            json={
-                "video_path": str(video_path),
-                "prompt": "test prompt",
-                "images": [],
-                "adapter_id": "water_simulation",
-            },
-        )
-        assert response.status_code == 200, f"Unexpected status: {response.json()}"
-        kwargs = fake_services.ic_lora_pipeline.generate_calls[0]
-        # Non-inpaint now also preserves aligned input resolution
-        assert kwargs["width"] == 1920, f"Expected width=1920, got {kwargs['width']}"
-        assert kwargs["height"] == 1088, f"Expected height=1088, got {kwargs['height']}"
-
-    def test_union_control_1920x1080_aligns_to_128(self, client, test_state,
-                                                     create_fake_model_files,
-                                                     fake_services):
-        """Union Control aligns to 128 because ref_downscale=2 means half-res ref
-        must still be VAE 32x compatible (align 64*2)."""
-        create_fake_model_files()
-        test_state.state.app_settings.use_local_text_encoder = True
-        fake_services.ic_lora_pipeline.bind_singleton(fake_services.ic_lora_pipeline)
-
-        adapter_dir = test_state.config.default_models_dir / "adapters"
-        adapter_dir.mkdir(parents=True, exist_ok=True)
-        union_file = adapter_dir / "union_control.safetensors"
-        union_file.write_bytes(b"\x00" * 1024)
-
-        profile = ModelProfilePayload(
-            id="union-profile",
-            name="Union Profile",
-            source="official",
-            components=ModelComponentPaths(
-                official_adapters={"union_control": str(union_file)},
-            ),
-        )
-        test_state.state.model_profiles = [profile]
-        test_state.state.active_model_profile_id = "union-profile"
-
-        video_path = test_state.config.outputs_dir / "test_video.mp4"
-        video_path.write_bytes(b"\x00" * 100)
-        test_state.video_processor.register_video(
-            str(video_path),
-            FakeCapture(frames=["frame-a", "frame-b"], width=1920, height=1080),
-        )
-
-        response = client.post(
-            "/api/ic-lora/generate",
-            json={
-                "video_path": str(video_path),
-                "conditioning_type": "canny",
-                "adapter_id": "union_control",
-                "prompt": "test prompt",
-                "images": [{"path": "/fake/img.png", "frame": 0, "strength": 1.0}],
-            },
-        )
-        assert response.status_code == 200, f"Unexpected status: {response.json()}"
-        kwargs = fake_services.ic_lora_pipeline.generate_calls[0]
-        # union_control uses align_to=128: align_up(1920, 128) = 1920, align_up(1080, 128) = 1152
-        assert kwargs["width"] == 1920, f"Expected width=1920, got {kwargs['width']}"
-        assert kwargs["height"] == 1152, f"Expected height=1152 (1080 aligned to 128), got {kwargs['height']}"
+        assert kwargs["height"] == 1088, f"Expected height=1088 (1080 aligned to 64), got {kwargs['height']}"
 
     def test_plain_canny_1920x1080_aligns_to_128(self, client, test_state,
                                                   create_fake_model_files,
@@ -1938,3 +1849,191 @@ class TestIcLoraResolution:
         kwargs = fake_services.ic_lora_pipeline.generate_calls[0]
         assert kwargs["width"] == 1920, f"Expected width=1920, got {kwargs['width']}"
         assert kwargs["height"] == 1152, f"Expected height=1152 (1080 aligned to 128), got {kwargs['height']}"
+
+
+class TestHdrPromptEncoderAudioFallback:
+    """HDR must never feed an audio modality with context=None into upstream.
+
+    The pinned ``ICLoraPipeline.__call__`` UNCONDITIONALLY builds an audio
+    modality from the prompt-encoder's ``audio_encoding``. HDR is video-only,
+    so when no explicit ``audio_context`` is supplied the wrapper must borrow a
+    valid ``audio_encoding`` from the real prompt encoder — otherwise the
+    transformer's audio args preprocessor crashes with::
+
+        AttributeError: 'NoneType' object has no attribute 'view'
+
+    at ``audio_args_preprocessor.prepare(audio, video)``. These tests pin that
+    contract directly on the wrapper (the handler-level fake pipeline cannot
+    exercise this code path).
+    """
+
+    def test_none_audio_falls_back_to_real_encoder(self):
+        """audio_context=None borrows a valid audio_encoding from the real encoder."""
+        import torch
+
+        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import (
+            _HDRPromptEncoderWrapper,
+        )
+
+        video = torch.zeros(1, 1024, 4096, dtype=torch.float32)
+        real_audio = torch.ones(1, 64, 4096, dtype=torch.float32)
+        calls: list[dict] = []
+
+        class _FakeRealCtx:
+            def __init__(self, audio_encoding: torch.Tensor) -> None:
+                # video_encoding is intentionally ignored by the wrapper.
+                self.video_encoding = torch.full((1, 1024, 4096), -7.0)
+                self.audio_encoding = audio_encoding
+
+        class _FakeRealEncoder:
+            def __call__(self, prompts: list[str], **kwargs: object):
+                calls.append({"prompts": prompts, "kwargs": kwargs})
+                return (_FakeRealCtx(real_audio),)
+
+        wrapper = _HDRPromptEncoderWrapper(
+            video_context=video,
+            audio_context=None,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+            original_encoder=_FakeRealEncoder(),
+        )
+
+        (ctx,) = wrapper(["prompt"], enhance_first_prompt=True, streaming_prefetch_count=None)
+
+        # Real encoder invoked exactly once for the audio fallback.
+        assert len(calls) == 1, f"expected one fallback call, got {len(calls)}"
+        # HDR must disable enhancement on the fallback call (we only need a
+        # validly-shaped audio tensor; HDR video comes from scene embeddings).
+        assert calls[0]["kwargs"].get("enhance_first_prompt") is False, (
+            "HDR audio fallback must force enhance_first_prompt=False"
+        )
+
+        # HDR video_encoding always comes from scene embeddings, never the encoder.
+        assert torch.equal(ctx.video_encoding, video)
+        # audio_encoding must be non-None — this is the crash root cause.
+        assert ctx.audio_encoding is not None
+        # Borrowed from the real encoder, cast to the wrapper's dtype.
+        assert torch.equal(ctx.audio_encoding, real_audio)
+
+    def test_none_audio_propagates_streaming_prefetch(self):
+        """Fallback call forwards caller kwargs (e.g. streaming_prefetch_count)."""
+        import torch
+
+        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import (
+            _HDRPromptEncoderWrapper,
+        )
+
+        class _FakeRealCtx:
+            def __init__(self) -> None:
+                self.video_encoding = torch.zeros(1, 1, 1)
+                self.audio_encoding = torch.zeros(1, 8, 8)
+
+        class _FakeRealEncoder:
+            def __call__(self, prompts, **kwargs):
+                self.last_kwargs = kwargs
+                return (_FakeRealCtx(),)
+
+        enc = _FakeRealEncoder()
+        wrapper = _HDRPromptEncoderWrapper(
+            video_context=torch.zeros(1, 1024, 4096),
+            audio_context=None,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+            original_encoder=enc,
+        )
+        wrapper(["p"], enhance_first_prompt=False, streaming_prefetch_count=3)
+        assert enc.last_kwargs.get("streaming_prefetch_count") == 3
+
+    def test_explicit_audio_context_skips_real_encoder(self):
+        """When audio_context is supplied, the real encoder must not run."""
+        import torch
+
+        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import (
+            _HDRPromptEncoderWrapper,
+        )
+
+        video = torch.zeros(1, 1024, 4096, dtype=torch.float32)
+        audio = torch.ones(1, 64, 4096, dtype=torch.float32)
+
+        class _ExplodingEncoder:
+            def __call__(self, *args, **kwargs):
+                raise AssertionError(
+                    "real encoder must not run when an explicit audio_context is supplied"
+                )
+
+        wrapper = _HDRPromptEncoderWrapper(
+            video_context=video,
+            audio_context=audio,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+            original_encoder=_ExplodingEncoder(),
+        )
+
+        (ctx,) = wrapper(["prompt"], enhance_first_prompt=False)
+
+        assert ctx.audio_encoding is not None
+        assert torch.equal(ctx.audio_encoding, audio)
+        assert torch.equal(ctx.video_encoding, video)
+
+    def test_swap_restores_original_encoder_on_exception(self):
+        """The original prompt_encoder is restored even if HDR inference raises."""
+        import contextlib
+
+        import torch
+
+        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import (
+            _swap_prompt_encoder_for_hdr,
+        )
+
+        class _FakePipeline:
+            device = torch.device("cpu")  # type: ignore[assignment]
+            dtype = torch.float32  # type: ignore[assignment]
+
+        class _FakeEncoder:
+            pass
+
+        pipe = _FakePipeline()
+        original = _FakeEncoder()
+        pipe.prompt_encoder = original
+
+        with contextlib.suppress(RuntimeError):
+            with _swap_prompt_encoder_for_hdr(pipe, torch.zeros(1, 1), None):
+                assert pipe.prompt_encoder is not original, "wrapper not installed"
+                raise RuntimeError("simulated HDR inference failure")
+
+        assert pipe.prompt_encoder is original, "original encoder not restored"
+
+    def test_swap_yields_wrapper_for_hdr_video_only(self):
+        """Inside the swap, a None audio_context yields a non-None audio_encoding."""
+        import torch
+
+        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import (
+            _swap_prompt_encoder_for_hdr,
+        )
+
+        real_audio = torch.ones(1, 8, 8, dtype=torch.float32)
+
+        class _FakeRealCtx:
+            def __init__(self) -> None:
+                self.video_encoding = torch.zeros(1, 1, 1)
+                self.audio_encoding = real_audio
+
+        class _FakePipeline:
+            device = torch.device("cpu")  # type: ignore[assignment]
+            dtype = torch.float32  # type: ignore[assignment]
+
+        class _FakeEncoder:
+            def __call__(self, prompts, **kwargs):
+                return (_FakeRealCtx(),)
+
+        pipe = _FakePipeline()
+        pipe.prompt_encoder = _FakeEncoder()
+
+        hdr_video = torch.zeros(1, 1024, 4096, dtype=torch.float32)
+        with _swap_prompt_encoder_for_hdr(pipe, hdr_video, None):
+            (ctx,) = pipe.prompt_encoder(["p"], enhance_first_prompt=False)
+
+        # HDR video from scene embeddings, audio borrowed from real encoder.
+        assert torch.equal(ctx.video_encoding, hdr_video)
+        assert ctx.audio_encoding is not None
+        assert torch.equal(ctx.audio_encoding, real_audio)

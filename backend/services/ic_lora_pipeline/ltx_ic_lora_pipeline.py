@@ -18,6 +18,7 @@ from services.ltx_pipeline_common import (
     make_ltx_image_conditioning_input,
     video_chunks_number,
 )
+from services.media_encoder.media_encoder import HdrProxyPolicy
 from services.services_utils import AudioOrNone, TilingConfigType, device_supports_fp8
 
 if TYPE_CHECKING:
@@ -135,8 +136,21 @@ class _HDRPromptEncoderWrapper:
     """Replaces ``pipeline.prompt_encoder`` for HDR inference.
 
     When called (matching the ``PromptEncoder.__call__`` signature), returns a
-    single-element tuple of :class:`_HDRPromptContext` carrying the pre-loaded
-    scene-embedding tensors — moved/cast to the pipeline's device/dtype.
+    single-element tuple of :class:`_HDRPromptContext` carrying the HDR
+    ``video_context`` scene-embedding tensor (moved/cast to the pipeline's
+    device/dtype).
+
+    HDR is video-only, so ``audio_context`` is normally ``None``. However, the
+    pinned ``ICLoraPipeline.__call__`` UNCONDITIONALLY builds an audio modality
+    from whatever ``audio_encoding`` the prompt-encoder yields — yielding
+    ``None`` crashes the transformer's audio args preprocessor
+    (``AttributeError: 'NoneType' object has no attribute 'view'`` at
+    ``audio_args_preprocessor.prepare(audio, video)``). When no explicit
+    ``audio_context`` is supplied, this wrapper borrows a valid
+    ``audio_encoding`` from the real prompt encoder so upstream's audio
+    modality builds and runs. The resulting audio output is discarded by
+    ``generate()`` via ``_is_hdr_video_only_path`` — the HDR file remains
+    video-only. The HDR ``video_encoding`` always comes from scene embeddings.
     """
 
     def __init__(
@@ -145,6 +159,7 @@ class _HDRPromptEncoderWrapper:
         audio_context: torch.Tensor | None,
         device: torch.device,
         dtype: torch.dtype,
+        original_encoder: Any,
     ) -> None:
         self._video = video_context.to(device=device, dtype=dtype)
         self._audio = (
@@ -152,9 +167,27 @@ class _HDRPromptEncoderWrapper:
             if audio_context is not None
             else None
         )
+        self._original_encoder = original_encoder
+        self._device = device
+        self._dtype = dtype
 
     def __call__(self, prompts: list[str], **kwargs: Any) -> tuple[_HDRPromptContext, ...]:
-        return (_HDRPromptContext(self._video, self._audio),)
+        audio = self._audio
+        if audio is None:
+            # Borrow a valid audio_encoding from the real prompt encoder so the
+            # pinned pipeline's unconditional audio modality builds without
+            # crashing. enhance_first_prompt is forced off — we only need a
+            # validly-shaped audio tensor (the HDR video_encoding from scene
+            # embeddings overrides whatever the encoder produces for video), so
+            # skip the heavy GGUF/Gemma enhance path. Generated audio is later
+            # discarded by generate() (_is_hdr_video_only_path).
+            fallback_kwargs = dict(kwargs)
+            fallback_kwargs["enhance_first_prompt"] = False
+            (real_ctx,) = self._original_encoder(prompts, **fallback_kwargs)
+            real_audio = getattr(real_ctx, "audio_encoding", None)
+            if real_audio is not None:
+                audio = real_audio.to(device=self._device, dtype=self._dtype)
+        return (_HDRPromptContext(self._video, audio),)
 
 
 @contextmanager
@@ -174,6 +207,7 @@ def _swap_prompt_encoder_for_hdr(
         audio_context,
         pipeline.device,
         getattr(pipeline, "dtype", torch.bfloat16),
+        original_encoder=original,
     )
     pipeline.prompt_encoder = wrapper
     try:
@@ -588,6 +622,18 @@ class LTXIcLoraPipeline:
                 video = torch.cat(list(video), dim=0)
             video = output_postprocess(video)
 
+        # HDR proxy policy: when the HDR linear (scene-referred, values >1.0)
+        # path is active, the sidecar H.264 proxy must be SDR-tonemapped
+        # (Reinhard) rather than hard-clipped. Threaded through the existing
+        # encode path (single encoder framework) — only the proxy transfer math
+        # changes. The HDR linear EXR primary is always preserved. Non-HDR
+        # generation passes None → the encoder's SDR default (HdrProxyPolicy.OFF).
+        hdr_proxy_policy: HdrProxyPolicy | None = (
+            HdrProxyPolicy.SDR_TONEMAP_REINHARD
+            if self._is_hdr_video_only_path(hdr_video_context, output_postprocess)
+            else None
+        )
+
         chunks = video_chunks_number(num_frames, tiling_config)
         encode_video_output(
             video=video, audio=audio, fps=int(frame_rate), output_path=output_path,
@@ -595,6 +641,7 @@ class LTXIcLoraPipeline:
             encoder=encoder, proxy_path=proxy_path,
             on_progress=on_progress,
             input_colorspace=input_colorspace, total_frames=num_frames,
+            hdr_proxy_policy=hdr_proxy_policy,
         )
 
     # ------------------------------------------------------------------ #

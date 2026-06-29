@@ -892,6 +892,7 @@ class FakeMediaEncoder:
         on_progress: Any = None,  # noqa: ARG002
         total_frames: int | None = None,  # noqa: ARG002
         input_colorspace: Any = None,  # noqa: ARG002
+        hdr_proxy_policy: Any = None,  # noqa: ARG002
     ) -> EncoderResult:
         self.calls.append(
             {
@@ -901,6 +902,7 @@ class FakeMediaEncoder:
                 "primary_path": primary_path,
                 "output_format": output_format,
                 "proxy_path": proxy_path,
+                "hdr_proxy_policy": hdr_proxy_policy,
             }
         )
         self.last_format = output_format

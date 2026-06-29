@@ -130,7 +130,7 @@ class TestNoProfile:
         assert result.quantization == "unknown"
         assert result.fast_status == "missing"
         assert result.normal_status == "missing"
-        assert result.hdr_status == "gated"
+        assert result.hdr_status == "missing"
         assert result.distilled_lora_status == "not_applicable"
         assert result.has_local_text_encoder is False
         assert result.suppresses_api_key_prompt is False
@@ -480,9 +480,19 @@ class TestWrongFolderAndDuplicate:
         assert result.has_upscaler is False
 
 
-class TestHDRGating:
-    def test_hdr_present_still_gated(self):
-        """HDR LoRA + scene embeddings installed → hdr_status still gated."""
+class TestHDRStatus:
+    """HDR workflow status is derived from artifact availability: ``supported``
+    only when base + HDR LoRA + scene-embedding support asset are all
+    available; ``missing`` otherwise. HDR artifacts are no longer gated at the
+    resolver artifact level — present artifacts report ``available``.
+
+    The scene embeddings remain a required *support* asset (they participate in
+    the HDR capability check) but are never an independently selectable
+    adapter — selectability is owned by the handler.
+    """
+
+    def test_hdr_present_with_all_components_is_supported(self):
+        """Base + HDR LoRA + scene embeddings installed → hdr_status supported."""
         profile = _profile(
             transformer="/models/ltx-2.3-22b-distilled.safetensors",
         )
@@ -490,55 +500,121 @@ class TestHDRGating:
             _artifact("base_diffusion_model", "installed",
                       absolute_paths=["/models/ltx-2.3-22b-distilled.safetensors"],
                       preferred_path="/models/ltx-2.3-22b-distilled.safetensors"),
-            _artifact("hdr", "installed", gated=True,
+            _artifact("hdr", "installed",
                       absolute_paths=["/models/ltx-2.3-22b-ic-lora-hdr-0.9.safetensors"],
                       preferred_path="/models/ltx-2.3-22b-ic-lora-hdr-0.9.safetensors"),
-            _artifact("hdr_scene_embeddings", "installed", gated=True,
+            _artifact("hdr_scene_embeddings", "installed",
                       absolute_paths=["/models/ltx-2.3-22b-ic-lora-hdr-scene-emb.safetensors"],
                       preferred_path="/models/ltx-2.3-22b-ic-lora-hdr-scene-emb.safetensors"),
         )
         result = _resolve(profile, catalog)
-        assert result.hdr_status == "gated"
+        assert result.hdr_status == "supported"
 
-        # HDR artifacts are gated at artifact level too (not available)
+        # HDR artifacts are available at the artifact level (no longer gated).
         hdr = _find(result.artifacts, "hdr")
         assert hdr is not None
-        assert hdr.status == "gated"
+        assert hdr.status == "available"
 
         hdr_emb = _find(result.artifacts, "hdr_scene_embeddings")
         assert hdr_emb is not None
-        assert hdr_emb.status == "gated"
+        assert hdr_emb.status == "available"
 
-    def test_hdr_missing_still_gated(self):
+    def test_hdr_missing_is_missing(self):
+        """No artifacts → hdr_status missing (no longer hardcoded gated)."""
         result = _resolve(None, [])
-        assert result.hdr_status == "gated"
+        assert result.hdr_status == "missing"
 
-    def test_hdr_with_profile_paths_still_gated(self):
-        """Explicit profile paths for HDR do not ungate the workflow or artifact."""
+    def test_hdr_artifacts_without_base_is_missing(self):
+        """HDR LoRA + scene embeddings present but base absent → missing.
+
+        Base diffusion model availability is required for the HDR workflow.
+        """
+        profile = _profile()  # no transformer / base
+        catalog = _catalog(
+            _artifact("hdr", "installed",
+                      absolute_paths=["/models/ltx-2.3-22b-ic-lora-hdr-0.9.safetensors"],
+                      preferred_path="/models/ltx-2.3-22b-ic-lora-hdr-0.9.safetensors"),
+            _artifact("hdr_scene_embeddings", "installed",
+                      absolute_paths=["/models/ltx-2.3-22b-ic-lora-hdr-scene-emb.safetensors"],
+                      preferred_path="/models/ltx-2.3-22b-ic-lora-hdr-scene-emb.safetensors"),
+        )
+        result = _resolve(profile, catalog)
+        assert result.hdr_status == "missing"
+
+    def test_hdr_lora_without_scene_embeddings_is_missing(self):
+        """Base + HDR LoRA present but scene embeddings absent → missing.
+
+        Scene embeddings are a required support asset for the HDR workflow.
+        """
         profile = _profile(
+            transformer="/models/ltx-2.3-22b-distilled.safetensors",
+        )
+        catalog = _catalog(
+            _artifact("base_diffusion_model", "installed",
+                      absolute_paths=["/models/ltx-2.3-22b-distilled.safetensors"],
+                      preferred_path="/models/ltx-2.3-22b-distilled.safetensors"),
+            _artifact("hdr", "installed",
+                      absolute_paths=["/models/ltx-2.3-22b-ic-lora-hdr-0.9.safetensors"],
+                      preferred_path="/models/ltx-2.3-22b-ic-lora-hdr-0.9.safetensors"),
+        )
+        result = _resolve(profile, catalog)
+        assert result.hdr_status == "missing"
+
+    def test_hdr_with_profile_paths_supported_when_all_present(self):
+        """Explicit profile paths for HDR + base resolve available; workflow
+        supported when base + HDR LoRA + scene embeddings are all present."""
+        profile = _profile(
+            transformer="/models/ltx-2.3-22b-distilled.safetensors",
             ic_lora_hdr="/models/hdr-lora.safetensors",
             ic_lora_hdr_scene_embeddings="/models/hdr-scene-emb.safetensors",
         )
         catalog = _catalog(
-            _artifact("hdr", "installed", gated=True,
+            _artifact("base_diffusion_model", "installed",
+                      absolute_paths=["/models/ltx-2.3-22b-distilled.safetensors"],
+                      preferred_path="/models/ltx-2.3-22b-distilled.safetensors"),
+            _artifact("hdr", "installed",
                       absolute_paths=["/models/hdr-lora.safetensors"],
                       preferred_path="/models/hdr-lora.safetensors"),
-            _artifact("hdr_scene_embeddings", "installed", gated=True,
+            _artifact("hdr_scene_embeddings", "installed",
                       absolute_paths=["/models/hdr-scene-emb.safetensors"],
                       preferred_path="/models/hdr-scene-emb.safetensors"),
         )
         result = _resolve(profile, catalog)
-        assert result.hdr_status == "gated"
+        assert result.hdr_status == "supported"
 
-        # Blocker 4: HDR artifact status is gated even via profile path
+        # HDR artifact status is available via profile path (no longer gated).
         hdr = _find(result.artifacts, "hdr")
         assert hdr is not None
-        assert hdr.status == "gated"
+        assert hdr.status == "available"
         assert hdr.source == "profile"
 
         hdr_emb = _find(result.artifacts, "hdr_scene_embeddings")
         assert hdr_emb is not None
-        assert hdr_emb.status == "gated"
+        assert hdr_emb.status == "available"
+
+    def test_hdr_scene_embeddings_support_asset_not_selectable_via_resolver(self):
+        """Scene embeddings resolve as a support artifact (available when
+        present) — they are not gated, but selectability as a standalone
+        workflow is owned by the handler, not the resolver."""
+        profile = _profile(
+            transformer="/models/ltx-2.3-22b-distilled.safetensors",
+        )
+        catalog = _catalog(
+            _artifact("base_diffusion_model", "installed",
+                      absolute_paths=["/models/ltx-2.3-22b-distilled.safetensors"],
+                      preferred_path="/models/ltx-2.3-22b-distilled.safetensors"),
+            _artifact("hdr_scene_embeddings", "installed",
+                      absolute_paths=["/models/ltx-2.3-22b-ic-lora-hdr-scene-emb.safetensors"],
+                      preferred_path="/models/ltx-2.3-22b-ic-lora-hdr-scene-emb.safetensors"),
+        )
+        result = _resolve(profile, catalog)
+        # Without the HDR LoRA, the workflow is still missing — the scene
+        # embeddings support asset alone does not constitute an HDR workflow.
+        assert result.hdr_status == "missing"
+        # The support asset itself reports available (not gated/hidden).
+        hdr_emb = _find(result.artifacts, "hdr_scene_embeddings")
+        assert hdr_emb is not None
+        assert hdr_emb.status == "available"
 
 
 class TestLocalTextEncoder:

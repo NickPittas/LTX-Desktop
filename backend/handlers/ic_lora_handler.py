@@ -355,9 +355,15 @@ class IcLoraHandler(StateHandlerBase):
             s = self.state.app_settings
             use_api = not self._text.should_use_local_encoding()
             encoding_method = "api" if use_api else "local"
+            # Ingredients is an image-conditioned workflow (images are required),
+            # so consult the I2V enhancer setting — never the T2V setting.
+            # Note: IC-LoRA prompt enhancement is API-only at the handler level
+            # (the pipeline is not passed enhance_prompt), so local GGUF Gemma
+            # never performs image-conditioned enhancement here; the GGUF call
+            # patch remains the deep safety net if that ever changes.
             t_text_start = time.perf_counter()
             self._text.prepare_text_encoding(
-                req.prompt, enhance_prompt=use_api and s.prompt_enhancer_enabled_t2v
+                req.prompt, enhance_prompt=use_api and s.prompt_enhancer_enabled_i2v
             )
             t_text_end = time.perf_counter()
             logger.info("[ic-lora] Text encoding (%s): %.2fs", encoding_method, t_text_end - t_text_start)
@@ -454,7 +460,9 @@ class IcLoraHandler(StateHandlerBase):
           audio modality is produced or conditioned. Audio scene embeddings are
           intentionally ignored even if present in the embeddings file (they are
           loaded only as metadata compatibility, never threaded into inference).
-        - Primary output is EXR (linear); SDR proxy is generated if supported.
+        - Primary output is EXR (linear). A non-null mp4 SDR proxy_path is
+          forwarded to the encoder (Lane A contract); Lane B owns the actual
+          tonemap policy inside MediaEncoder proxy generation.
         """
         generation_id = uuid.uuid4().hex[:8]
         t_total_start = time.perf_counter()
@@ -510,11 +518,15 @@ class IcLoraHandler(StateHandlerBase):
             output_path = make_primary_output_path(
                 str(self.config.outputs_dir), "hdr", output_format, uuid.uuid4().hex[:8]
             )
-            # SDR proxy tonemapping (linear HDR → SDR) is deferred — the ffmpeg
-            # proxy path applies -apply_trc linear which is wrong for HDR. Do NOT
-            # generate an incorrect proxy; set to None until an explicit tonemap
-            # is wired into the encoder's proxy generation.
-            proxy_path = None
+            # ponytail: Lane A (HDR completion) — the proxy path is now expected
+            # to be non-null. For EXR primaries, make_proxy_output_path returns
+            # ``<stem>_exr_proxy.mp4``. Lane B owns wiring the actual SDR
+            # tonemap policy inside MediaEncoder's proxy generation; the handler
+            # contract here is just to forward the proxy_path to the encoder so
+            # a non-null mp4 proxy is produced once Lane B lands. The encoder
+            # receives output_format=EXR + proxy_path and is responsible for any
+            # linear→SDR tonemap when materializing the proxy.
+            proxy_path = make_proxy_output_path(output_path, output_format)
 
             t_inference_start = time.perf_counter()
             ic_state.pipeline.generate(

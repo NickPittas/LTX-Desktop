@@ -144,7 +144,7 @@ function resolveDownloadAction(
       disabled: true,
       cpId,
       kind: 'info',
-      tooltip: 'File presence does not enable HDR; workflow remains gated.',
+      tooltip: 'Accept the upstream license on Hugging Face to download this file.',
     }
   }
 
@@ -267,7 +267,7 @@ function SupportBadge({ status }: { status: ArtifactSupportStatus }) {
       label: 'Gated',
       classes: 'bg-purple-500/15 text-purple-400 border-purple-500/25',
       icon: <Lock className="h-3 w-3" />,
-      tooltip: 'File presence does not enable HDR; workflow remains gated.',
+      tooltip: 'Accept the upstream license on Hugging Face to download this file.',
     },
     unvalidated: {
       label: 'Unvalidated',

@@ -450,6 +450,138 @@ def test_proxy_from_exr_has_correct_frame_count(tmp_path: Path) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# HDR linear EXR primary + SDR tonemapped proxy (Lane B)
+# ---------------------------------------------------------------------------
+
+
+def _make_hdr_linear_frames(
+    num_frames: int, h: int, w: int, value: float = 2.5
+) -> torch.Tensor:
+    """Return a float32 ``(F, H, W, 3)`` tensor of flat HDR linear values >1.0.
+
+    Scene-referred linear (e.g. LogC3-decoded HDR); values legitimately exceed
+    1.0. ``input_colorspace=LINEAR_REC709`` routes this through the encoder's
+    linear-passthrough branch (no clamp / no EOTF) so the EXR primary preserves
+    >1.0 and the proxy must tonemap rather than hard-clip.
+    """
+    arr = np.full((num_frames, h, w, 3), float(value), dtype=np.float32)
+    return torch.from_numpy(arr)
+
+
+def test_hdr_exr_proxy_tonemapped_not_dark_or_blown(tmp_path: Path) -> None:
+    """HDR linear primary (>1.0) → EXR preserves >1.0; proxy is SDR-tonemapped.
+
+    MANDATORY HDR gate. With ``HdrProxyPolicy.SDR_TONEMAP_REINHARD`` the sidecar
+    H.264 proxy applies the deterministic global Reinhard operator ``x/(x+1)``
+    then the Rec.709 OETF. For a flat HDR field of 2.5:
+      * EXR stores 2.5 unchanged (>1.0 preserved — linear passthrough),
+      * proxy is playable H.264 ``yuv420p`` with BT.709 tags,
+      * proxy mean luma lands in a SDR band that is neither dark (missing
+        transfer ≈ 30-40) nor blown (hard clip of >1.0 ≈ 235 limited white):
+        ``Reinhard(2.5)=0.714 → bt709_oetf ≈ 0.847 → limited Y ≈ 201``.
+    """
+    import OpenEXR
+
+    from services.color_management import LINEAR_REC709
+    from services.media_encoder.media_encoder import HdrProxyPolicy
+
+    encoder = MediaEncoderImpl()
+    primary = tmp_path / "hdr_exr"
+    proxy = tmp_path / "hdr_proxy.mp4"
+    video = _make_hdr_linear_frames(3, 32, 32, value=2.5)
+
+    encoder.encode(
+        video=video, audio=None, fps=24, primary_path=str(primary),
+        output_format=OutputFormat.EXR_ZIP_FLOAT, proxy_path=str(proxy),
+        video_chunks_number=1, input_colorspace=LINEAR_REC709,
+        hdr_proxy_policy=HdrProxyPolicy.SDR_TONEMAP_REINHARD,
+    )
+
+    # 1. EXR primary preserves HDR values >1.0 (linear passthrough, no clamp).
+    frames = sorted(primary.glob("frame_*.exr"))
+    assert len(frames) == 3
+    f = OpenEXR.File(str(frames[0]), separate_channels=True)
+    r_pixels = f.channels()["R"].pixels.astype(np.float32)
+    assert r_pixels.max() > 1.5, f"HDR value clipped in EXR: max={r_pixels.max()}"
+    np.testing.assert_allclose(r_pixels[0, 0], 2.5, atol=0.01)
+
+    # 2. Proxy exists, playable (H.264), yuv420p, BT.709 tags.
+    assert proxy.exists() and proxy.stat().st_size > 0
+    vs = _ffprobe_video_stream(str(proxy))
+    assert vs["codec_name"] == "h264", vs["codec_name"]
+    assert vs["pix_fmt"] == "yuv420p", vs["pix_fmt"]
+    assert vs.get("color_range") in ("tv", "limited"), vs.get("color_range")
+    assert vs.get("color_transfer") == "bt709", vs.get("color_transfer")
+    assert vs.get("color_primaries") == "bt709", vs.get("color_primaries")
+    assert vs.get("color_space") == "bt709", vs.get("color_space")
+
+    # 3. Proxy luma is neither dark (missing transfer) nor blown (hard clip).
+    luma = _decode_mean_luma_yuv(str(proxy))
+    # Reinhard(2.5)→bt709→limited Y ≈ 201. Band tolerates encoder/quant slack.
+    assert 150.0 < luma < 230.0, (
+        f"HDR proxy luma {luma:.1f} out of SDR band — "
+        f"<150 = dark/missing-transfer, >230 = blown (no tonemap applied)"
+    )
+
+
+def test_hdr_proxy_tonemap_compresses_highlights_vs_clip(tmp_path: Path) -> None:
+    """SDR_TONEMAP proxy compresses HDR highlights; the OFF path hard-clips them.
+
+    Same HDR linear 2.5 source. With the policy OFF (the SDR default applied to
+    an HDR primary), a plain linear→bt709 OETF clips (``bt709_oetf(2.5)≈1.56 →
+    1.0``) so the proxy saturates to limited-range white (Y≈235). With
+    ``SDR_TONEMAP_REINHARD`` the proxy rolls off (Y≈201). The tonemapped proxy
+    must be measurably DARKER than the clipped one — proving the tonemap
+    prevented highlight blow-out — while both primaries still preserve 2.5 (the
+    policy only affects the proxy, never the EXR primary).
+    """
+    import OpenEXR
+
+    from services.color_management import LINEAR_REC709
+    from services.media_encoder.media_encoder import HdrProxyPolicy
+
+    encoder = MediaEncoderImpl()
+    video = _make_hdr_linear_frames(2, 24, 24, value=2.5)
+
+    # Clipped reference (OFF — the SDR single-transfer path on an HDR primary).
+    clip_primary = tmp_path / "clip_exr"
+    clip_proxy = tmp_path / "clip_proxy.mp4"
+    encoder.encode(
+        video=video, audio=None, fps=24, primary_path=str(clip_primary),
+        output_format=OutputFormat.EXR_ZIP_FLOAT, proxy_path=str(clip_proxy),
+        video_chunks_number=1, input_colorspace=LINEAR_REC709,
+        hdr_proxy_policy=HdrProxyPolicy.OFF,
+    )
+
+    # Tonemapped (Reinhard + Rec.709 OETF).
+    tm_primary = tmp_path / "tm_exr"
+    tm_proxy = tmp_path / "tm_proxy.mp4"
+    encoder.encode(
+        video=video, audio=None, fps=24, primary_path=str(tm_primary),
+        output_format=OutputFormat.EXR_ZIP_FLOAT, proxy_path=str(tm_proxy),
+        video_chunks_number=1, input_colorspace=LINEAR_REC709,
+        hdr_proxy_policy=HdrProxyPolicy.SDR_TONEMAP_REINHARD,
+    )
+
+    # Both primaries preserved HDR 2.5 (policy only affects the proxy).
+    for d in (clip_primary, tm_primary):
+        ff = OpenEXR.File(str(sorted(d.glob("frame_*.exr"))[0]), separate_channels=True)
+        assert ff.channels()["R"].pixels.astype(np.float32).max() > 1.5
+
+    clip_luma = _decode_mean_luma_yuv(str(clip_proxy))
+    tm_luma = _decode_mean_luma_yuv(str(tm_proxy))
+
+    # Clipped proxy saturates near limited-range white (blown out).
+    assert clip_luma > 225.0, f"OFF proxy unexpectedly not blown: {clip_luma:.1f}"
+    # Tonemapped proxy is a non-dark SDR render, clearly below the clip.
+    assert 150.0 < tm_luma < 230.0, f"tonemap proxy luma out of band: {tm_luma:.1f}"
+    assert (clip_luma - tm_luma) > 15.0, (
+        f"tonemap did not compress highlights vs clip: "
+        f"clip={clip_luma:.1f} tonemap={tm_luma:.1f}"
+    )
+
+
 def test_prores_proxy_roundtrip_luma(tmp_path: Path) -> None:
     """MANDATORY ProRes matrix/range round-trip gate (§0A.N/§0A.C).
 

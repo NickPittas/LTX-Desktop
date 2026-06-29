@@ -1386,10 +1386,10 @@ export function GenSpace() {
   const handleGenerate = async () => {
     if (mode === 'ic-lora') {
       if (!icLoraInput.ready) return
-      if (icLoraInput.adapterId !== 'ingredients' && !icLoraInput.videoPath) return
+      if (icLoraInput.adapterId !== 'ingredients' && icLoraInput.adapterId !== 'hdr' && !icLoraInput.videoPath) return
       if (!prompt.trim() && icLoraInput.adapterId !== 'in_outpainting') return
 
-      // Derive Ingredients output settings from PromptBar controls
+      // Derive prompt-only output settings (Ingredients + HDR) from PromptBar controls
       const fpsForIcLora = settings.fps
       // ponytail: local resolution map mirrors backend; move to shared schema if more res added
       const RES_MAP: Record<string, { width: number; height: number }> = {
@@ -1405,10 +1405,11 @@ export function GenSpace() {
       const icNumFrames = Math.max(9, 1 + 8 * Math.floor((icDuration * fpsForIcLora) / 8))
 
       const resolvedPrompt = prompt
+      const isNoInputAdapter = icLoraInput.adapterId === 'ingredients' || icLoraInput.adapterId === 'hdr'
       await submitIcLora({
         videoPath: icLoraInput.videoPath,
-        conditioningType: icLoraCondType,
-        conditioningStrength: icLoraStrength,
+        conditioningType: icLoraInput.adapterId === 'hdr' ? null : icLoraCondType,
+        conditioningStrength: icLoraInput.adapterId === 'hdr' ? 1.0 : icLoraStrength,
         loraStrength: loraStrength,
         adapterId: icLoraInput.adapterId,
         maskPath: icLoraInput.maskPath,
@@ -1419,7 +1420,7 @@ export function GenSpace() {
         finalMaskBlurPx: icLoraInput.finalMaskBlurPx,
         frameRate: fpsForIcLora,
         outputFormat: settings.outputFormat,
-        ...(icLoraInput.adapterId === 'ingredients'
+        ...(isNoInputAdapter
           ? { width: icWidth, height: icHeight, numFrames: icNumFrames }
           : {}),
       }, async (result) => {
@@ -1702,10 +1703,11 @@ export function GenSpace() {
   )
   const isInOutpainting = isIcLoraMode && icLoraInput.adapterId === 'in_outpainting'
   const isIngredients = isIcLoraMode && icLoraInput.adapterId === 'ingredients'
+  const isHdr = isIcLoraMode && icLoraInput.adapterId === 'hdr'
   const canSubmit = isRetakeMode
     ? retakeInput.ready && !!retakeInput.videoPath && !isRetaking
     : isIcLoraMode
-      ? (isInOutpainting || !!prompt.trim()) && icLoraInput.ready && (!!icLoraInput.videoPath || isIngredients) && !isIcLoraGenerating
+      ? (isInOutpainting || !!prompt.trim()) && icLoraInput.ready && (!!icLoraInput.videoPath || isIngredients || isHdr) && !isIcLoraGenerating
       : !!prompt.trim() && hasCompatibleVideoSettings
   const promptButtonLabel = isRetakeMode ? 'Retake' : isIcLoraMode ? 'Generate' : 'Generate'
   const promptButtonIcon = isRetakeMode
@@ -1937,7 +1939,8 @@ export function GenSpace() {
             onConditioningTypeChange={setIcLoraCondType}
             conditioningStrength={icLoraStrength}
             onConditioningStrengthChange={setIcLoraStrength}
-            outputVideoPath={(icLoraResult?.proxyPath ?? icLoraResult?.videoPath) || null}
+            outputVideoPath={icLoraResult?.videoPath || null}
+            outputProxyPath={icLoraResult?.proxyPath || null}
             onChange={setIcLoraInput}
           />
         </div>
@@ -1978,7 +1981,7 @@ export function GenSpace() {
           onIcLoraStrengthChange={setIcLoraStrength}
           loraStrength={loraStrength}
           onLoraStrengthChange={setLoraStrength}
-          showIcLoraOutputSettings={isIngredients}
+          showIcLoraOutputSettings={isIngredients || isHdr}
           onFpsChange={(fps) => setSettings((prev) => ({ ...prev, fps }))}
           isApiMode={shouldVideoGenerateWithLtxApi}
         />

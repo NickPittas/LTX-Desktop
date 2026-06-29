@@ -11,7 +11,11 @@ Phase 2 constraints (oracle-enforced):
   never called.
 - **Current runtime priority chain:** profile explicit path → catalog
   installed/duplicate → catalog wrong_folder_usable (candidate only) → missing.
-- **HDR always gated** regardless of file presence.
+- **HDR workflow status** is derived from artifact availability: ``supported``
+  only when the base diffusion model, the HDR IC-LoRA, and the HDR
+  scene-embedding support asset are all available; ``missing`` otherwise. The
+  scene embeddings are a required *support* asset, never an independently
+  selectable adapter (selectability is owned by the handler, not the resolver).
 - **Distilled LoRA** for dev base is runtime-wired as of Phase 3D; dev base
   + available distilled LoRA reports ``supported`` (missing LoRA stays
   ``missing``). Distilled base does not need a distilled LoRA.
@@ -44,13 +48,12 @@ PipelineStatus: TypeAlias = Literal[
     "supported",
     "candidate_unwired",
     "missing",
-    "gated",
     "unvalidated",
     "not_applicable",
 ]
 
-#: HDR workflow status — always ``gated`` until Phase 9.
-HDRStatus: TypeAlias = Literal["gated", "missing", "candidate_unvalidated"]
+#: HDR workflow status — derived from artifact availability (no hardcoded gate).
+HDRStatus: TypeAlias = Literal["supported", "missing"]
 
 #: Per-artifact resolution status.
 ArtifactItemStatus: TypeAlias = Literal[
@@ -59,7 +62,6 @@ ArtifactItemStatus: TypeAlias = Literal[
     "candidate_usable",
     "duplicate",
     "missing",
-    "gated",
     "not_applicable",
 ]
 
@@ -158,9 +160,6 @@ _DISTILLED_LORA_ROLES: tuple[str, ...] = (
     "distilled_lora_384_1_1",
     "distilled_lora_384",
 )
-
-#: Roles whose workflow is always gated at the artifact level (HDR).
-_GATED_ROLES: frozenset[str] = frozenset({"hdr", "hdr_scene_embeddings"})
 
 #: text_encoder_format values that count as local (not API).
 _LOCAL_TEXT_ENCODER_FORMATS: frozenset[str] = frozenset({"hf_folder", "safetensors", "gguf"})
@@ -350,10 +349,6 @@ def _resolve_role(
             field=_ROLE_TO_FIELD.get(role),
         ))
 
-    # HDR gating at artifact level: present HDR artifacts are not usable
-    if role in _GATED_ROLES and status in ("available", "candidate_usable", "duplicate"):
-        status = "gated"
-
     canonical = catalog_artifact.canonical_relative_path if catalog_artifact else None
 
     return ResolvedArtifactItem(
@@ -434,7 +429,7 @@ def _is_available(item: ResolvedArtifactItem) -> bool:
     """Whether an artifact counts as present/usable for capability derivation.
 
     ``duplicate`` counts as available (file is present, just in multiple
-    locations). ``gated`` (HDR) and ``candidate_usable`` (wrong folder) do not.
+    locations). ``candidate_usable`` (wrong folder) does not.
     """
     return item.status in ("available", "duplicate")
 
@@ -507,6 +502,25 @@ def _derive_retake_upscaler_status(upscaler_available: bool) -> PipelineStatus:
     return "candidate_unwired" if upscaler_available else "missing"
 
 
+def _derive_hdr_status(
+    base_available: bool,
+    hdr_available: bool,
+    scene_embeddings_available: bool,
+) -> HDRStatus:
+    """HDR workflow is ``supported`` only when the base diffusion model, the
+    HDR IC-LoRA, and the HDR scene-embedding support asset are all available;
+    otherwise ``missing``.
+
+    The scene embeddings are a required *support* asset for the HDR workflow —
+    they are never an independently selectable adapter (selectability is owned
+    by the handler, not the resolver), but their presence is required for the
+    HDR workflow to be considered supported.
+    """
+    if base_available and hdr_available and scene_embeddings_available:
+        return "supported"
+    return "missing"
+
+
 # ============================================================
 # Public API
 # ============================================================
@@ -563,6 +577,14 @@ def resolve_profile_capabilities(
     upscaler_item = _find_artifact(artifacts, "spatial_upscaler")
     upscaler_available = upscaler_item is not None and _is_available(upscaler_item)
 
+    # HDR support-asset availability (LoRA + required scene embeddings).
+    hdr_item = _find_artifact(artifacts, "hdr")
+    hdr_available = hdr_item is not None and _is_available(hdr_item)
+    scene_embeddings_item = _find_artifact(artifacts, "hdr_scene_embeddings")
+    scene_embeddings_available = (
+        scene_embeddings_item is not None and _is_available(scene_embeddings_item)
+    )
+
     # Derive pipeline statuses
     fast_status = _derive_fast_status(base_family, base_available, distilled_lora_available)
     distilled_lora_status: PipelineStatus = (
@@ -572,6 +594,9 @@ def resolve_profile_capabilities(
     )
     normal_status = _derive_normal_status(base_available)
     retake_upscaler_status = _derive_retake_upscaler_status(upscaler_available)
+    hdr_status = _derive_hdr_status(
+        base_available, hdr_available, scene_embeddings_available
+    )
 
     # Local text encoder / API-key suppression
     has_local_te, suppresses_api_key = _check_local_text_encoder(profile)
@@ -585,7 +610,7 @@ def resolve_profile_capabilities(
         fast_status=fast_status,
         distilled_lora_status=distilled_lora_status,
         normal_status=normal_status,
-        hdr_status="gated",
+        hdr_status=hdr_status,
         retake_upscaler_status=retake_upscaler_status,
         has_local_text_encoder=has_local_te,
         suppresses_api_key_prompt=suppresses_api_key,

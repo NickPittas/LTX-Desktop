@@ -85,8 +85,13 @@ class TestScannerStatuses:
                 f" has no subfolder component"
             )
 
-    def test_subfolder_hdr_installed_and_gated(self, tmp_path):
-        """HDR at canonical adapters/ path → installed + gated."""
+    def test_subfolder_hdr_installed_and_supported(self, tmp_path):
+        """HDR at canonical adapters/ path → installed + supported (not gated).
+
+        HDR LoRA and scene-embedding support asset are no longer scanner-gated;
+        installed copies report ``supported``. Selectability of the scene
+        embeddings as a standalone adapter is owned by the handler.
+        """
         models = tmp_path / "models"
         _write(models / "adapters", "ltx-2.3-22b-ic-lora-hdr-0.9.safetensors")
         _write(models / "adapters", "ltx-2.3-22b-ic-lora-hdr-scene-emb.safetensors")
@@ -95,24 +100,24 @@ class TestScannerStatuses:
 
         hdr = _find(result.artifacts, "hdr")
         assert hdr.status == "installed"
-        assert hdr.gated is True
-        assert hdr.support_status == "gated"
+        assert hdr.gated is False
+        assert hdr.support_status == "supported"
 
         hdr_emb = _find(result.artifacts, "hdr_scene_embeddings")
         assert hdr_emb.status == "installed"
-        assert hdr_emb.gated is True
-        assert hdr_emb.support_status == "gated"
+        assert hdr_emb.gated is False
+        assert hdr_emb.support_status == "supported"
 
-    def test_root_hdr_wrong_folder_but_gated(self, tmp_path):
-        """HDR at root (non-canonical) → wrong_folder_usable, still gated."""
+    def test_root_hdr_wrong_folder_but_supported(self, tmp_path):
+        """HDR at root (non-canonical) → wrong_folder_usable, supported (not gated)."""
         models = tmp_path / "models"
         _write(models, "ltx-2.3-22b-ic-lora-hdr-0.9.safetensors")
 
         result = scan_models(models)
         hdr = _find(result.artifacts, "hdr")
         assert hdr.status == "wrong_folder_usable"
-        assert hdr.gated is True
-        assert hdr.support_status == "gated"
+        assert hdr.gated is False
+        assert hdr.support_status == "supported"
 
     def test_subfolder_non_hdr_adapter_installed(self, tmp_path):
         """Adapter at canonical adapters/ path → installed."""
@@ -697,14 +702,14 @@ class TestScannerFullLayout:
 
         result = scan_models(models)
 
-        # Subfolder adapters at canonical path → installed (but HDR still gated)
+        # Subfolder adapters at canonical path → installed (HDR now supported)
         hdr = _find(result.artifacts, "hdr")
         assert hdr.status == "installed"
-        assert hdr.gated is True
+        assert hdr.gated is False
 
         hdr_emb = _find(result.artifacts, "hdr_scene_embeddings")
         assert hdr_emb.status == "installed"
-        assert hdr_emb.gated is True
+        assert hdr_emb.gated is False
 
         ingredients = _find(result.artifacts, "ingredients")
         assert ingredients.status == "installed"
@@ -754,10 +759,10 @@ class TestModelCatalogEndpoint:
         assert data["models_dir"] == str(models_dir)
         assert isinstance(data["scanned_at"], str)
         assert len(data["artifacts"]) > 0
-        # HDR at canonical adapters/ → installed + gated
+        # HDR at canonical adapters/ → installed + supported (not gated)
         hdr = next(a for a in data["artifacts"] if a["component_role"] == "hdr")
         assert hdr["status"] == "installed"
-        assert hdr["gated"] is True
+        assert hdr["gated"] is False
 
     def test_catalog_requires_admin(self, client):
         response = client.get("/api/models/catalog")

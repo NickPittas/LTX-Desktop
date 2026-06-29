@@ -26,6 +26,7 @@ interface ICLoraPanelProps {
   conditioningStrength?: number
   onConditioningStrengthChange?: (strength: number) => void
   outputVideoPath?: string | null
+  outputProxyPath?: string | null
   onChange?: (data: {
     videoPath: string | null
     conditioningType: ICLoraConditioningType
@@ -40,7 +41,7 @@ interface ICLoraPanelProps {
   }) => void
 }
 
-export type AdapterWorkflow = 'standard_video' | 'ingredients' | 'in_outpainting' | 'unavailable'
+export type AdapterWorkflow = 'standard_video' | 'ingredients' | 'in_outpainting' | 'hdr' | 'unavailable'
 
 export interface AdapterEntry {
   value: string
@@ -65,9 +66,11 @@ export const IC_LORA_ADAPTERS: AdapterEntry[] = [
   { value: 'ingredients', label: 'Ingredients', workflow: 'ingredients' },
   // in_outpainting — inpaint supported; outpaint not yet
   { value: 'in_outpainting', label: 'In/Outpainting', workflow: 'in_outpainting' },
+  // hdr — prompt-only text-to-video that outputs a linear EXR frame sequence.
+  // The backend may also return an SDR proxy for in-app preview.
+  { value: 'hdr', label: 'HDR', workflow: 'hdr' },
   // unavailable — visible but cannot be selected
   { value: 'motion_track_control', label: 'Motion Track Control', workflow: 'unavailable', reason: 'Motion track workflow not wired yet' },
-  { value: 'hdr', label: 'HDR', workflow: 'unavailable', reason: 'HDR workflow not wired yet' },
   { value: 'lipdub', label: 'LipDub', workflow: 'unavailable', reason: 'LipDub requires audio workflow — not wired yet' },
 ]
 
@@ -101,6 +104,7 @@ export function ICLoraPanel({
   conditioningStrength: conditioningStrengthProp,
   onConditioningStrengthChange,
   outputVideoPath: _outputVideoPath,
+  outputProxyPath: _outputProxyPath,
   onChange,
 }: ICLoraPanelProps) {
   const inputVideoRef = useRef<HTMLVideoElement>(null)
@@ -125,6 +129,8 @@ export function ICLoraPanel({
   const [ingredientPaths, setIngredientPaths] = useState<string[]>([])
 
   const showConditioning = internalCondType !== null
+  const selectedWorkflow = getAdapterEntry(internalAdapterId)?.workflow
+  const isHdrWorkflow = selectedWorkflow === 'hdr'
   const depthCpId = 'dpt-hybrid-midas' as ModelCheckpointID
   const needsDepthCp = showConditioning && conditioningType === 'depth'
   const [requiredIcLoraCpIds, setRequiredIcLoraCpIds] = useState<ModelCheckpointID[]>([])
@@ -165,20 +171,23 @@ export function ICLoraPanel({
 
   useEffect(() => {
     const selectedEntry = getAdapterEntry(internalAdapterId)
+    const selectedWorkflow = selectedEntry?.workflow
+    // ponytail: ingredients & hdr are no-source-video, prompt-driven workflows.
+    // ingredients needs reference images; hdr needs neither video nor images nor conditioning.
+    const isNoInputWorkflow = selectedWorkflow === 'ingredients' || selectedWorkflow === 'hdr'
     const requiredSlotsReady = selectedEntry?.workflow === 'in_outpainting'
       ? !!maskPath
       : selectedEntry?.workflow === 'ingredients'
         ? ingredientPaths.length > 0
         : true
     const adapterReady = internalAdapterId !== null && selectedEntry?.workflow !== 'unavailable'
-    const selectedWorkflow = selectedEntry?.workflow
-    // ponytail: ingredients doesn't need driving video; conditioning is always null
-    const needsVideo = selectedWorkflow !== 'ingredients'
+    // ponytail: ingredients/hdr don't need driving video; conditioning is always null for both
+    const needsVideo = !isNoInputWorkflow
     const ready = (needsVideo ? !!inputVideoPath : true) && icLoraReady && requiredSlotsReady && (conditioningType !== null || adapterReady)
     const images = selectedWorkflow === 'ingredients' ? ingredientPaths.map(p => ({ path: p })) : []
     onChange?.({
-      videoPath: selectedWorkflow === 'ingredients' ? null : inputVideoPath,
-      conditioningType: selectedWorkflow === 'ingredients' ? null : conditioningType,
+      videoPath: isNoInputWorkflow ? null : inputVideoPath,
+      conditioningType: isNoInputWorkflow ? null : conditioningType,
       conditioningStrength,
       adapterId: internalAdapterId,
       maskPath: selectedEntry?.workflow === 'in_outpainting' ? maskPath : null,
@@ -569,7 +578,9 @@ export function ICLoraPanel({
           <div className="flex-1 flex flex-col border-r border-zinc-800 min-w-0">
             <div className="px-3 py-2 border-b border-zinc-800 flex items-center justify-between gap-2">
               <span className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider shrink-0">Input</span>
-              {getAdapterEntry(internalAdapterId)?.workflow === 'ingredients' ? (
+              {isHdrWorkflow ? (
+                <span className="text-[10px] text-amber-500 truncate min-w-0">HDR — prompt only (no source video)</span>
+              ) : getAdapterEntry(internalAdapterId)?.workflow === 'ingredients' ? (
                 <span className="text-[10px] text-amber-500 truncate min-w-0">Ingredients — prompt + reference sheet</span>
               ) : inputVideoPath ? (
                 <span className="text-[10px] text-zinc-500 truncate min-w-0">
@@ -577,7 +588,19 @@ export function ICLoraPanel({
                 </span>
               ) : null}
             </div>
-            {getAdapterEntry(internalAdapterId)?.workflow === 'ingredients' ? (
+            {isHdrWorkflow ? (
+              <div className="flex-1 flex items-center justify-center bg-zinc-900/50 m-3 rounded-lg border border-dashed border-zinc-700">
+                <div className="text-center p-6">
+                  <div className="w-12 h-12 rounded-full bg-amber-500/10 flex items-center justify-center mx-auto mb-3">
+                    <Sparkles className="h-6 w-6 text-amber-500" />
+                  </div>
+                  <p className="text-zinc-300 text-sm font-medium">HDR</p>
+                  <p className="text-zinc-500 text-xs mt-1 max-w-xs">
+                    Prompt-driven text-to-video. No source video, reference images, or conditioning required.
+                  </p>
+                </div>
+              </div>
+            ) : getAdapterEntry(internalAdapterId)?.workflow === 'ingredients' ? (
               <div className="flex-1 flex items-center justify-center bg-zinc-900/50 m-3 rounded-lg border border-dashed border-zinc-700">
                 <div className="text-center p-6">
                   <div className="w-12 h-12 rounded-full bg-amber-500/10 flex items-center justify-center mx-auto mb-3">
@@ -803,6 +826,8 @@ export function ICLoraPanel({
                   const val = e.target.value
                   if (val && getAdapterEntry(val)?.workflow === 'unavailable') return // guard against disabled selection
                   setInternalAdapterId(val || null)
+                  setInternalCondType(null)
+                  onConditioningTypeChange?.(null)
                   setMaskPath(null)
                   setIngredientPaths([])
                 }}
@@ -820,8 +845,65 @@ export function ICLoraPanel({
                 ))}
               </select>
             </div>
-            <div className="flex-1 bg-black flex items-center justify-center min-h-0 relative">
-              {_outputVideoPath ? (
+            <div className={`flex-1 bg-black min-h-0 relative overflow-y-auto ${isHdrWorkflow ? 'flex flex-col' : 'flex items-center justify-center'}`}>
+              {isHdrWorkflow ? (
+                <>
+                  {_outputProxyPath ? (
+                    <div className="flex-1 flex items-center justify-center min-h-0 bg-black">
+                      <video
+                        src={pathToFileUrl(_outputProxyPath)}
+                        className="w-full h-full object-contain"
+                        controls
+                        onError={(e) => console.error('[ICLoraPanel] HDR proxy preview failed to load:', _outputProxyPath, (e.target as HTMLVideoElement)?.error)}
+                      />
+                    </div>
+                  ) : isProcessing ? (
+                    <div className="flex-1 flex items-center justify-center">
+                      <div className="text-center p-4">
+                        <Loader2 className="h-6 w-6 text-blue-400 animate-spin mx-auto mb-2" />
+                        <p className="text-zinc-400 text-xs">{processingStatus || 'Generating...'}</p>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex-1 flex items-center justify-center p-4">
+                      <div className="text-center max-w-sm">
+                        <div className="w-12 h-12 rounded-full bg-amber-500/10 flex items-center justify-center mx-auto mb-3">
+                          <Film className="h-6 w-6 text-amber-500" />
+                        </div>
+                        <p className="text-zinc-300 text-sm font-medium">HDR output</p>
+                        <p className="text-zinc-500 text-[11px] mt-2 leading-relaxed">
+                          {_outputVideoPath
+                            ? 'Generation complete. Primary output is the EXR folder below; a preview will appear here when an SDR proxy is available.'
+                            : 'Output will be a linear EXR frame sequence. The directory path and any SDR proxy will appear here after completion.'}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                  <div className="border-t border-zinc-800 p-3 bg-zinc-900/50 shrink-0">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-[10px] font-semibold text-amber-500 uppercase tracking-wider mb-0.5">Primary output — EXR frames</p>
+                        <p className="text-[10px] text-zinc-500 break-all font-mono">
+                          {_outputVideoPath ?? 'Waiting for generation...'}
+                        </p>
+                      </div>
+                      {_outputVideoPath && (
+                        <button
+                          onClick={() => { window.electronAPI?.showItemInFolder?.({ filePath: _outputVideoPath }) }}
+                          className="shrink-0 px-2 py-1 text-[10px] text-blue-400 border border-blue-500/30 rounded-md hover:bg-blue-600/10 transition-colors"
+                        >
+                          Reveal folder
+                        </button>
+                      )}
+                    </div>
+                    <p className="text-[10px] text-zinc-500 mt-1.5 leading-relaxed">
+                      {_outputProxyPath
+                        ? 'Previewing the SDR proxy above. The primary output is a linear EXR frame sequence in the folder above.'
+                        : 'No SDR proxy available yet. The primary output is a linear EXR frame sequence in the folder above.'}
+                    </p>
+                  </div>
+                </>
+              ) : _outputVideoPath ? (
                 <video
                   src={pathToFileUrl(_outputVideoPath)}
                   className="w-full h-full object-contain"

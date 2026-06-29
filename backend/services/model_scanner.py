@@ -58,11 +58,15 @@ _SKIP_DIRS: frozenset[str] = frozenset({
 #: File suffixes treated as partial downloads — never installed.
 _PARTIAL_SUFFIXES: tuple[str, ...] = (".part", ".tmp")
 
-#: Adapters that remain workflow-gated even when installed (see plan §8).
-_GATED_ADAPTER_IDS: frozenset[AdapterID] = frozenset({"hdr", "hdr_scene_embeddings"})
-
 #: Canonical subfolder for adapter (IC-LoRA / distilled-LoRA / scene-embedding) files.
 _ADAPTER_CANONICAL_SUBFOLDER = "adapters"
+
+#: Adapter IDs whose workflow remains gated at the scanner/catalog level even
+#: when installed. HDR artifacts (the HDR IC-LoRA and its scene-embedding
+#: support asset) are now supported — installed copies report ``supported``.
+#: Selectability of the scene-embedding asset as a standalone adapter is owned
+#: by the handler, not the scanner.
+_GATED_ADAPTER_IDS: frozenset[AdapterID] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)

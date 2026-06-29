@@ -13,7 +13,10 @@ Three primary paths (all single-pass over the input iterator):
 Proxies (H.264 MP4) are derived from the on-disk primary via ffmpeg so the input
 iterator is never re-traversed (§14 single-pass constraint). EXR→proxy uses
 ``-apply_trc linear`` + an explicit transfer conversion so the proxy is not dark
-(§0A.N mandatory gate).
+(§0A.N mandatory gate). For HDR linear primaries (values >1.0) the proxy is
+selected by :class:`HdrProxyPolicy.SDR_TONEMAP_REINHARD`: a deterministic global
+Reinhard tonemap ``x/(x+1)`` followed by the Rec.709 OETF, applied via a single
+ffmpeg ``geq`` filter on the same on-disk EXR — no second encoder framework.
 
 ffmpeg subprocesses consume stdout+stderr in reader threads to avoid deadlock
 (§0A.E). Partial outputs are cleaned up on exception (§0A.J).
@@ -43,7 +46,7 @@ from services.media_encoder.color import (
     ffmpeg_bt709_color_flags,
     ffmpeg_bt709_matrix_filter,
 )
-from services.media_encoder.media_encoder import EncoderResult
+from services.media_encoder.media_encoder import EncoderResult, HdrProxyPolicy
 from services.services_utils import AudioOrNone
 
 if TYPE_CHECKING:
@@ -120,6 +123,36 @@ def _materialize_iterator(
     return video
 
 
+def _hdr_reinhard_bt709_geq_expr() -> str:
+    """ffmpeg ``geq`` per-channel expression: Reinhard ``x/(x+1)`` then Rec.709 OETF.
+
+    The proxy's input ``p(X,Y)`` is the per-plane linear HDR value (possibly >1.0;
+    negatives from decode noise are clamped to 0 so the ``pow`` branch stays real).
+    The global Reinhard operator ``x/(x+1)`` maps ``[0, ∞) → [0, 1)`` — the
+    deterministic tonemap selected by :class:`HdrProxyPolicy.SDR_TONEMAP_REINHARD`.
+    The Rec.709 OETF (``V = 4.5L`` for ``L < 0.018`` else
+    ``V = 1.099·L^0.45 − 0.099``) then maps the tonemapped linear value to the
+    gamma domain for an SDR BT.709 display-referred proxy (matches the working
+    space the SDR EXR→proxy path targets, so the two are comparable).
+
+    The returned string is a single ffmpeg expression with commas
+    filtergraph-escaped (``\\,``) so it can be embedded verbatim in a
+    ``geq=r=<expr>:g=<expr>:b=<expr>`` filter without the commas being parsed as
+    filter-chain separators. ``geq`` expressions are pure functions of the pixel
+    coordinates, so every reference is fully inlined.
+    """
+    lin = "max(p(X,Y),0.0)"
+    rh = f"({lin}/({lin}+1.0))"
+    raw = (
+        f"if(lt({rh},0.018),"
+        f"4.5*{rh},"
+        f"1.099*pow({rh},0.45)-0.099)"
+    )
+    # Escape commas so the filtergraph parser treats them as literal expression
+    # argument separators, not filter-chain separators.
+    return raw.replace(",", "\\,")
+
+
 class MediaEncoderImpl:
     """Real encoder: MP4 (delegated) / ProRes (ffmpeg) / EXR (OpenEXR) + proxies."""
 
@@ -136,7 +169,10 @@ class MediaEncoderImpl:
         on_progress: Callable[[float], None] | None = None,
         total_frames: int | None = None,
         input_colorspace: ColorSpace | None = None,
+        hdr_proxy_policy: HdrProxyPolicy | None = None,
     ) -> EncoderResult:
+        if hdr_proxy_policy is None:
+            hdr_proxy_policy = HdrProxyPolicy.OFF
         try:
             if output_format == OutputFormat.MP4:
                 return self._encode_mp4(
@@ -168,6 +204,7 @@ class MediaEncoderImpl:
                     total_frames=total_frames,
                     audio=audio,
                     input_colorspace=input_colorspace,
+                    hdr_proxy_policy=hdr_proxy_policy,
                 )
             raise ValueError(f"Unsupported output_format: {output_format!r}")
         except Exception:
@@ -431,6 +468,7 @@ class MediaEncoderImpl:
         total_frames: int | None,
         audio: AudioOrNone,
         input_colorspace: ColorSpace | None = None,
+        hdr_proxy_policy: HdrProxyPolicy = HdrProxyPolicy.OFF,
     ) -> EncoderResult:
         # OpenEXR ships no type stubs; treat the module as Any to keep pyright
         # strict clean without losing real type coverage elsewhere. API form
@@ -551,6 +589,7 @@ class MediaEncoderImpl:
                 proxy_path=proxy_path,
                 audio=audio,
                 on_progress=self._proxy_progress_wrapper(on_progress),
+                hdr_proxy_policy=hdr_proxy_policy,
             )
 
         if on_progress is not None:
@@ -615,19 +654,29 @@ class MediaEncoderImpl:
         proxy_path: str,
         audio: AudioOrNone,
         on_progress: Callable[[float], None] | None,
+        hdr_proxy_policy: HdrProxyPolicy = HdrProxyPolicy.OFF,
     ) -> None:
         """Build H.264 proxy from a linear EXR sequence (linear→BT.709, ONCE).
 
-        Per §9.4 the linear→BT.709 transfer is applied EXACTLY ONCE via
-        ``-apply_trc bt709`` (the EXR decoder applies the BT.709 OETF at decode
-        time). The accompanying ``scale`` filter carries ONLY ``out_color_matrix``
-        (the YUV matrix) and ``out_range`` (limited range) — it does NOT carry an
-        ``out_transfer``/``zscale transfer``, so there is no double transfer. The
-        ``-framerate <fps>`` is set before ``-i`` (else ffmpeg defaults to 25 fps →
-        audio/duration desync). Sequence start is 00000 (image2 default).
+        Per §9.4 the linear→BT.709 transfer is applied EXACTLY ONCE. The
+        accompanying ``scale`` filter carries ONLY ``out_color_matrix`` (the YUV
+        matrix) and ``out_range`` (limited range) — it does NOT carry an
+        ``out_transfer``, so there is no double transfer. The ``-framerate
+        <fps>`` is set before ``-i`` (else ffmpeg defaults to 25 fps → audio/
+        duration desync). Sequence start is 00000 (image2 default).
 
         The ``test_proxy_from_exr_not_dark`` luma gate verifies the single transfer
         produces a correctly bright proxy for the BT.709 working space.
+
+        HDR (``HdrProxyPolicy.SDR_TONEMAP_REINHARD``): when the primary is HDR
+        linear (values >1.0), a plain BT.709 OETF hard-clips highlights
+        (bt709_oetf(2.5)≈1.56 → clamped → a blown proxy). Instead the EXR is
+        decoded as linear float (``-apply_trc linear``) and a single ``geq``
+        filter applies the deterministic global Reinhard operator ``x/(x+1)``
+        (mapping ``[0, ∞) → [0, 1)``) followed by the Rec.709 OETF, before the
+        same BT.709 matrix/range conversion. The HDR linear EXR primary is
+        untouched; only the proxy is tonemapped. See
+        :func:`_hdr_reinhard_bt709_geq_expr` for the exact expression.
         """
         ff = _ffmpeg_exe()
         out = Path(proxy_path)
@@ -637,9 +686,29 @@ class MediaEncoderImpl:
         # A literal frame_00000.exr would encode exactly one frame.
         seq_input = str(exr_dir / _EXR_FFMPEG_SEQ_PATTERN)
 
+        if hdr_proxy_policy == HdrProxyPolicy.SDR_TONEMAP_REINHARD:
+            # Decode EXR as linear float (NOT bt709 — bt709 would clip HDR >1.0
+            # at decode time). Then a single geq tonemaps Reinhard + applies the
+            # Rec.709 OETF; the scale filter does the same BT.709 matrix/range
+            # conversion as the SDR path.
+            apply_trc = "linear"
+            tonemap_expr = _hdr_reinhard_bt709_geq_expr()
+            video_filter = (
+                "format=gbrpf32le,"
+                f"geq=r={tonemap_expr}:g={tonemap_expr}:b={tonemap_expr},"
+                f"{ffmpeg_bt709_matrix_filter()}"
+            )
+            label = "proxy-from-exr-hdr"
+        else:
+            # SDR: EXR decoder applies BT.709 OETF at decode time (-apply_trc
+            # bt709) — the single linear→BT.709 transfer (§9.4).
+            apply_trc = "bt709"
+            video_filter = ffmpeg_bt709_matrix_filter()
+            label = "proxy-from-exr"
+
         cmd: list[str] = [
             ff, "-y",
-            "-apply_trc", "bt709",
+            "-apply_trc", apply_trc,
             "-framerate", str(int(fps)),
             "-i", seq_input,
         ]
@@ -649,9 +718,10 @@ class MediaEncoderImpl:
                 cmd += ["-i", audio_wav, "-map", "0:v:0", "-map", "1:a:0",
                         "-c:a", "aac", "-b:a", "192k"]
             # Explicit BT.709 matrix + limited range (transfer already handled
-            # by -apply_trc bt709 at decode time).
+            # by -apply_trc bt709 at decode time for SDR, or by the geq OETF for
+            # HDR).
             cmd += [
-                "-vf", ffmpeg_bt709_matrix_filter(),
+                "-vf", video_filter,
                 "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p",
                 *ffmpeg_bt709_color_flags(),
                 "-movflags", "+faststart",
@@ -659,7 +729,7 @@ class MediaEncoderImpl:
             if audio_wav is not None:
                 cmd += ["-shortest"]
             cmd += [proxy_path]
-            self._run_ffmpeg_to_completion(cmd, label="proxy-from-exr")
+            self._run_ffmpeg_to_completion(cmd, label=label)
         finally:
             if audio_wav is not None:
                 Path(audio_wav).unlink(missing_ok=True)

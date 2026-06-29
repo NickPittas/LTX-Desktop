@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from ltx_core.components.guiders import MultiModalGuiderParams
     from ltx_pipelines.utils.args import ImageConditioningInput as LtxImageConditioningInput
     from services.color_management import ColorSpace
-    from services.media_encoder.media_encoder import MediaEncoder
+    from services.media_encoder.media_encoder import HdrProxyPolicy, MediaEncoder
 
 
 def default_tiling_config() -> TilingConfigType:
@@ -142,6 +142,7 @@ def encode_video_output(
     on_progress: "Callable[[float], None] | None" = None,
     total_frames: int | None = None,
     input_colorspace: "ColorSpace | None" = None,
+    hdr_proxy_policy: "HdrProxyPolicy | None" = None,
 ) -> None:
     """Dispatch decoded VAE frames to the media encoder.
 
@@ -158,6 +159,14 @@ def encode_video_output(
     ``on_progress`` (0.0→1.0 combined encode+proxy budget) and ``total_frames``
     are forwarded to the encoder for save-side progress (Phase 4a). MP4 ignores
     them (no hook from external ``encode_video``).
+
+    ``hdr_proxy_policy`` threads the HDR proxy decision through the existing
+    encode path without creating a second encoder framework. It defaults to
+    ``None`` (→ :data:`HdrProxyPolicy.OFF`, the SDR single-transfer proxy) for
+    every SDR caller; only the HDR linear-EXR path passes
+    :data:`HdrProxyPolicy.SDR_TONEMAP_REINHARD` so the sidecar H.264 proxy is
+    Reinhard-tonemapped instead of hard-clipping HDR highlights. The HDR linear
+    EXR primary is always preserved (values >1.0); only the proxy is affected.
     """
     if encoder is None:
         encoder = _get_default_encoder()
@@ -172,6 +181,7 @@ def encode_video_output(
         on_progress=on_progress,
         total_frames=total_frames,
         input_colorspace=input_colorspace,
+        hdr_proxy_policy=hdr_proxy_policy,
     )
 
 
