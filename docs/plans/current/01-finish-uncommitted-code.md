@@ -40,8 +40,8 @@ set — never `git add -A`/`git add .`. Concretely:
   and `docs/plans/archive/2026-06-29-scattered-plans/README.md`. These are
   untracked, so they will **not** be included unless explicitly added. Decide
   deliberately whether docs ride along in this slice or a separate docs commit.
-- **Four old planning files are staged/renamed into the archive** via `git mv`
-  (history preserved): `HANDOFF.md`,
+- **Old planning files are staged/renamed into the archive** via `git mv`
+  (history preserved):
   `docs--model-library-download-profile-plan.md`,
   `docs--ltx-offline-research--04-recommended-implementation-plan.md`,
   `docs--ltx-offline-research--05-ltx-desktop-model-profiles-and-gguf-kijai-plan.md`.

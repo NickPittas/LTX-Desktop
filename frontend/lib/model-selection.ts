@@ -2,7 +2,14 @@ import type { components } from '../generated/backend-openapi'
 
 export type ModelSelectionOption = components['schemas']['ModelSelectionOption']
 export type ModelSelectionWorkflow = components['schemas']['ModelSelectionOptionsResponse']['workflow']
-export type ModelCheckpointID = ModelSelectionOption['id']
+// Live model-selection option ids are runtime strings (backend
+// ``ModelSelectionID``); ``GET /api/models/model-options`` is the authoritative
+// source. The frontend never hardcodes ids except storing/rendering the
+// backend's returned ``option.id``.
+export type ModelSelectionID = ModelSelectionOption['id']
+// Deprecated alias retained for callers that still name the option id after the
+// download checkpoint id (the two coincide today). Prefer ``ModelSelectionID``.
+export type ModelCheckpointID = ModelSelectionID
 
 export interface GroupedModelOptions {
   section: ModelSelectionOption['section']

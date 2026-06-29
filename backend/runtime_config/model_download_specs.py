@@ -17,6 +17,7 @@ from api_types import (
     LTXVideoGenDuration,
     LTXVideoGenFps,
     LTXVideoGenPipeline,
+    LTXVideoGenPipelineFamily,
     LTXVideoGenerationResolutionSpec,
     LTXVideoGenerationSpec,
     ModelCheckpointID,
@@ -44,6 +45,36 @@ SELECTABLE_BASE_VIDEO_CP_IDS: tuple[ModelCheckpointID, ...] = (
 def is_selectable_base_video_cp(cp_id: ModelCheckpointID) -> bool:
     """True if ``cp_id`` is a live-selectable base video transformer."""
     return cp_id in SELECTABLE_BASE_VIDEO_CP_IDS
+
+
+#: Dev/full (GGUF) base video transformer CP ids — the ``"full"`` local family.
+#: The distilled monolith is the only ``"fast"``-family selectable base.
+_DEV_FULL_BASE_VIDEO_CP_IDS: frozenset[ModelCheckpointID] = frozenset({
+    "ltx-2.3-22b-dev-gguf-q4-k-m",
+    "ltx-2.3-22b-dev-gguf-ud-q4-k-m",
+    "ltx-2.3-22b-dev-gguf-q6-k",
+    "ltx-2.3-22b-dev-gguf-ud-q5-k-m",
+})
+
+
+def pipeline_family_for_cp(cp_id: ModelCheckpointID) -> LTXVideoGenPipelineFamily:
+    """Return the local pipeline family (``"fast"``/``"full"``) for a base video CP.
+
+    The distilled monolith is the ``"fast"`` family; the dev/full GGUF quants
+    are the ``"full"`` family. Used by the model-options endpoint (to tag each
+    option) and by request validation (to reject a ``model``/``model_selection``
+    family mismatch — e.g. ``model="fast"`` with a dev/full GGUF selection).
+
+    Raises ``ValueError`` for CP ids that are not a selectable base video
+    transformer; callers must validate/selectability first.
+    """
+    if cp_id == "ltx-2.3-22b-distilled":
+        return "fast"
+    if cp_id in _DEV_FULL_BASE_VIDEO_CP_IDS:
+        return "full"
+    raise ValueError(
+        f"{cp_id!r} is not a selectable base video transformer with a known pipeline family"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -584,6 +615,34 @@ def get_ltx_model_spec(model_id: LTXLocalModelId) -> LTXLocalModelSpec:
                         "fast",
                         LTXVideoGenerationSpec(
                             display_name="LTX 2.3 Fast",
+                            supported_resolutions_durations={
+                                "540p": _local_resolution_spec(
+                                    fps_to_durations={
+                                        24: (5, 6, 8, 10, 20),
+                                    },
+                                ),
+                                "720p": _local_resolution_spec(
+                                    fps_to_durations={
+                                        24: (5, 6, 8, 10),
+                                    },
+                                ),
+                                "1080p": _local_resolution_spec(
+                                    fps_to_durations={
+                                        24: (5,),
+                                    },
+                                ),
+                            },
+                        ),
+                    ),
+                    # Dev/full (GGUF) family — same underlying FastVideoPipeline
+                    # service and the same resolution/duration envelope as the
+                    # distilled "fast" family. Differentiated at runtime by the
+                    # selected dev/full base transformer (carried in
+                    # ``model_selection`` + the cache key), not by this spec.
+                    (
+                        "full",
+                        LTXVideoGenerationSpec(
+                            display_name="LTX 2.3 Full",
                             supported_resolutions_durations={
                                 "540p": _local_resolution_spec(
                                     fps_to_durations={

@@ -12,7 +12,7 @@ import type { ModelCheckpointID } from '../lib/model-selection'
 export type GenerationMode = 'text-to-video' | 'image-to-video' | 'text-to-image'
 
 export interface GenerationSettings {
-  model: 'fast' | 'pro'
+  model: 'fast' | 'full' | 'pro'
   duration: number
   videoResolution: string
   fps: number

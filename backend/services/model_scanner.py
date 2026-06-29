@@ -44,6 +44,9 @@ from runtime_config.model_download_specs import (
     OFFICIAL_LTX23_ADAPTERS,
     get_model_cp_spec,
 )
+from services.base_video_model_registry import (
+    iter_base_video_registry_static_entries,
+)
 
 #: Directories that are never scanned (download temp, caches, VCS).
 _SKIP_DIRS: frozenset[str] = frozenset({
@@ -134,39 +137,13 @@ def _adapter_kind_to_artifact_kind(kind: AdapterKind) -> ArtifactKind:
 #: Scanner-only known artifacts (no download CP spec) that must be recognized
 #: when present on disk so they do not show as unknown files. Canonical paths
 #: are subfolder-only, consistent with all other known artifacts.
+#:
+#: NOTE: Fast-family Kijai/QuantStack distilled base-video artifacts (FP8 and
+#: the seven QuantStack GGUF quants) are derived from the unified base-video
+#: registry in :func:`_build_registry_base_video_artifacts` so the scanner and
+#: the model-options endpoint share one source of truth. They are appended in
+#: :func:`_build_canonical_artifacts`.
 _EXTRA_KNOWN_ARTIFACTS: list[_CanonicalArtifact] = [
-    _CanonicalArtifact(
-        filename="ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v3.safetensors",
-        artifact_kind="diffusion_model",
-        component_role="base_diffusion_model_fp8",
-        canonical_relative_path="diffusion_models/ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v3.safetensors",
-        repo_id="Lightricks/LTX-2.3",
-        expected_size_bytes=0,
-        is_folder=False,
-        gated=False,
-        cp_id=None,
-        adapter_id=None,
-        section="kijai",
-        display_name="LTX-2.3 22B distilled FP8 (Kijai v3)",
-        variant_group="ltx-2.3-distilled-fp8",
-        downloadable=False,
-    ),
-    _CanonicalArtifact(
-        filename="LTX-2.3-22B-distilled-1.1-Q4_K_M.gguf",
-        artifact_kind="gguf",
-        component_role="base_diffusion_model_gguf",
-        canonical_relative_path="gguf/QuantStack/LTX-2.3-GGUF/LTX-2.3-distilled-1.1/LTX-2.3-22B-distilled-1.1-Q4_K_M.gguf",
-        repo_id="QuantStack/LTX-2.3-GGUF",
-        expected_size_bytes=0,
-        is_folder=False,
-        gated=False,
-        cp_id=None,
-        adapter_id=None,
-        section="gguf",
-        display_name="LTX-2.3 22B distilled 1.1 GGUF — Q4_K_M (QuantStack)",
-        variant_group="ltx-2.3-distilled-gguf",
-        downloadable=False,
-    ),
     _CanonicalArtifact(
         filename="ltx-2.3_text_projection_bf16.safetensors",
         artifact_kind="text_encoder",
@@ -237,14 +214,55 @@ _EXTRA_KNOWN_ARTIFACTS: list[_CanonicalArtifact] = [
 ]
 
 
+def _build_registry_base_video_artifacts() -> list[_CanonicalArtifact]:
+    """Scanner-only base-video artifacts derived from the unified registry.
+
+    Per plan §"Required source-of-truth fix", the scanner derives EVERY
+    non-CP base-video registry entry (those with ``download_cp_id is None``)
+    from the unified base-video registry so the scanner and the model-options
+    endpoint share one source of truth. This covers the Fast-family Kijai
+    distilled FP8, the seven QuantStack distilled GGUF quants, AND the
+    Full-family official dev safetensors (``ltx-2.3-22b-dev``).
+
+    CP-backed base entries (official distilled, unsloth dev GGUFs) are already
+    provided by ``_CP_KIND_MAP`` + ``get_model_cp_spec`` and are skipped here to
+    avoid duplicate filenames.
+    """
+    derived: list[_CanonicalArtifact] = []
+    for entry in iter_base_video_registry_static_entries():
+        if entry.download_cp_id is not None:
+            continue  # CP-backed — already covered by _CP_KIND_MAP
+        filename = Path(entry.canonical_relative_path).name
+        derived.append(_CanonicalArtifact(
+            filename=filename,
+            artifact_kind=entry.artifact_kind,
+            component_role=entry.component_role,
+            canonical_relative_path=entry.canonical_relative_path,
+            repo_id=entry.repo_id,
+            expected_size_bytes=entry.expected_size_bytes,
+            is_folder=False,
+            gated=False,
+            cp_id=None,
+            adapter_id=None,
+            section=entry.section,
+            display_name=entry.label,
+            variant_group=entry.variant_group,
+            downloadable=entry.downloadable,
+            remote_filename=entry.remote_filename,
+        ))
+    return derived
+
+
 def _build_canonical_artifacts() -> list[_CanonicalArtifact]:
     """Build scanner-local canonical expectations from current runtime specs.
 
     Checkpoint canonical paths use ``spec.relative_path`` (subfolder-only,
     matches :func:`resolve_model_path`). Adapter canonical paths use
     ``adapters/<filename>`` (never bare at root). Extra known files (VAE,
-    text projection, alternate transformer builds, GGUF text encoder) are
-    appended with their own subfolder canonicals.
+    text projection, GGUF text encoder) are appended with their own subfolder
+    canonicals. Every non-CP base-video registry entry (Kijai FP8, QuantStack
+    distilled GGUFs, official dev safetensors) is derived from the unified
+    base-video registry.
     """
     artifacts: list[_CanonicalArtifact] = []
     seen_filenames: set[str] = set()
@@ -299,6 +317,14 @@ def _build_canonical_artifacts() -> list[_CanonicalArtifact]:
         if extra.filename not in seen_filenames:
             seen_filenames.add(extra.filename)
             artifacts.append(extra)
+
+    # Fast-family Kijai/QuantStack base-video artifacts derived from the
+    # unified base-video registry (single source of truth shared with the
+    # model-options endpoint). Skips filenames already covered above.
+    for reg in _build_registry_base_video_artifacts():
+        if reg.filename not in seen_filenames:
+            seen_filenames.add(reg.filename)
+            artifacts.append(reg)
 
     return artifacts
 

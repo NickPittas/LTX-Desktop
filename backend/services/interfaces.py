@@ -24,7 +24,12 @@ from services.task_runner.task_runner import TaskRunner
 from services.text_encoder.text_encoder import TextEncoder
 from services.video_processor.video_processor import VideoInfoPayload, VideoProcessor
 
-VideoPipelineModelType = Literal["fast"]
+#: Local video pipeline type. Both ``"fast"`` (distilled) and ``"full"``
+#: (dev/full GGUF) families run on the same ``FastVideoPipeline`` service
+#: (``pipeline_kind == "fast"``); the cache key (which carries
+#: ``model_selection`` + the effective distilled LoRA path) differentiates the
+#: two builds. Kept distinct from the API-only ``"pro"`` request model.
+VideoPipelineModelType = Literal["fast", "full"]
 
 __all__ = [
     "A2VPipeline",

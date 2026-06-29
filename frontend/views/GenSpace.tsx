@@ -14,7 +14,7 @@ import { createLocalGenerationError, type GenerationError } from '../lib/generat
 import { useRetake } from '../hooks/use-retake'
 import { useIcLora } from '../hooks/use-ic-lora'
 import { useModelSelectionOptions } from '../hooks/use-model-selection-options'
-import type { ModelCheckpointID, ModelSelectionOption, ModelSelectionWorkflow } from '../lib/model-selection'
+import type { ModelSelectionID, ModelSelectionOption, ModelSelectionWorkflow } from '../lib/model-selection'
 import { findModelOption, groupModelOptions, isModelOptionSelectable } from '../lib/model-selection'
 import type { ICLoraConditioningType } from '../components/ICLoraPanel'
 import type { Asset } from '../types/project-model'
@@ -370,8 +370,8 @@ function ModelSelectionPopover({
   errorMessage,
 }: {
   options: ModelSelectionOption[]
-  selectedId: ModelCheckpointID | null
-  onChange: (id: ModelCheckpointID | null) => void
+  selectedId: ModelSelectionID | null
+  onChange: (id: ModelSelectionID | null) => void
   disabled?: boolean
   isLoading?: boolean
   errorMessage?: string | null
@@ -608,7 +608,7 @@ function PromptBar({
     variations: number
     audio?: boolean
     outputFormat?: OutputFormat
-    modelSelection?: ModelCheckpointID | null
+    modelSelection?: ModelSelectionID | null
   }
   onSettingsChange: (settings: any) => void
   videoModelSpecs: VideoGenerationModelSpecItem[]
@@ -661,10 +661,28 @@ function PromptBar({
     }
     if (!modelSelectionWorkflow || !settings.modelSelection) return
     const selected = findModelOption(modelSelectionOptions, settings.modelSelection)
-    if (selected && !isModelOptionSelectable(selected)) {
+    if (!selected) return
+    // Clear the selection if it is unselectable OR if its pipeline family no
+    // longer matches the active model dropdown family (e.g. user switched from
+    // "LTX 2.3 Full" back to "LTX 2.3 Fast" while a dev/full GGUF was selected).
+    const activeFamily = settings.model
+    const familyMismatch =
+      (activeFamily === 'fast' || activeFamily === 'full') &&
+      selected.pipeline_family !== activeFamily
+    if (!isModelOptionSelectable(selected) || familyMismatch) {
       onSettingsChange({ ...settings, modelSelection: null })
     }
   }, [modelSelectionOptions, modelSelectionWorkflow, settings, settings.modelSelection, onSettingsChange])
+
+  // Filter the model-selection popover to only options whose pipeline family
+  // matches the active model dropdown family, so a "LTX 2.3 Fast" selection can
+  // never offer a dev/full GGUF (and vice versa). The backend rejects mismatches
+  // defensively; this prevents the confusing UI state up-front.
+  const activeModelFamily = resolvedVideoOptions?.selectedModel ?? settings.model
+  const visibleModelSelectionOptions =
+    activeModelFamily === 'fast' || activeModelFamily === 'full'
+      ? modelSelectionOptions.filter((option) => option.pipeline_family === activeModelFamily)
+      : modelSelectionOptions
 
   const formatValue = settings.outputFormat || 'mp4'
   const formatOptions = OUTPUT_FORMAT_OPTIONS.map((option) => ({
@@ -1083,7 +1101,7 @@ function PromptBar({
             <div className="w-px h-4 bg-zinc-700 mx-0.5" />
 
             <ModelSelectionPopover
-              options={modelSelectionOptions}
+              options={visibleModelSelectionOptions}
               selectedId={settings.modelSelection ?? null}
               onChange={(id) => onSettingsChange({ ...settings, modelSelection: id })}
               disabled={!modelSelectionWorkflow || isLoadingModelSelectionOptions}
@@ -1245,7 +1263,7 @@ const DEFAULT_VIDEO_SETTINGS = {
   variations: 1,
   audio: true,
   outputFormat: 'mp4' as OutputFormat,
-  modelSelection: null as ModelCheckpointID | null,
+  modelSelection: null as ModelSelectionID | null,
 }
 
 export function GenSpace() {
@@ -1811,7 +1829,7 @@ export function GenSpace() {
       generateImage(
         prompt,
         {
-          model: 'fast' as 'fast' | 'pro',
+          model: 'fast' as 'fast' | 'full' | 'pro',
           duration: 5,
           videoResolution: settings.videoResolution,
           fps: 24,
@@ -1833,7 +1851,7 @@ export function GenSpace() {
         prompt,
         imagePath,
         {
-          model: videoSettings.model as 'fast' | 'pro',
+          model: videoSettings.model as 'fast' | 'full' | 'pro',
           duration: videoSettings.duration,
           videoResolution: videoSettings.videoResolution,
           fps: videoSettings.fps,

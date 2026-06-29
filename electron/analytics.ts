@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { app } from 'electron';
 import { isDev } from './config';
 import { readAppState, writeAppState } from './app-state';
+import { safeConsole } from './logger';
 
 const ANALYTICS_ENDPOINT = 'https://ltx-desktop.lightricks.com/v2/ingest';
 const REQUEST_TIMEOUT_MS = 5000;
@@ -47,7 +48,7 @@ async function sendWithRetry(
 
       if (response.ok || !isRetryable(response.status)) return
     } catch (err) {
-      console.warn('[analytics] request attempt failed:', err)
+      safeConsole('warn', '[analytics] request attempt failed:', err)
     }
 
     if (attempt < MAX_RETRIES) {
@@ -103,6 +104,6 @@ export async function sendAnalyticsEvent(
       body: JSON.stringify(payload),
     })
   } catch (err) {
-    console.error('[analytics] failed to send event:', err)
+    safeConsole('error', '[analytics] failed to send event:', err)
   }
 }

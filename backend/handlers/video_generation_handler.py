@@ -22,7 +22,7 @@ from api_types import (
     GenerateVideoRequest,
     GenerateVideoResponse,
     ImageConditioningInput,
-    ModelCheckpointID,
+    ModelSelectionID,
     OutputFormat,
     VideoCameraMotion,
 )
@@ -35,12 +35,13 @@ from handlers.base import StateHandlerBase
 from handlers.generation_handler import GenerationHandler
 from handlers.pipelines_handler import PipelinesHandler
 from handlers.text_handler import TextHandler
+from services.base_video_model_registry import get_base_video_selection_family
 from server_utils.media_validation import (
     normalize_optional_path,
     validate_audio_file,
     validate_image_file,
 )
-from services.interfaces import LTXAPIClient
+from services.interfaces import LTXAPIClient, VideoPipelineModelType
 from services.ltx_api_client.ltx_api_client import LTXAPIClientError
 from services.ltx_pipeline_common import make_encode_progress_callback, make_primary_output_path, make_proxy_output_path
 from services.media_encoder.media_encoder import MediaEncoder
@@ -63,6 +64,20 @@ FORCED_API_RESOLUTION_MAP: dict[str, dict[str, str]] = {
 }
 FORCED_API_ALLOWED_ASPECT_RATIOS = {"16:9", "9:16"}
 _LTX_INSUFFICIENT_FUNDS_MESSAGE = "Your LTX API credits are insufficient for this generation. Buy more credits and try again."
+
+
+def _local_video_pipeline_family(model: str) -> VideoPipelineModelType:
+    """Narrow a request ``model`` to a local :data:`VideoPipelineModelType`.
+
+    Local T2V/I2V generation only reaches this path after spec validation has
+    accepted ``model`` as a supported LOCAL pipeline (``"fast"``/``"full"``);
+    the API-only ``"pro"`` value never reaches here (the forced-API branch
+    returns earlier). ``"full"`` selects the dev/full (GGUF) family; anything
+    else is the distilled ``"fast"`` family.
+    """
+    if model == "full":
+        return "full"
+    return "fast"
 
 
 def _cleanup_output(output_path: str) -> None:
@@ -122,6 +137,27 @@ class VideoGenerationHandler(StateHandlerBase):
                     409,
                     "Live model selection is not supported for audio-to-video generation.",
                     code="MODEL_SELECTION_UNSUPPORTED_FOR_A2V",
+                )
+            # Family consistency: the selected base transformer's pipeline family
+            # must match the request's ``model`` family. Prevents a misleading
+            # label (e.g. "LTX 2.3 Fast") from masking a slow dev/full build, and
+            # the inverse. Runs before generic spec validation so the specific
+            # mismatch surfaces instead of an unrelated spec failure. The family
+            # is read from the unified base-video registry (no filesystem); an
+            # unknown/non-base id returns ``None`` and falls through to the
+            # resolver, which rejects with ``UNSUPPORTED_MODEL_SELECTION``.
+            selection_family = get_base_video_selection_family(req.model_selection)
+            if selection_family is not None and req.model != selection_family:
+                raise HTTPError(
+                    422,
+                    (
+                        f"Model selection '{req.model_selection}' is a "
+                        f"'{selection_family}'-family checkpoint but the request "
+                        f"model is '{req.model}'. The model dropdown family must "
+                        f"match the selected checkpoint family "
+                        f"('{selection_family}')."
+                    ),
+                    code="MODEL_SELECTION_FAMILY_MISMATCH",
                 )
 
         validation_error = validate_generate_video_request(req, use_api_specs=use_api_specs)
@@ -183,7 +219,14 @@ class VideoGenerationHandler(StateHandlerBase):
         # from prompt enhancement only; image conditioning proceeds normally).
 
         try:
-            self._pipelines.load_gpu_pipeline("fast", model_selection=req.model_selection)
+            # Local T2V/I2V: ``req.model`` is the local pipeline family
+            # ("fast"/"full"); both run on the same FastVideoPipeline service.
+            # Pass it through instead of hardcoding "fast" so a "full" (dev/full
+            # GGUF) family is honored by the cache-match check. The cache key
+            # (model_selection + effective distilled LoRA path) differentiates the
+            # distilled vs dev builds.
+            pipeline_family = _local_video_pipeline_family(req.model)
+            self._pipelines.load_gpu_pipeline(pipeline_family, model_selection=req.model_selection)
             self._generation.start_generation(generation_id)
 
             output_path = self.generate_video(
@@ -197,6 +240,7 @@ class VideoGenerationHandler(StateHandlerBase):
                 camera_motion=req.cameraMotion,
                 negative_prompt=req.negativePrompt,
                 output_format=req.output_format or OutputFormat.MP4,
+                model_family=pipeline_family,
                 model_selection=req.model_selection,
             )
             proxy_path = make_proxy_output_path(output_path, req.output_format or OutputFormat.MP4)
@@ -229,11 +273,12 @@ class VideoGenerationHandler(StateHandlerBase):
         camera_motion: VideoCameraMotion,
         negative_prompt: str,
         output_format: OutputFormat = OutputFormat.MP4,
-        model_selection: ModelCheckpointID | None = None,
+        model_family: VideoPipelineModelType = "fast",
+        model_selection: ModelSelectionID | None = None,
     ) -> str:
         t_total_start = time.perf_counter()
         gen_mode = "i2v" if image is not None else "t2v"
-        logger.info("[%s] Generation started (model=fast, %dx%d, %d frames, %d fps)", gen_mode, width, height, num_frames, int(fps))
+        logger.info("[%s] Generation started (model=%s, %dx%d, %d frames, %d fps)", gen_mode, model_family, width, height, num_frames, int(fps))
 
         if self._generation.is_generation_cancelled():
             raise RuntimeError("Generation was cancelled")
@@ -242,7 +287,7 @@ class VideoGenerationHandler(StateHandlerBase):
 
         self._generation.update_progress("loading_model", 5, 0, total_steps)
         t_load_start = time.perf_counter()
-        pipeline_state = self._pipelines.load_gpu_pipeline("fast", model_selection=model_selection)
+        pipeline_state = self._pipelines.load_gpu_pipeline(model_family, model_selection=model_selection)
         t_load_end = time.perf_counter()
         logger.info("[%s] Pipeline load: %.2fs", gen_mode, t_load_end - t_load_start)
 

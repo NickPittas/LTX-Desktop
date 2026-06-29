@@ -958,9 +958,9 @@ export interface components {
              * @default fast
              * @enum {string}
              */
-            model: "fast" | "pro";
+            model: "fast" | "full" | "pro";
             /** Model Selection */
-            model_selection?: ("ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5" | "ltx-2.3-22b-ic-lora-ingredients-0.9" | "ltx-2.3-22b-ic-lora-water-simulation-0.9" | "ltx-2.3-22b-ic-lora-decompression-0.9" | "ltx-2.3-22b-ic-lora-deblur-0.9" | "ltx-2.3-22b-ic-lora-colorization-0.9" | "ltx-2.3-22b-ic-lora-day-to-night-0.9" | "ltx-2.3-22b-ic-lora-in-outpainting-0.9" | "ltx-2.3-22b-ic-lora-instant-shave-0.9" | "ltx-2.3-22b-ic-lora-cross-eyed-0.9" | "ltx-2.3-22b-ic-lora-hdr-0.9" | "ltx-2.3-22b-ic-lora-hdr-scene-emb" | "ltx-2.3-22b-ic-lora-lipdub-0.9" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo" | "ltx-2.3-22b-dev-gguf-q4-k-m" | "ltx-2.3-22b-dev-gguf-ud-q4-k-m" | "ltx-2.3-22b-dev-gguf-q6-k" | "ltx-2.3-22b-dev-gguf-ud-q5-k-m" | "gemma-3-12b-it-qat-gguf-mmproj") | null;
+            model_selection?: string | null;
             /**
              * Negativeprompt
              * @default
@@ -1258,7 +1258,7 @@ export interface components {
              * Pipeline
              * @enum {string}
              */
-            pipeline: "fast" | "pro";
+            pipeline: "fast" | "full" | "pro";
             spec: components["schemas"]["LTXVideoGenerationSpec"];
         };
         /** LTXVideoGenerationResolutionSpec */
@@ -1674,15 +1674,17 @@ export interface components {
             expected_absolute_path: string;
             /** Group */
             group: string;
-            /**
-             * Id
-             * @enum {string}
-             */
-            id: "ltx-2.3-22b-distilled" | "ltx-2.3-spatial-upscaler-x2-1.0" | "ltx-2.3-22b-ic-lora-union-control-ref0.5" | "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5" | "ltx-2.3-22b-ic-lora-ingredients-0.9" | "ltx-2.3-22b-ic-lora-water-simulation-0.9" | "ltx-2.3-22b-ic-lora-decompression-0.9" | "ltx-2.3-22b-ic-lora-deblur-0.9" | "ltx-2.3-22b-ic-lora-colorization-0.9" | "ltx-2.3-22b-ic-lora-day-to-night-0.9" | "ltx-2.3-22b-ic-lora-in-outpainting-0.9" | "ltx-2.3-22b-ic-lora-instant-shave-0.9" | "ltx-2.3-22b-ic-lora-cross-eyed-0.9" | "ltx-2.3-22b-ic-lora-hdr-0.9" | "ltx-2.3-22b-ic-lora-hdr-scene-emb" | "ltx-2.3-22b-ic-lora-lipdub-0.9" | "dpt-hybrid-midas" | "yolox-l-torchscript" | "dw-ll-ucoco-384-bs5" | "gemma-3-12b-it-qat-q4_0-unquantized" | "z-image-turbo" | "ltx-2.3-22b-dev-gguf-q4-k-m" | "ltx-2.3-22b-dev-gguf-ud-q4-k-m" | "ltx-2.3-22b-dev-gguf-q6-k" | "ltx-2.3-22b-dev-gguf-ud-q5-k-m" | "gemma-3-12b-it-qat-gguf-mmproj";
+            /** Id */
+            id: string;
             /** Installed */
             installed: boolean;
             /** Label */
             label: string;
+            /**
+             * Pipeline Family
+             * @enum {string}
+             */
+            pipeline_family: "fast" | "full";
             /** Repo Id */
             repo_id: string;
             /**

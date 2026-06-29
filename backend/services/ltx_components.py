@@ -8,10 +8,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from api_types import ModelCheckpointID, ModelProfilePayload
+from api_types import ModelProfilePayload, ModelSelectionID
 
 CheckpointPath = str | tuple[str, ...]
 TransformerFormat = Literal["safetensors", "gguf"]
+# Mirrors ``base_video_model_registry.RuntimeReadiness``. Defined locally (not
+# imported) to keep this pure-resolver module free of the registry dependency.
+RuntimeReadiness = Literal["none", "requires_active_profile_sidecars"]
 
 # Phase 3D (plan §12): base model family routes the fast pipeline.
 #   - ``distilled`` => ``ltx_pipelines.distilled.DistilledPipeline``
@@ -91,33 +94,67 @@ def resolve_components(
     profile: ModelProfilePayload,
     *,
     selected_transformer_path: str | None = None,
-    selected_cp_id: ModelCheckpointID | None = None,
+    selected_cp_id: ModelSelectionID | None = None,
+    selected_transformer_format: TransformerFormat | None = None,
+    selected_base_family: BaseFamily | None = None,
+    selected_runtime_readiness: RuntimeReadiness | None = None,
 ) -> ResolvedLtxComponents:
     """Turn a model profile's component paths into a typed bundle.
 
     Tuple ordering for split/gguf: transformer first, then text projection,
     embeddings connector, video VAE, audio VAE.
 
-    Live model selection (Step 4 / Phase 2): when ``selected_transformer_path``
-    is provided, it overrides *only* the transformer while reusing the active
-    profile's other sidecar components (text projection, embeddings connector,
-    VAEs, Gemma root, upsampler, mmproj, explicit distilled LoRA). The
-    transformer format is inferred from the override path (``.gguf`` ⇒ gguf;
-    otherwise safetensors monolith — the only Phase 1 safetensors candidate is
-    the distilled monolith). Base family is re-inferred from the selected path
-    so dev/distilled routing follows the selection, and the cache key carries a
-    ``model_selection`` marker + the selected CP id/path so switching selection
-    always invalidates the pipeline cache.
+    Live model selection (Step 4): when ``selected_transformer_path`` is
+    provided, it overrides *only* the transformer while reusing the active
+    profile's other sidecar components. The caller (registry-driven resolver)
+    passes explicit ``selected_transformer_format``, ``selected_base_family``,
+    and ``selected_runtime_readiness`` so NO path/filename inference happens
+    for the selected format/family/readiness:
+
+    - Builder checkpoint paths key on ``selected_runtime_readiness``, NOT on
+      base family or container format. A selection that requires active
+      profile sidecars (Fast-family QuantStack distilled GGUF, Kijai distilled
+      FP8, official dev safetensors, all dev/full GGUFs) is a split build:
+      selected transformer + profile text projection, embeddings connector,
+      video VAE, audio VAE (falsey entries filtered). A true monolith
+      (``runtime_readiness == "none"``, the official distilled) loads as a
+      single self-contained file. When readiness is absent (legacy callers),
+      the prior base-family-driven behavior is preserved.
+    - Sidecar *metadata* (text projection, embeddings connector, VAEs) is
+      cleared ONLY for a true monolith (``selected_runtime_readiness == "none"``,
+      or the legacy inferred monolith when readiness is absent). Entries that
+      require active profile sidecars preserve profile sidecars.
+
+    When explicit selection metadata is omitted (backward-compatible callers),
+    format/readiness fall back to path inference and the legacy
+    safetensors-as-monolith behavior.
     """
     c = profile.components
 
     if selected_transformer_path is not None:
-        # Live selection override. ``selected`` is narrowed to ``str`` here.
+        # Live selection override.
         selected = selected_transformer_path
         effective_transformer = selected
-        fmt: TransformerFormat = "gguf" if selected.lower().endswith(".gguf") else "safetensors"
-        if fmt == "gguf":
-            # Dev GGUF: split build — selected transformer + profile sidecars.
+        # Prefer explicit registry metadata; fall back to path inference only
+        # when the caller did not supply it (backward compat).
+        if selected_transformer_format is not None:
+            fmt: TransformerFormat = selected_transformer_format
+        else:
+            fmt = "gguf" if selected.lower().endswith(".gguf") else "safetensors"
+        if selected_base_family is not None:
+            base_family: BaseFamily = selected_base_family
+        else:
+            base_family = _infer_base_family(selected)
+        # Builder checkpoint tuple keys on ``selected_runtime_readiness``, NOT
+        # on base family or container format. A selection that requires active
+        # profile sidecars (Fast-family QuantStack distilled GGUF, Kijai FP8,
+        # official dev safetensors, all dev/full GGUFs) is a split build: the
+        # selected transformer plus the profile's text projection, embeddings
+        # connector, and VAEs (falsey entries filtered). A true monolith
+        # (``runtime_readiness == "none"``, the official distilled) loads as a
+        # single self-contained file. When readiness is absent (legacy callers),
+        # fall back to the prior base-family-driven behavior.
+        if selected_runtime_readiness == "requires_active_profile_sidecars":
             builder_paths: tuple[str, ...] = tuple(
                 p
                 for p in (
@@ -129,18 +166,36 @@ def resolve_components(
                 )
                 if p
             )
-        else:
-            # Phase 1 safetensors selection = distilled monolith (single file).
+        elif selected_runtime_readiness == "none":
             builder_paths = (selected,)
+        else:
+            # Legacy backward-compat (no explicit readiness): the dev route is
+            # a split build, everything else loads as a single transformer file.
+            if base_family == "dev":
+                builder_paths = tuple(
+                    p
+                    for p in (
+                        selected,
+                        c.text_projection,
+                        c.embeddings_connector,
+                        c.video_vae,
+                        c.audio_vae,
+                    )
+                    if p
+                )
+            else:
+                builder_paths = (selected,)
     elif c.transformer_format == "official_safetensors":
         # Monolithic checkpoint: single path.
         effective_transformer = c.transformer or ""
         fmt = "safetensors"
+        base_family = _infer_base_family(effective_transformer)
         builder_paths = (c.transformer,) if c.transformer else ()
     else:
         # split_safetensors or gguf: transformer + component files.
         effective_transformer = c.transformer or ""
         fmt = "gguf" if c.transformer_format == "gguf" else "safetensors"
+        base_family = _infer_base_family(effective_transformer)
         builder_paths = tuple(
             p
             for p in (
@@ -153,16 +208,23 @@ def resolve_components(
             if p
         )
 
-    base_family = _infer_base_family(effective_transformer)
     explicit_distilled_lora_path = _extract_distilled_lora_path(c.official_adapters)
 
-    # A distilled/safetensors monolith selection override must NOT carry split
-    # sidecar builder paths — otherwise the resolved bundle looks like a split
-    # profile. Only GGUF/split selections and non-override profiles carry the
-    # profile's sidecar component paths. Non-builder metadata (upsampler, Gemma
-    # root, mmproj) is preserved regardless.
-    monolith_selection = selected_transformer_path is not None and fmt == "safetensors"
-    if monolith_selection:
+    # Sidecar metadata is cleared ONLY for a true monolith — the official
+    # distilled (``runtime_readiness == "none"``) which loads as a single
+    # self-contained file with no profile sidecar inputs. Kijai FP8 (distilled
+    # safetensors, ``requires_active_profile_sidecars``) and the official dev
+    # safetensors MUST preserve profile sidecars. Backward compat: without
+    # explicit readiness, a safetensors selection is treated as a monolith
+    # (legacy callers only select the distilled monolith).
+    if selected_transformer_path is not None:
+        if selected_runtime_readiness is not None:
+            is_true_monolith = selected_runtime_readiness == "none"
+        else:
+            is_true_monolith = fmt == "safetensors"
+    else:
+        is_true_monolith = False
+    if is_true_monolith:
         text_projection_path: str | None = None
         embeddings_connector_path: str | None = None
         video_vae_path: str | None = None

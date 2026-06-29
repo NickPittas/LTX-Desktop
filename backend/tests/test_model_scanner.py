@@ -43,6 +43,16 @@ def _find(artifacts: list[Any], role: str) -> Any:
     return next(a for a in artifacts if a.component_role == role)
 
 
+def _find_by_filename(artifacts: list[Any], filename: str) -> Any:
+    """Find a scanner artifact by filename.
+
+    Needed because multiple base-video artifacts now share the
+    ``base_diffusion_model`` role (the official distilled monolith AND the
+    official dev safetensors are both ``base_diffusion_model``).
+    """
+    return next(a for a in artifacts if a.filename == filename)
+
+
 # ------------------------------------------------------------------
 # Scanner unit tests
 # ------------------------------------------------------------------
@@ -136,7 +146,9 @@ class TestScannerStatuses:
         _write(models / "diffusion_models", "ltx-2.3-22b-distilled.safetensors")
 
         result = scan_models(models)
-        base = _find(result.artifacts, "base_diffusion_model")
+        # The distilled monolith and the official dev safetensors share the
+        # ``base_diffusion_model`` role; look up the distilled by filename.
+        base = _find_by_filename(result.artifacts, "ltx-2.3-22b-distilled.safetensors")
         assert base.status == "installed"
 
     def test_root_base_model_wrong_folder(self, tmp_path):
@@ -145,7 +157,7 @@ class TestScannerStatuses:
         _write(models, "ltx-2.3-22b-distilled.safetensors")
 
         result = scan_models(models)
-        base = _find(result.artifacts, "base_diffusion_model")
+        base = _find_by_filename(result.artifacts, "ltx-2.3-22b-distilled.safetensors")
         assert base.status == "wrong_folder_usable"
 
     def test_subfolder_upscaler_installed(self, tmp_path):
@@ -196,7 +208,9 @@ class TestScannerStatuses:
         models = tmp_path / "models"
         result = scan_models(models)
 
-        base = _find(result.artifacts, "base_diffusion_model")
+        # The distilled monolith and the official dev safetensors share the
+        # ``base_diffusion_model`` role; look up the distilled by filename.
+        base = _find_by_filename(result.artifacts, "ltx-2.3-22b-distilled.safetensors")
         assert base.status == "missing"
         assert base.canonical_relative_path == "diffusion_models/ltx-2.3-22b-distilled.safetensors"
 
@@ -394,6 +408,93 @@ class TestScannerStatuses:
         art = next(a for a in result.artifacts if a.filename == "ltx-2.3-22b-dev-Q4_K_M.gguf")
         assert art.status == "wrong_folder_usable"
         assert art.scanner_confidence == "filename_match"
+
+    # ------------------------------------------------------------------
+    # Unified base-video registry — Kijai/QuantStack scanner artifacts
+    # ------------------------------------------------------------------
+
+    def test_scanner_base_video_registry_artifacts_are_selectable(self, tmp_path):
+        """Scanner-recognized Fast-family Kijai/QuantStack base-video artifacts
+        carry the same metadata (canonical path, repo, section, variant group,
+        role) as the unified base-video registry that drives
+        ``GET /api/models/model-options`` (plan: source-of-truth fix).
+
+        Places every scanner-only Fast-family base-video file at its canonical
+        registry path and verifies each is ``installed`` (not unknown) and
+        carries registry-matching catalog metadata.
+        """
+        from services.base_video_model_registry import (
+            iter_base_video_registry_static_entries,
+        )
+
+        models = tmp_path / "models"
+
+        # Materialize every scanner-only Fast-family base-video file at its
+        # canonical registry path (Kijai FP8 + seven QuantStack distilled GGUFs).
+        fast_scanner_only = [
+            e for e in iter_base_video_registry_static_entries()
+            if e.download_cp_id is None and e.pipeline_family == "fast"
+        ]
+        assert {e.id for e in fast_scanner_only} == {
+            "ltx-2.3-22b-distilled-fp8-kijai-v3",
+            "ltx-2.3-22b-distilled-gguf-quantstack-q2-k",
+            "ltx-2.3-22b-distilled-gguf-quantstack-q3-k-s",
+            "ltx-2.3-22b-distilled-gguf-quantstack-q3-k-m",
+            "ltx-2.3-22b-distilled-gguf-quantstack-q4-k-s",
+            "ltx-2.3-22b-distilled-gguf-quantstack-q4-k-m",
+            "ltx-2.3-22b-distilled-gguf-quantstack-q5-k-s",
+            "ltx-2.3-22b-distilled-gguf-quantstack-q5-k-m",
+        }
+        for entry in fast_scanner_only:
+            path = models / entry.canonical_relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"\x00model")
+
+        result = scan_models(models)
+
+        # Cross-check each scanner artifact against its registry metadata.
+        for entry in fast_scanner_only:
+            filename = Path(entry.canonical_relative_path).name
+            art = next(
+                a for a in result.artifacts if a.filename == filename
+            )
+            assert art.status == "installed", entry.id
+            assert art.canonical_relative_path == entry.canonical_relative_path
+            assert art.repo_id == entry.repo_id
+            assert art.section == entry.section
+            assert art.variant_group == entry.variant_group
+            assert art.component_role == entry.component_role
+            assert art.artifact_kind == entry.artifact_kind
+            assert art.downloadable is False  # scanner-only (no download CP)
+            # The canonical placement path the model-options endpoint would
+            # surface matches the scanner's preferred path.
+            assert art.preferred_path == str(models / entry.canonical_relative_path)
+
+        # None of the Kijai/QuantStack files leak as unknown.
+        unknown_names = {Path(f.relative_path).name for f in result.unknown_files}
+        for entry in fast_scanner_only:
+            assert Path(entry.canonical_relative_path).name not in unknown_names
+
+        # Spot-check the Kijai FP8 and a QuantStack GGUF carry the exact
+        # metadata model-options uses to identify them.
+        kijai = next(
+            a for a in result.artifacts if a.component_role == "base_diffusion_model_fp8"
+        )
+        assert kijai.filename == (
+            "ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v3.safetensors"
+        )
+        assert kijai.repo_id == "Kijai/LTX2.3_comfy"
+        assert kijai.section == "kijai"
+        assert kijai.variant_group == "ltx-2.3-distilled-fp8"
+
+        quantstack = next(
+            a for a in result.artifacts
+            if a.filename == "LTX-2.3-22B-distilled-1.1-Q4_K_M.gguf"
+        )
+        assert quantstack.repo_id == "QuantStack/LTX-2.3-GGUF"
+        assert quantstack.section == "gguf"
+        assert quantstack.variant_group == "ltx-2.3-distilled-gguf"
+        assert quantstack.component_role == "base_diffusion_model_gguf"
 
     # ------------------------------------------------------------------
     # Phase 2A — catalog grouping metadata (plan §7)
@@ -717,8 +818,10 @@ class TestScannerFullLayout:
         distilled = _find(result.artifacts, "distilled_lora_384")
         assert distilled.status == "installed"
 
-        # Diffusion model at canonical subfolder → installed
-        base = _find(result.artifacts, "base_diffusion_model")
+        # Diffusion model at canonical subfolder → installed.
+        # The distilled monolith and the official dev safetensors share the
+        # ``base_diffusion_model`` role; look up the distilled by filename.
+        base = _find_by_filename(result.artifacts, "ltx-2.3-22b-distilled.safetensors")
         assert base.status == "installed"
 
         # Text encoder at canonical subfolder → installed

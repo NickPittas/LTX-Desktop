@@ -702,6 +702,21 @@ class ModelLibraryScanResponse(BaseModel):
 # Model Selection (live model switching — Step 4 / Phase 1)
 # ============================================================
 
+#: Local video-generation pipeline family. ``fast`` is the distilled monolith
+#: route; ``full`` is the dev/full (GGUF) route. Independent from the API-only
+#: ``"pro"`` value carried by :data:`LTXVideoGenPipeline` — the model-selection
+#: popover is a local-only feature, so only these two families are enumerated
+#: on each option.
+LTXVideoGenPipelineFamily: TypeAlias = Literal["fast", "full"]
+
+#: Runtime string identifying a selectable base video transformer. Intentionally
+#: a runtime ``str`` (not a generated ``Literal``) because
+#: ``GET /api/models/model-options`` is the authoritative runtime source (plan
+#: §"Required source-of-truth fix"). The backend rejects any unknown string
+#: with ``UNSUPPORTED_MODEL_SELECTION``; the frontend never hardcodes selection
+#: ids except storing/rendering the backend's returned ``option.id``.
+ModelSelectionID: TypeAlias = str
+
 #: Workflow context for the backend-owned model-options endpoint. The backend
 #: decides which workflows are eligible for live model selection in Phase 1
 #: (text-to-video, image-to-video). Other workflows enumerate the same base
@@ -729,12 +744,18 @@ class ModelSelectionOption(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    id: ModelCheckpointID
+    id: ModelSelectionID
     label: str
     group: str
     section: CatalogSection
     variant_group: str
     installed: bool
+    # Machine-readable local pipeline family this checkpoint belongs to. The
+    # frontend filters the model-selection popover by this so a user cannot
+    # pair a "fast"-family dropdown selection with a "full"-family (dev/full
+    # GGUF) checkpoint (and vice versa). Derived from the unified base-video
+    # registry (:mod:`services.base_video_model_registry`).
+    pipeline_family: LTXVideoGenPipelineFamily
     disabled_reason: str | None = None
     repo_id: str
     source_url: str
@@ -761,7 +782,7 @@ class ModelSelectionOptionsResponse(BaseModel):
 LTXVideoGenResolution: TypeAlias = Literal["540p", "720p", "1080p", "1440p", "2160p"]
 LTXVideoGenDuration: TypeAlias = Literal[5, 6, 8, 10, 12, 14, 16, 18, 20]
 LTXVideoGenFps: TypeAlias = Literal[24, 25, 48, 50]
-LTXVideoGenPipeline: TypeAlias = Literal["fast", "pro"]
+LTXVideoGenPipeline: TypeAlias = Literal["fast", "full", "pro"]
 
 
 class LTXVideoGenerationResolutionSpec(BaseModel):
@@ -794,12 +815,15 @@ class GenerateVideoRequest(BaseModel):
     resolution: LTXVideoGenResolution = "1080p"
     model: LTXVideoGenPipeline = "fast"
     # Live model selection (Step 4 / Phase 1): optional explicit base video
-    # transformer checkpoint. ``None`` preserves the legacy ``model``-based
+    # transformer selection. ``None`` preserves the legacy ``model``-based
     # fast/pro routing — the two fields are NOT mutually concepts today;
     # ``model`` keeps driving the pipeline. Phase 1 only establishes the DTO
     # contract (acceptance/rejection); runtime routing arrives in Phase 2.
-    # Strict mode still 422s on an unknown literal or a non-string type.
-    model_selection: ModelCheckpointID | None = None
+    # ``ModelSelectionID`` is a runtime string: any unknown id reaches the
+    # handler and is rejected with ``UNSUPPORTED_MODEL_SELECTION`` (422), never
+    # a silent fallback. The authoritative id list is
+    # ``GET /api/models/model-options``.
+    model_selection: ModelSelectionID | None = None
     cameraMotion: VideoCameraMotion = "none"
     negativePrompt: str = ""
     duration: LTXVideoGenDuration = 5

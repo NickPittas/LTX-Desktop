@@ -6,7 +6,7 @@ from threading import RLock
 from typing import TYPE_CHECKING
 
 from _routes._errors import HTTPError
-from api_types import ModelCheckpointID
+from api_types import ModelSelectionID
 from handlers.base import StateHandlerBase, with_state_lock
 from runtime_config.model_download_specs import (
     get_downloaded_ltx_model_id,
@@ -14,6 +14,10 @@ from runtime_config.model_download_specs import (
     get_ltx_model_spec,
     is_cp_downloaded,
     resolve_model_path,
+)
+from services.base_video_model_registry import (
+    BaseVideoModelRegistryEntry,
+    resolve_base_video_model_selection,
 )
 from state.app_state_types import AppState, TextEncodingResult
 
@@ -80,26 +84,58 @@ class TextHandler(StateHandlerBase):
     def clear_api_embeddings(self) -> None:
         self._set_api_embeddings(None)
 
-    def _selected_checkpoint_path(self, model_selection: ModelCheckpointID | None) -> str | None:
-        """Canonical placement path for a present selection (no existence check).
+    def _resolve_selection_entry(
+        self, model_selection: ModelSelectionID | None
+    ) -> BaseVideoModelRegistryEntry | None:
+        """Resolve a present selection to its registry entry (registry-aware).
 
-        Selection is validated/installed-checked by the pipeline handler before
-        text encoding runs, so this only resolves the canonical path string.
+        Returns ``None`` when no selection is present. The selection is
+        validated/installed-checked by the pipeline handler before text
+        encoding runs, so this only resolves the entry (CP-backed and non-CP
+        ids alike) via the unified base-video registry.
         """
         if model_selection is None:
             return None
-        return str(resolve_model_path(self.models_dir, model_selection))
+        return resolve_base_video_model_selection(self.models_dir, model_selection)
 
-    def _effective_model_identity(self, model_selection: ModelCheckpointID | None) -> str:
+    def _selected_checkpoint_path(self, model_selection: ModelSelectionID | None) -> str | None:
+        """Runtime placement path for a present selection (registry-aware).
+
+        CP-backed selections preserve the existing CP-catalog resolution
+        (``resolve_model_path``); non-CP selections (Kijai FP8, QuantStack
+        distilled GGUF, official dev safetensors) resolve via the registry's
+        filesystem-evidenced ``transformer_path``. The selection is validated
+        upstream, so the path is non-None when installed.
+        """
+        entry = self._resolve_selection_entry(model_selection)
+        if entry is None:
+            return None
+        if entry.download_cp_id is not None:
+            # Preserve exact existing behavior for CP-backed selections.
+            return str(resolve_model_path(self.models_dir, entry.download_cp_id))
+        # Non-CP registry id: actual runtime path (preferred) with canonical
+        # placement fallback.
+        return entry.transformer_path or entry.expected_absolute_path
+
+    def _effective_model_identity(self, model_selection: ModelSelectionID | None) -> str:
         """Effective base model identity used to namespace prompt/API caches.
 
-        Preference order: selected checkpoint canonical path → active profile
-        transformer path → downloaded LTX model id. Including this in the cache
-        key ensures prompt embeddings never leak across live model selections
-        (Step 4 / Phase 2).
+        Preference order: selected checkpoint canonical placement path → active
+        profile transformer path → downloaded LTX model id. Including this in
+        the cache key ensures prompt embeddings never leak across live model
+        selections (Step 4).
+
+        Registry-aware: non-CP selections (Kijai/QuantStack/dev) resolve their
+        canonical path via the unified base-video registry instead of the
+        CP-only ``resolve_model_path`` (which would raise for ids absent from
+        the CP catalog). CP-backed selections preserve the existing
+        ``resolve_model_path`` identity.
         """
-        if model_selection is not None:
-            return str(resolve_model_path(self.models_dir, model_selection))
+        entry = self._resolve_selection_entry(model_selection)
+        if entry is not None:
+            if entry.download_cp_id is not None:
+                return str(resolve_model_path(self.models_dir, entry.download_cp_id))
+            return entry.expected_absolute_path
         profile_id = self.state.active_model_profile_id
         if profile_id is not None:
             profile = next((p for p in self.state.model_profiles if p.id == profile_id), None)
@@ -109,7 +145,7 @@ class TextHandler(StateHandlerBase):
         return model_id or ""
 
     def should_use_local_encoding(
-        self, model_selection: ModelCheckpointID | None = None
+        self, model_selection: ModelSelectionID | None = None
     ) -> bool:
         """Decide whether to use local text encoding based on availability.
 
@@ -138,7 +174,7 @@ class TextHandler(StateHandlerBase):
         self,
         prompt: str,
         enhance_prompt: bool,
-        model_selection: ModelCheckpointID | None = None,
+        model_selection: ModelSelectionID | None = None,
     ) -> None:
         """Validate settings and prepare text embeddings for a generation run.
 
@@ -177,7 +213,7 @@ class TextHandler(StateHandlerBase):
             )
 
     def resolve_gemma_root(
-        self, model_selection: ModelCheckpointID | None = None
+        self, model_selection: ModelSelectionID | None = None
     ) -> str | None:
         # The text-encoder root is independent of the base video transformer
         # selection, so ``model_selection`` does not change the result; accepted

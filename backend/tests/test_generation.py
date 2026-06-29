@@ -1275,8 +1275,9 @@ class TestGenerateModelSpecs:
 
         assert r.status_code == 200
         data = r.json()
-        assert [item["pipeline"] for item in data["local_models"]] == ["fast"]
+        assert [item["pipeline"] for item in data["local_models"]] == ["fast", "full"]
         assert data["local_models"][0]["spec"]["display_name"] == "LTX 2.3 Fast"
+        assert data["local_models"][1]["spec"]["display_name"] == "LTX 2.3 Full"
         assert list(data["local_models"][0]["spec"]["supported_resolutions_durations"]["540p"]["fps_to_durations"].keys()) == ["24"]
         assert [item["pipeline"] for item in data["api_models"]] == ["fast", "pro"]
         assert list(data["api_models"][0]["spec"]["a2v_supported_resolutions_durations"].keys()) == ["1080p"]
@@ -1524,12 +1525,15 @@ class TestModelSelectionRouting:
     def test_selected_missing_gguf_rejects_with_not_installed(
         self, client, test_state, create_fake_model_files
     ):
-        # Distilled bundle installed, but the GGUF candidate is not.
+        # Distilled bundle installed, but the GGUF candidate is not. Use
+        # model="full" so the family matches the dev/full GGUF selection and the
+        # NOT_INSTALLED check is reached (model="fast" + dev GGUF is now a
+        # family mismatch, tested in TestModelSelectionFamilyMismatch).
         create_fake_model_files()
 
         r = client.post(
             "/api/generate",
-            json={**_T2V_JSON, "model_selection": "ltx-2.3-22b-dev-gguf-q4-k-m"},
+            json={**_T2V_JSON, "model": "full", "model_selection": "ltx-2.3-22b-dev-gguf-q4-k-m"},
         )
         canonical = str(
             resolve_model_path(
@@ -1569,6 +1573,59 @@ class TestModelSelectionRouting:
         assert r.status_code == 422
         payload = r.json()
         assert payload["code"] == "UNSUPPORTED_MODEL_SELECTION"
+
+    def test_generate_rejects_unknown_model_selection_id(self, client):
+        """``ModelSelectionID`` is a runtime string; unknown ids must reject
+        clearly with ``UNSUPPORTED_MODEL_SELECTION`` (never a silent fallback).
+        Also folds in the family-mismatch coverage required by the plan
+        (fast↔full) so this slice needs no fourth test.
+
+        Coverage:
+        - Arbitrary unknown string id → 422 UNSUPPORTED_MODEL_SELECTION (the
+          request is accepted by pydantic because the field is now ``str``, and
+          rejected by the registry-driven resolver).
+        - Known Fast-family selection (Kijai FP8) with ``model="full"`` → 422
+          MODEL_SELECTION_FAMILY_MISMATCH.
+        - Known Full-family selection (official dev) with ``model="fast"`` →
+          422 MODEL_SELECTION_FAMILY_MISMATCH.
+        """
+        # 1) Arbitrary unknown string reaches the handler and is rejected by the
+        # registry resolver (the family guard returns None for unknown ids and
+        # falls through; the resolver raises UNSUPPORTED_MODEL_SELECTION).
+        r = client.post(
+            "/api/generate",
+            json={**_T2V_JSON, "model_selection": "not-a-real-model"},
+        )
+        assert r.status_code == 422
+        assert r.json()["code"] == "UNSUPPORTED_MODEL_SELECTION"
+
+        # 2) Fast-family Kijai FP8 selection with model="full" → family mismatch.
+        r_fast = client.post(
+            "/api/generate",
+            json={
+                **_T2V_JSON,
+                "model": "full",
+                "model_selection": "ltx-2.3-22b-distilled-fp8-kijai-v3",
+            },
+        )
+        assert r_fast.status_code == 422
+        payload_fast = r_fast.json()
+        assert payload_fast["code"] == "MODEL_SELECTION_FAMILY_MISMATCH"
+        assert "'fast'" in payload_fast["message"]
+
+        # 3) Full-family dev selection with model="fast" → family mismatch.
+        r_full = client.post(
+            "/api/generate",
+            json={
+                **_T2V_JSON,
+                "model": "fast",
+                "model_selection": "ltx-2.3-22b-dev",
+            },
+        )
+        assert r_full.status_code == 422
+        payload_full = r_full.json()
+        assert payload_full["code"] == "MODEL_SELECTION_FAMILY_MISMATCH"
+        assert "'full'" in payload_full["message"]
 
     def test_switching_selection_changes_pipeline_cache(
         self, client, test_state, fake_services, create_fake_model_files, tmp_path
@@ -1614,10 +1671,11 @@ class TestModelSelectionRouting:
 
         # Gen 2: select a different installed dev GGUF → cache key differs → the
         # fast pipeline is recreated with the GGUF split build (new path tuple),
-        # proving the selection switch invalidated the cache.
+        # proving the selection switch invalidated the cache. model="full" matches
+        # the dev/full GGUF family (required by the family-consistency guard).
         r2 = client.post(
             "/api/generate",
-            json={**_T2V_JSON, "model_selection": gguf_cp},
+            json={**_T2V_JSON, "model": "full", "model_selection": gguf_cp},
         )
         assert r2.status_code == 200, r2.text
         assert fake_services.fast_video_pipeline.last_base_family == "dev"
@@ -1716,7 +1774,10 @@ class TestModelSelectionRouting:
         lora.parent.mkdir(parents=True, exist_ok=True)
         lora.write_bytes(b"LORA")
 
-        r = client.post("/api/generate", json={**_T2V_JSON, "model_selection": gguf_cp})
+        r = client.post(
+            "/api/generate",
+            json={**_T2V_JSON, "model": "full", "model_selection": gguf_cp},
+        )
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "complete"
 
@@ -1748,6 +1809,70 @@ class TestModelSelectionRouting:
         assert payload["code"] == "MODEL_SELECTION_UNSUPPORTED_FOR_API_GENERATIONS"
         # The API client must never have been called.
         assert len(fake_services.ltx_api_client.text_to_video_calls) == 0
+
+
+class TestModelSelectionFamilyMismatch:
+    """The request ``model`` family must match the selected checkpoint family.
+
+    ``model="fast"`` pairs only with the distilled base; ``model="full"`` pairs
+    only with a dev/full GGUF base. A mismatch rejects clearly (422) before any
+    pipeline load, so a misleading "LTX 2.3 Fast" label can never mask a slow
+    dev/full build (and the inverse).
+    """
+
+    def test_fast_model_with_dev_gguf_selection_rejects_family_mismatch(self, client):
+        # Family guard runs before spec/download checks, so no fixtures needed.
+        r = client.post(
+            "/api/generate",
+            json={**_T2V_JSON, "model_selection": "ltx-2.3-22b-dev-gguf-q4-k-m"},
+        )
+        assert r.status_code == 422
+        payload = r.json()
+        assert payload["code"] == "MODEL_SELECTION_FAMILY_MISMATCH"
+        # The message names the selection's family ("full").
+        assert "'full'" in payload["message"]
+
+    def test_full_model_with_distilled_selection_rejects_family_mismatch(self, client):
+        r = client.post(
+            "/api/generate",
+            json={**_T2V_JSON, "model": "full", "model_selection": "ltx-2.3-22b-distilled"},
+        )
+        assert r.status_code == 422
+        payload = r.json()
+        assert payload["code"] == "MODEL_SELECTION_FAMILY_MISMATCH"
+        # The message names the selection's family ("fast").
+        assert "'fast'" in payload["message"]
+
+    def test_full_model_with_dev_gguf_selection_routes_dev_pipeline(
+        self, client, test_state, fake_services, tmp_path, create_fake_model_files
+    ):
+        """``model="full"`` + a dev/full GGUF selection is accepted and routes
+        through the dev build (same FastVideoPipeline service; dev/full selected
+        components). Uses fakes only — consistent with the no-mocks policy."""
+        _make_gguf_profile(test_state, tmp_path)
+        create_fake_model_files()  # canonical upscaler + text encoder
+        _enable_local_text_encoding(test_state)
+
+        gguf_cp = "ltx-2.3-22b-dev-gguf-q4-k-m"
+        gguf_path = resolve_model_path(test_state.config.default_models_dir, gguf_cp)
+        gguf_path.parent.mkdir(parents=True, exist_ok=True)
+        gguf_path.write_bytes(b"GGUF")
+        lora = (
+            test_state.config.default_models_dir
+            / "adapters"
+            / "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
+        )
+        lora.parent.mkdir(parents=True, exist_ok=True)
+        lora.write_bytes(b"LORA")
+
+        r = client.post(
+            "/api/generate",
+            json={**_T2V_JSON, "model": "full", "model_selection": gguf_cp},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "complete"
+        # model="full" + dev/full GGUF selection routed through the dev build.
+        assert fake_services.fast_video_pipeline.last_base_family == "dev"
 
 
 class TestEnhancePromptFlag:

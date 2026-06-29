@@ -433,14 +433,31 @@ class TestCheckpointDeletion:
         assert not img_gen_path.exists()
 
 
-# ---- Live model selection (Step 4 / Phase 1) ----
+# ---- Live model selection (Step 4) ----
+# Full registry-derived option ids in catalog order (Fast family first, then
+# Full family). Driven by the unified base-video registry, not downloadable CP
+# ids — includes scanner-only Kijai/QuantStack distilled entries and the
+# official dev safetensors.
 _EXPECTED_MODEL_SELECTION_IDS: list[str] = [
+    # Fast family (pipeline_family="fast")
     "ltx-2.3-22b-distilled",
+    "ltx-2.3-22b-distilled-fp8-kijai-v3",
+    "ltx-2.3-22b-distilled-gguf-quantstack-q2-k",
+    "ltx-2.3-22b-distilled-gguf-quantstack-q3-k-s",
+    "ltx-2.3-22b-distilled-gguf-quantstack-q3-k-m",
+    "ltx-2.3-22b-distilled-gguf-quantstack-q4-k-s",
+    "ltx-2.3-22b-distilled-gguf-quantstack-q4-k-m",
+    "ltx-2.3-22b-distilled-gguf-quantstack-q5-k-s",
+    "ltx-2.3-22b-distilled-gguf-quantstack-q5-k-m",
+    # Full family (pipeline_family="full")
+    "ltx-2.3-22b-dev",
     "ltx-2.3-22b-dev-gguf-q4-k-m",
     "ltx-2.3-22b-dev-gguf-ud-q4-k-m",
     "ltx-2.3-22b-dev-gguf-q6-k",
     "ltx-2.3-22b-dev-gguf-ud-q5-k-m",
 ]
+_FAST_FAMILY_IDS: frozenset[str] = frozenset(_EXPECTED_MODEL_SELECTION_IDS[:9])
+_FULL_FAMILY_IDS: frozenset[str] = frozenset(_EXPECTED_MODEL_SELECTION_IDS[9:])
 _UNSUPPORTED_WORKFLOW_REASON = (
     "Live model selection is currently available for text-to-video and image-to-video only"
 )
@@ -473,30 +490,34 @@ class TestModelSelectionOptions:
             # Supported workflow + nothing installed → all missing-disabled.
             assert opt["installed"] is False
             assert opt["disabled_reason"] == _NOT_INSTALLED_REASON
-            # Stable catalog-like metadata.
+            # Stable catalog-like metadata (universal across registry entries).
             assert opt["group"] == "Base video model"
-            assert opt["downloadable"] is True
             assert opt["source_url"] == f"https://huggingface.co/{opt['repo_id']}"
-            spec = get_model_cp_spec(opt["id"])  # type: ignore[arg-type]
-            assert opt["canonical_relative_path"] == str(spec.relative_path)
-            assert opt["expected_absolute_path"] == str(
-                resolve_model_path(test_state.config.default_models_dir, opt["id"])  # type: ignore[arg-type]
-            )
+            assert opt["pipeline_family"] in ("fast", "full")
 
         # Spot-check the distilled candidate (section=full, empty variant group).
         distilled = options[0]
         assert distilled["id"] == "ltx-2.3-22b-distilled"
         assert distilled["section"] == "full"
-        assert distilled["variant_group"] == ""
+        assert distilled["variant_group"] == "ltx-2.3-distilled"
+        assert distilled["pipeline_family"] == "fast"
         assert distilled["repo_id"] == "Lightricks/LTX-2.3"
         assert distilled["label"].startswith("LTX-2.3 22B distilled")
         assert distilled["source_url"] == "https://huggingface.co/Lightricks/LTX-2.3"
 
-        # Spot-check a GGUF candidate (section=gguf, shared variant group).
-        gguf = options[1]
-        assert gguf["id"] == "ltx-2.3-22b-dev-gguf-q4-k-m"
+        # Spot-check the Kijai FP8 candidate (Fast family, scanner-only).
+        kijai = next(o for o in options if o["id"] == "ltx-2.3-22b-distilled-fp8-kijai-v3")
+        assert kijai["section"] == "kijai"
+        assert kijai["variant_group"] == "ltx-2.3-distilled-fp8"
+        assert kijai["pipeline_family"] == "fast"
+        assert kijai["repo_id"] == "Kijai/LTX2.3_comfy"
+        assert kijai["downloadable"] is False
+
+        # Spot-check a Full-family dev GGUF candidate (section=gguf).
+        gguf = next(o for o in options if o["id"] == "ltx-2.3-22b-dev-gguf-q4-k-m")
         assert gguf["section"] == "gguf"
         assert gguf["variant_group"] == "ltx-2.3-dev-gguf"
+        assert gguf["pipeline_family"] == "full"
         assert gguf["repo_id"] == "unsloth/LTX-2.3-GGUF"
         assert gguf["source_url"] == "https://huggingface.co/unsloth/LTX-2.3-GGUF"
 
@@ -519,10 +540,38 @@ class TestModelSelectionOptions:
         assert distilled["installed"] is True
         assert distilled["disabled_reason"] is None
 
-        for gguf_id in _EXPECTED_MODEL_SELECTION_IDS[1:]:
-            gguf = by_id[gguf_id]
-            assert gguf["installed"] is False
-            assert gguf["disabled_reason"] == _NOT_INSTALLED_REASON
+        # Every other registry entry is absent on disk → missing-disabled.
+        for other_id in _EXPECTED_MODEL_SELECTION_IDS:
+            if other_id == "ltx-2.3-22b-distilled":
+                continue
+            other = by_id[other_id]
+            assert other["installed"] is False
+            assert other["disabled_reason"] == _NOT_INSTALLED_REASON
+
+    def test_options_tag_pipeline_family_distilled_fast_dev_full(
+        self, client, test_state, create_fake_model_files
+    ):
+        # Each option carries a machine-readable pipeline family so the
+        # frontend can filter the popover by the current model dropdown family.
+        # Fast family = distilled/Kijai/QuantStack; Full family = dev/unsloth.
+        create_fake_model_files()
+        gguf_cp = "ltx-2.3-22b-dev-gguf-q4-k-m"
+        gguf_path = resolve_model_path(test_state.config.default_models_dir, gguf_cp)
+        gguf_path.parent.mkdir(parents=True, exist_ok=True)
+        gguf_path.write_bytes(b"GGUF")
+
+        response = client.get(
+            "/api/models/model-options",
+            params={"workflow": "text-to-video"},
+            headers=_ADMIN_HEADERS,
+        )
+        assert response.status_code == 200, response.text
+        by_id = {o["id"]: o for o in response.json()["options"]}
+
+        for fast_id in _FAST_FAMILY_IDS:
+            assert by_id[fast_id]["pipeline_family"] == "fast", fast_id
+        for full_id in _FULL_FAMILY_IDS:
+            assert by_id[full_id]["pipeline_family"] == "full", full_id
 
     def test_unsupported_workflow_disables_even_installed_options(self, client, create_fake_model_files):
         create_fake_model_files()
@@ -719,3 +768,95 @@ class TestModelSelectionOptions:
         assert gguf["installed"] is True
         assert gguf["disabled_reason"] is not None
         assert "split components" in gguf["disabled_reason"].lower()
+
+    def test_model_options_use_base_video_registry_fast_and_full_families(
+        self, client, test_state, create_fake_model_files
+    ):
+        """The model-options endpoint is driven by the unified base-video
+        registry (plan: source-of-truth fix). It must enumerate Fast-family
+        Kijai/QuantStack distilled entries AND Full-family dev entries (not
+        only downloadable CP ids), with installed/disabled status derived from
+        fake filesystem evidence.
+
+        Coverage:
+        - Fast family includes the Kijai FP8 + a QuantStack distilled GGUF.
+        - Full family includes the official dev safetensors + an unsloth dev GGUF.
+        - Placing a scanner-only file at its canonical path flips it to
+          ``installed=True`` (registry evidence semantics).
+        - A supported-workflow installed distilled selection is enabled; a
+          scanner-only installed entry that requires sidecars is disabled when
+          no active profile provides them.
+        """
+        # Distilled bundle (upscaler/text encoder) + the official distilled
+        # transformer — the canonical distilled selection is installed & enabled.
+        create_fake_model_files()
+
+        models_dir = test_state.config.default_models_dir
+
+        # Place Fast-family scanner-only files at their canonical registry paths.
+        kijai_rel = (
+            "diffusion_models/ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v3.safetensors"
+        )
+        kijai_path = models_dir / kijai_rel
+        kijai_path.parent.mkdir(parents=True, exist_ok=True)
+        kijai_path.write_bytes(b"FP8")
+
+        quantstack_rel = (
+            "gguf/QuantStack/LTX-2.3-GGUF/LTX-2.3-distilled-1.1/"
+            "LTX-2.3-22B-distilled-1.1-Q4_K_M.gguf"
+        )
+        quantstack_path = models_dir / quantstack_rel
+        quantstack_path.parent.mkdir(parents=True, exist_ok=True)
+        quantstack_path.write_bytes(b"GGUF")
+
+        # Place a Full-family scanner-only file (official dev safetensors).
+        dev_rel = "diffusion_models/ltx-2.3-22b-dev.safetensors"
+        dev_path = models_dir / dev_rel
+        dev_path.parent.mkdir(parents=True, exist_ok=True)
+        dev_path.write_bytes(b"DEV")
+
+        response = client.get(
+            "/api/models/model-options",
+            params={"workflow": "text-to-video"},
+            headers=_ADMIN_HEADERS,
+        )
+        assert response.status_code == 200, response.text
+        by_id = {o["id"]: o for o in response.json()["options"]}
+
+        # Fast-family Kijai/QuantStack entries are present and now installed.
+        kijai = by_id["ltx-2.3-22b-distilled-fp8-kijai-v3"]
+        assert kijai["pipeline_family"] == "fast"
+        assert kijai["installed"] is True
+        assert kijai["repo_id"] == "Kijai/LTX2.3_comfy"
+        assert kijai["canonical_relative_path"] == kijai_rel
+        assert kijai["expected_absolute_path"] == str(kijai_path)
+        # Scanner-only (not downloadable); requires sidecars → disabled here
+        # because no active profile provides them.
+        assert kijai["downloadable"] is False
+        assert kijai["disabled_reason"] is not None
+
+        quantstack = by_id["ltx-2.3-22b-distilled-gguf-quantstack-q4-k-m"]
+        assert quantstack["pipeline_family"] == "fast"
+        assert quantstack["installed"] is True
+        assert quantstack["repo_id"] == "QuantStack/LTX-2.3-GGUF"
+        assert quantstack["canonical_relative_path"] == quantstack_rel
+        assert quantstack["downloadable"] is False
+        assert quantstack["disabled_reason"] is not None
+
+        # Full-family dev entries are present.
+        dev = by_id["ltx-2.3-22b-dev"]
+        assert dev["pipeline_family"] == "full"
+        assert dev["installed"] is True
+        assert dev["repo_id"] == "Lightricks/LTX-2.3"
+        assert dev["canonical_relative_path"] == dev_rel
+        assert dev["expected_absolute_path"] == str(dev_path)
+        assert dev["disabled_reason"] is not None
+
+        # The official distilled (runtime_readiness=none) is installed & enabled.
+        distilled = by_id["ltx-2.3-22b-distilled"]
+        assert distilled["installed"] is True
+        assert distilled["disabled_reason"] is None
+
+        # Family partitioning is exhaustive and disjoint over the registry ids.
+        assert _FAST_FAMILY_IDS | _FULL_FAMILY_IDS == set(_EXPECTED_MODEL_SELECTION_IDS)
+        assert _FAST_FAMILY_IDS.isdisjoint(_FULL_FAMILY_IDS)

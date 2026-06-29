@@ -27,6 +27,69 @@ LTX Desktop is an Electron app for AI video generation using LTX models. Three-l
 - **Honest workflow gating.** Never fake unsupported workflow support; mark unavailable/gated features clearly.
 - **No push without explicit confirmation.**
 
+## Codemap-First Search Rules
+
+- **Use codemap before search.** Any assistant or subagent that searches, explores, or changes code must read `codemap.md` first, then the relevant folder-level `codemap.md` files before using grep/glob/global search.
+- **Prefer codemap-guided lookup over broad search.** Use the codemap to choose exact directories/files/symbols; broad repo-wide searches are a last resort and must be justified by the task.
+- **Keep codemap current.** If work changes architecture, directory responsibilities, API/control flow, model-discovery semantics, or other codemap-covered behavior, update/regenerate codemap artifacts as part of the planned work.
+
+## Full-Stack Contract Rules
+
+- **No backend-only changes for user-visible/API behavior.** Backend work that affects frontend behavior, API schemas, generated types, model visibility, generation options, settings, validation, or error handling is prohibited unless the same plan includes the required frontend changes.
+- **Plan backend and frontend together.** Any backend API/schema/DTO/endpoint change must define, before implementation:
+  - endpoint path/method, if new or changed;
+  - request/response field names;
+  - exact shared variable/type names;
+  - backend files/functions touched;
+  - frontend files/hooks/components/types touched;
+  - generated OpenAPI/type regeneration steps;
+  - targeted validation commands.
+- **Preserve names end-to-end.** Variable names, API field names, endpoint names, and type names must be decided in the plan and preserved consistently across backend, generated types, frontend state, hooks, and UI.
+- **No subagent invention.** Subagents must not invent API names, variable names, endpoint names, schema shape, UI behavior, or validation policy. These must be predetermined by the orchestrator plan.
+
+## Planning Requirements
+
+- Before implementation, the orchestrator must produce a concrete plan containing:
+  - backend files/functions to touch;
+  - frontend files/functions/components/hooks to touch;
+  - generated files, if any;
+  - exact new/changed endpoint names;
+  - exact new/changed request/response fields;
+  - exact variable/type names to preserve end-to-end;
+  - targeted validation commands only;
+  - explicit subagent boundaries and prohibited actions.
+- No implementation starts until this plan exists.
+- If the work reveals a required scope expansion, stop and revise the plan before editing.
+
+## Subagent Scope Rules
+
+- Worker subagents receive narrow implementation instructions only.
+- Prompts must include exact files, symbols/functions, expected variable names, allowed commands, and prohibited commands.
+- Workers must not perform broad repo discovery unless explicitly assigned a locator-only phase.
+- Workers must not run full test suites unless explicitly instructed.
+- Default validation is targeted tests/checks only for touched behavior.
+- **Exact validation commands only.** Workers may run only the exact validation commands listed in their prompt. They must not substitute broader commands, run whole files, run "affected tests", run an entire test module, or add extra validation commands because a wrapper fails or a flag is inconvenient.
+- **Validation fallback requires orchestrator approval.** If an allowed validation command fails because of tooling/wrapper issues (for example, argument forwarding), the worker must stop and report the validation blocker. The orchestrator decides any alternate command; the worker must not improvise a broader test command.
+- **Test scope must be smaller than implementation scope.** If test edits or test runtime begin to dominate the implementation, the worker must stop and return a revised plan. Tests prove the changed contract; they are not the main work.
+- If tests outside the assigned scope fail, workers report the failure and stop; they must not spend time broadly fixing unrelated tests.
+- If the needed implementation exceeds the assigned file/function scope, workers stop and return a revised plan instead of improvising.
+
+## Git/Data-Loss Protection
+
+- Subagents must never run `git stash`, `git reset`, `git checkout`, `git restore`, `git clean`, or destructive filesystem commands unless the user explicitly requests that exact command.
+- Subagents must never discard, overwrite, or revert dirty files they did not create.
+- Before any write task, dirty files must be identified and protected in the prompt.
+- No commit, amend, push, broad staging, or git config changes without explicit user confirmation.
+
+## Model Discovery Rules
+
+- One model registry/source of truth must drive scanner, model-options, resolver, downloader metadata, frontend generated types, and frontend model-selection UI.
+- Generation model options must not be derived only from downloadable checkpoint IDs when scanner-recognized local artifacts are selectable.
+- Scanner-only artifacts must either be promoted to selectable IDs or the model-selection API must explicitly support scanner artifact IDs.
+- Kijai and QuantStack distilled models are Fast-family selectable base models.
+- Dev/full GGUF models are Full-family selectable base models.
+- Missing model UI must show source link and exact required placement path for the same selectable ID that generation would use.
+
 ## Common Commands
 
 | Command | Purpose |

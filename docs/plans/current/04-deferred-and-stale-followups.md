@@ -75,9 +75,9 @@ Legend:
     `backend/handlers/pipelines_handler.py`.
   If any of these surfaces a real regression, treat it as a new bug — not a
   re-plan of the feature.
-- ⛔ **Old `HANDOFF.md`** (IC-LoRA weight / Ingredients T2V / PromptBar Generate
-  no-op fixes). Already committed in `239820b fix: improve local LTX
-  workflows`. Superseded; do not redo.
+- ⛔ **Old IC-LoRA weight / Ingredients T2V / PromptBar Generate no-op fixes.**
+  Already committed in `239820b fix: improve local LTX workflows`. Superseded;
+  do not redo.
 - ⛔ **`subagent-artifacts/hdr-iclora-plan.md` and EXR/MOV primary-output
   plan.** Folded into `02-hdr-completion-and-testing.md` (architecture portion)
   and the EXR-primary dependency note. The detailed artifacts are archived; the

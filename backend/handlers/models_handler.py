@@ -32,6 +32,10 @@ from api_types import (
     TextEncoderRecommendationResponse,
 )
 from handlers.base import StateHandlerBase
+from services.base_video_model_registry import (
+    BaseVideoModelRegistryEntry,
+    iter_base_video_model_entries,
+)
 from services.model_scanner import scan_models
 from runtime_config.model_download_specs import (
     ADAPTER_TO_CP_ID,
@@ -39,7 +43,6 @@ from runtime_config.model_download_specs import (
     IMG_GEN_MODEL_CP_ID,
     LTXLocalModelRelevant,
     OFFICIAL_LTX23_ADAPTERS,
-    SELECTABLE_BASE_VIDEO_CP_IDS,
     UPSAMPLER_CP_ID,
     AdapterComponent,
     get_downloaded_ltx_model_id,
@@ -52,7 +55,6 @@ from runtime_config.model_download_specs import (
     get_model_cp_spec,
     is_cp_downloaded,
     delete_cp_path,
-    resolve_model_path,
 )
 
 if TYPE_CHECKING:
@@ -80,10 +82,10 @@ _TYPED_ADAPTER_FIELD: dict[str, str] = {
 }
 
 
-# ---- Live model selection (Step 4 / Phase 1) ----
-# Phase 1 enumerates base video transformer candidates only. The candidate list
-# is centralized in ``SELECTABLE_BASE_VIDEO_CP_IDS`` (shared with the resolver);
-# only the semantic ``group`` label and workflow-gating reasons are handler-owned.
+# ---- Live model selection (Step 4) ----
+# The candidate list is owned by the unified base-video registry
+# (:mod:`services.base_video_model_registry`); this handler only owns the
+# semantic ``group`` label and the workflow/runtime-readiness gating reasons.
 # No filesystem paths are hardcoded here.
 
 # Workflows eligible for live model selection in Phase 1.
@@ -452,19 +454,24 @@ class ModelsHandler(StateHandlerBase):
                 return True
         return False
 
-    def _dev_option_disabled_reason(self, models_dir: Path) -> str | None:
-        """Read-only runtime-readiness check for a dev/GGUF selection.
+    def _dev_option_disabled_reason(
+        self, base_family: str, models_dir: Path
+    ) -> str | None:
+        """Read-only runtime-readiness check for a ``requires_active_profile_sidecars``
+        selection.
 
         Returns ``None`` when the selection is runnable, else a clear disabled
         reason. Mirrors the hard requirements the fast-pipeline load path
-        enforces for a dev/GGUF base: an active split-component profile
-        providing the sidecars the GGUF/split builder needs (text projection,
-        video VAE, audio VAE — the embeddings connector is optional and treated
-        as falsey/omitted by the builder), a usable spatial upscaler, and a
-        resolvable distilled LoRA (explicit-existing or canonical fallback).
-        Text-encoder availability is intentionally NOT gated here — it is a
-        global requirement shared with the distilled route and handled
-        separately. Never mutates the filesystem.
+        enforces: an active split-component profile providing the sidecars the
+        build needs (text projection, video VAE, audio VAE — the embeddings
+        connector is optional and treated as falsey/omitted by the builder) and
+        a usable spatial upscaler. The distilled LoRA requirement applies ONLY
+        to ``base_family == "dev"`` (the dev two-stages route uses it as a
+        guider); Fast-family distilled entries (Kijai FP8, QuantStack distilled
+        GGUF) run via the DistilledPipeline and must NOT be gated on a
+        distilled LoRA. Text-encoder availability is intentionally NOT gated
+        here — it is a global requirement shared with the distilled route and
+        handled separately. Never mutates the filesystem.
         """
         profile = self._active_profile()
         if profile is None:
@@ -492,14 +499,44 @@ class ModelsHandler(StateHandlerBase):
                 "No usable spatial upscaler (profile upsampler missing and "
                 "canonical upscaler not installed)"
             )
-        explicit_lora_ok = False
-        for role in ("distilled_lora_384_1_1", "distilled_lora_384"):
-            candidate = c.official_adapters.get(role)
-            if candidate and Path(candidate).is_file():
-                explicit_lora_ok = True
-                break
-        if not explicit_lora_ok and not self._canonical_distilled_lora_exists(models_dir):
-            return "Dev base model requires a distilled LoRA adapter (none installed)"
+        # Distilled LoRA is required ONLY by the dev route. Fast-family
+        # distilled selections (Kijai FP8, QuantStack GGUF) use the
+        # DistilledPipeline and must not be blocked by a missing distilled LoRA.
+        if base_family == "dev":
+            explicit_lora_ok = False
+            for role in ("distilled_lora_384_1_1", "distilled_lora_384"):
+                candidate = c.official_adapters.get(role)
+                if candidate and Path(candidate).is_file():
+                    explicit_lora_ok = True
+                    break
+            if not explicit_lora_ok and not self._canonical_distilled_lora_exists(models_dir):
+                return "Dev base model requires a distilled LoRA adapter (none installed)"
+        return None
+
+    def _disabled_reason_for_entry(
+        self,
+        entry: BaseVideoModelRegistryEntry,
+        workflow_supported: bool,
+        models_dir: Path,
+    ) -> str | None:
+        """Compute the model-options disabled reason for a single registry entry.
+
+        Gating rules (plan §"Required source-of-truth fix"):
+        - Unsupported workflow → uniformly disabled.
+        - Missing (not installed) → disabled with the not-installed reason.
+        - ``runtime_readiness == "none"`` (only the official distilled monolith)
+          → enabled when installed.
+        - ``runtime_readiness == "requires_active_profile_sidecars"`` → enabled
+          iff an active split-component profile provides the sidecars the
+          selected base needs. The distilled-LoRA sub-check applies only to
+          ``base_family == "dev"``. Never fake support.
+        """
+        if not workflow_supported:
+            return _LIVE_MODEL_SELECTION_UNSUPPORTED_REASON
+        if not entry.installed:
+            return _LIVE_MODEL_SELECTION_NOT_INSTALLED_REASON
+        if entry.runtime_readiness == "requires_active_profile_sidecars":
+            return self._dev_option_disabled_reason(entry.base_family, models_dir)
         return None
 
     def get_model_selection_options(
@@ -507,18 +544,16 @@ class ModelsHandler(StateHandlerBase):
     ) -> ModelSelectionOptionsResponse:
         """Read-only enumeration of base video transformer candidates.
 
-        Catalog-like metadata (label/group/section/variant_group/repo/
-        downloadable/canonical paths) is derived from
-        :func:`get_model_cp_spec` and :func:`resolve_model_path`; ``installed``
-        is derived from :func:`is_cp_downloaded`. Never mutates or downloads.
+        Enumerates the unified base-video registry
+        (:func:`iter_base_video_model_entries`); ``installed`` and runtime paths
+        come from the registry/scanner-compatible canonical-path evidence (not
+        only from ``is_cp_downloaded``). Catalog-like metadata (label/group/
+        section/variant_group/repo/downloadable/canonical paths) is owned by the
+        registry. Never mutates or downloads.
 
         Gating:
-        - Supported workflows (``text-to-video``, ``image-to-video``):
-          * distilled candidate is enabled iff installed.
-          * dev/GGUF candidates are enabled iff installed AND runtime-ready
-            (active split-component profile + usable upscaler + resolvable
-            distilled LoRA); otherwise enumerated but disabled with a clear
-            reason — never fake support.
+        - Supported workflows (``text-to-video``, ``image-to-video``): each
+          option is enabled iff installed AND runtime-ready.
         - All other workflows enumerate the same candidates but disable every
           option with ``_LIVE_MODEL_SELECTION_UNSUPPORTED_REASON``.
         """
@@ -530,35 +565,25 @@ class ModelsHandler(StateHandlerBase):
         workflow_supported = workflow in _LIVE_MODEL_SELECTION_SUPPORTED_WORKFLOWS
 
         options: list[ModelSelectionOption] = []
-        for cp_id in SELECTABLE_BASE_VIDEO_CP_IDS:
-            spec = get_model_cp_spec(cp_id)
-            installed = is_cp_downloaded(models_dir, cp_id)
-            if not workflow_supported:
-                disabled_reason: str | None = _LIVE_MODEL_SELECTION_UNSUPPORTED_REASON
-            elif not installed:
-                disabled_reason = _LIVE_MODEL_SELECTION_NOT_INSTALLED_REASON
-            elif cp_id == "ltx-2.3-22b-distilled":
-                # Distilled monolith runs via the legacy path too — enabled.
-                disabled_reason = None
-            else:
-                # Dev/GGUF: require runtime readiness (split profile + upscaler
-                # + distilled LoRA). Read-only; never mutates.
-                disabled_reason = self._dev_option_disabled_reason(models_dir)
-
+        for entry in iter_base_video_model_entries(models_dir):
+            disabled_reason = self._disabled_reason_for_entry(
+                entry, workflow_supported, models_dir
+            )
             options.append(
                 ModelSelectionOption(
-                    id=cp_id,
-                    label=spec.display_name or spec.description or spec.name,
-                    group=_LIVE_MODEL_SELECTION_BASE_GROUP,
-                    section=spec.section,
-                    variant_group=spec.variant_group,
-                    installed=installed,
+                    id=entry.id,
+                    label=entry.label,
+                    group=entry.group,
+                    section=entry.section,
+                    variant_group=entry.variant_group,
+                    installed=entry.installed,
+                    pipeline_family=entry.pipeline_family,
                     disabled_reason=disabled_reason,
-                    repo_id=spec.repo_id,
-                    source_url=f"https://huggingface.co/{spec.repo_id}",
-                    canonical_relative_path=str(spec.relative_path),
-                    expected_absolute_path=str(resolve_model_path(models_dir, cp_id)),
-                    downloadable=spec.downloadable,
+                    repo_id=entry.repo_id,
+                    source_url=entry.source_url,
+                    canonical_relative_path=entry.canonical_relative_path,
+                    expected_absolute_path=entry.expected_absolute_path,
+                    downloadable=entry.downloadable,
                 )
             )
 

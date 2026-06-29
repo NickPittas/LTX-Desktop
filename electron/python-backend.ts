@@ -5,7 +5,7 @@ import path from 'path'
 import { getAppDataDir } from './app-paths'
 import { getCurrentDir, isDev } from './config'
 import { HF_GATING_ENABLED } from '../shared/feature-flags'
-import { logger, writeLog } from './logger'
+import { logger, safeConsole, writeLog } from './logger'
 import { getCurrentLogFilename } from './logging-management'
 import { getPythonDir } from './python-setup'
 import { getMainWindow } from './window'
@@ -374,7 +374,7 @@ export async function startPythonBackend(): Promise<void> {
 
     pythonProcess.stdout?.on('data', (data: Buffer) => {
       const output = data.toString()
-      console.log(`[Python] ${output}`)
+      safeConsole('log', `[Python] ${output}`)
       for (const line of output.split('\n')) {
         const trimmed = line.trimEnd()
         if (trimmed) writeLog('INFO', 'Backend', trimmed)
@@ -384,7 +384,7 @@ export async function startPythonBackend(): Promise<void> {
 
     pythonProcess.stderr?.on('data', (data: Buffer) => {
       const output = data.toString()
-      console.error(`[Python Error] ${output}`)
+      safeConsole('error', `[Python Error] ${output}`)
       for (const line of output.split('\n')) {
         const trimmed = line.trimEnd()
         if (trimmed) writeLog('ERROR', 'Backend', trimmed)

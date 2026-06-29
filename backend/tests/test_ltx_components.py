@@ -547,3 +547,43 @@ class TestSelectedTransformerOverride:
         ).cache_key
         assert distilled_key != gguf_key
         assert "ltx-2.3-22b-dev-gguf-q4-k-m" in gguf_key
+
+    def test_selected_fast_sidecar_entries_keep_builder_sidecars(self):
+        """Fast-family selections that require active profile sidecars (QuantStack
+        distilled GGUF, Kijai FP8) must build the checkpoint tuple as a split
+        build (selected transformer + profile sidecars), NOT a single file —
+        even though their ``base_family`` is ``distilled``. Builder paths are
+        runtime-readiness driven, not base-family driven.
+        """
+        profile = self._split_profile()
+        # QuantStack distilled GGUF — Fast family, distilled base, but requires
+        # active profile sidecars for runtime piping.
+        resolved = resolve_components(
+            profile,
+            selected_transformer_path="/m/LTX-2.3-22B-distilled-1.1-Q4_K_M.gguf",
+            selected_cp_id="ltx-2.3-22b-distilled-gguf-quantstack-q4-k-m",
+            selected_transformer_format="gguf",
+            selected_base_family="distilled",
+            selected_runtime_readiness="requires_active_profile_sidecars",
+        )
+        assert resolved.base_family == "distilled"
+        assert resolved.transformer_format == "gguf"
+        # Split build: selected transformer + profile sidecars (falsey filtered).
+        assert resolved.checkpoint_paths_for_filtered_builders == (
+            "/m/LTX-2.3-22B-distilled-1.1-Q4_K_M.gguf",
+            "/m/tp.safetensors",
+            "/m/ec.safetensors",
+            "/m/vvae.safetensors",
+            "/m/avae.safetensors",
+        )
+        # checkpoint_path_arg returns the tuple (not a single string).
+        assert checkpoint_path_arg(resolved) == (
+            "/m/LTX-2.3-22B-distilled-1.1-Q4_K_M.gguf",
+            "/m/tp.safetensors",
+            "/m/ec.safetensors",
+            "/m/vvae.safetensors",
+            "/m/avae.safetensors",
+        )
+        # Sidecar metadata preserved (not cleared — not a true monolith).
+        assert resolved.text_projection_path == "/m/tp.safetensors"
+        assert resolved.video_vae_path == "/m/vvae.safetensors"
