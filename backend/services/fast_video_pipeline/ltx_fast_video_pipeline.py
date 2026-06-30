@@ -20,6 +20,8 @@ from services.ltx_pipeline_common import (
 from services.services_utils import AudioOrNone, TilingConfigType, device_supports_fp8
 
 if TYPE_CHECKING:
+    from ltx_core.model.transformer.compiling import CompilationConfig
+    from ltx_pipelines.utils.types import OffloadMode
     from services.media_encoder.media_encoder import MediaEncoder
     from services.color_management import ColorSpace
 
@@ -35,7 +37,7 @@ class LTXFastVideoPipeline:
         gemma_root: str | None,
         upsampler_path: str,
         device: torch.device,
-        streaming_prefetch_count: int | None,
+        offload_mode: OffloadMode,
         components: ResolvedLtxComponents | None = None,
         *,
         transformer_format: str = "safetensors",
@@ -46,7 +48,7 @@ class LTXFastVideoPipeline:
             gemma_root=gemma_root,
             upsampler_path=upsampler_path,
             device=device,
-            streaming_prefetch_count=streaming_prefetch_count,
+            offload_mode=offload_mode,
             components=components,
             transformer_format=transformer_format,
             distilled_lora_path=distilled_lora_path,
@@ -58,7 +60,7 @@ class LTXFastVideoPipeline:
         gemma_root: str | None,
         upsampler_path: str,
         device: torch.device,
-        streaming_prefetch_count: int | None,
+        offload_mode: OffloadMode,
         components: ResolvedLtxComponents | None = None,
         *,
         transformer_format: str = "safetensors",
@@ -95,10 +97,12 @@ class LTXFastVideoPipeline:
             and self._components.video_vae_path is not None
         )
         # ponytail: split safetensors 22B does not fit full residency on 32GB;
-        # stream 2 layers at a time unless explicit mode set.
-        if is_split and streaming_prefetch_count is None:
-            streaming_prefetch_count = 2
-        self._streaming_prefetch_count = streaming_prefetch_count
+        # stream from CPU unless an explicit non-NONE offload mode is set.
+        from ltx_pipelines.utils.types import OffloadMode
+
+        if is_split and offload_mode == OffloadMode.NONE:
+            offload_mode = OffloadMode.CPU
+        self._offload_mode = offload_mode
         if transformer_format == "gguf":
             self._quantization = None
         elif is_split and device_supports_fp8(device):
@@ -106,9 +110,13 @@ class LTXFastVideoPipeline:
 
             self._quantization = kijai_fp8_quantization_policy()
         else:
-            from ltx_core.quantization import QuantizationPolicy
+            from ltx_core.quantization.fp8_cast import build_policy
 
-            self._quantization = QuantizationPolicy.fp8_cast() if device_supports_fp8(device) else None
+            self._quantization = (
+                build_policy(self._checkpoint_path)  # type: ignore[arg-type]  # non-split branch → str checkpoint
+                if device_supports_fp8(device)
+                else None
+            )
 
         self.pipeline = self._build_upstream_pipeline()
         self._install_post_build_patches(is_split=is_split, transformer_format=transformer_format)
@@ -123,7 +131,7 @@ class LTXFastVideoPipeline:
             return self._build_dev_pipeline()
         return self._build_distilled_pipeline()
 
-    def _build_distilled_pipeline(self, *, torch_compile: bool = False) -> object:
+    def _build_distilled_pipeline(self, *, compilation_config: CompilationConfig | None = None) -> object:
         from ltx_pipelines.distilled import DistilledPipeline
 
         return DistilledPipeline(
@@ -133,7 +141,8 @@ class LTXFastVideoPipeline:
             loras=[],
             device=self._device,
             quantization=self._quantization,
-            torch_compile=torch_compile,
+            compilation_config=compilation_config,
+            offload_mode=self._offload_mode,
         )
 
     def _build_dev_pipeline(self) -> object:
@@ -173,6 +182,7 @@ class LTXFastVideoPipeline:
             loras=[],
             device=self._device,
             quantization=self._quantization,
+            offload_mode=self._offload_mode,
         )
 
     def _install_post_build_patches(self, *, is_split: bool, transformer_format: str) -> None:
@@ -247,7 +257,6 @@ class LTXFastVideoPipeline:
                 images=ltx_images,
                 tiling_config=tiling_config,
                 enhance_prompt=enhance_prompt,
-                streaming_prefetch_count=self._streaming_prefetch_count,
             )
         # Distilled route: existing call shape.
         return self.pipeline(  # type: ignore[no-any-return]
@@ -260,7 +269,6 @@ class LTXFastVideoPipeline:
             images=ltx_images,
             tiling_config=tiling_config,
             enhance_prompt=enhance_prompt,
-            streaming_prefetch_count=self._streaming_prefetch_count,
         )
 
     @torch.inference_mode()
@@ -339,8 +347,10 @@ class LTXFastVideoPipeline:
                 f" transformer_format={self._transformer_format!r}"
             )
         # Distilled route is the only compile-capable route; rebuild with
-        # torch_compile=True using the existing upstream pipeline class.
-        self.pipeline = self._build_distilled_pipeline(torch_compile=True)
+        # compilation_config=CompilationConfig() (all defaults) using the existing upstream pipeline class.
+        from ltx_core.model.transformer.compiling import CompilationConfig
+
+        self.pipeline = self._build_distilled_pipeline(compilation_config=CompilationConfig())
         self._install_post_build_patches(
             is_split=(
                 self._transformer_format == "safetensors"

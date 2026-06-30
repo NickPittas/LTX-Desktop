@@ -459,7 +459,8 @@ _EXPECTED_MODEL_SELECTION_IDS: list[str] = [
 _FAST_FAMILY_IDS: frozenset[str] = frozenset(_EXPECTED_MODEL_SELECTION_IDS[:9])
 _FULL_FAMILY_IDS: frozenset[str] = frozenset(_EXPECTED_MODEL_SELECTION_IDS[9:])
 _UNSUPPORTED_WORKFLOW_REASON = (
-    "Live model selection is currently available for text-to-video and image-to-video only"
+    "Live model selection is currently available for text-to-video, "
+    "image-to-video, and HDR IC-LoRA only"
 )
 _NOT_INSTALLED_REASON = "Model checkpoint is not installed"
 
@@ -860,3 +861,77 @@ class TestModelSelectionOptions:
         # Family partitioning is exhaustive and disjoint over the registry ids.
         assert _FAST_FAMILY_IDS | _FULL_FAMILY_IDS == set(_EXPECTED_MODEL_SELECTION_IDS)
         assert _FAST_FAMILY_IDS.isdisjoint(_FULL_FAMILY_IDS)
+
+    def test_hdr_ic_lora_model_options_are_supported(
+        self, client, test_state, create_fake_model_files
+    ):
+        """``GET /api/models/model-options?workflow=hdr-ic-lora`` is supported.
+
+        HDR IC-LoRA joins text-to-video and image-to-video as a supported
+        workflow for live model selection (dedicated V2V pipeline). The
+        official distilled monolith (runtime_readiness="none") must be enabled
+        when installed; dev/GGUF candidates remain disabled when no active
+        profile provides sidecars (same gating as T2V/I2V).
+        """
+        create_fake_model_files()
+
+        response = client.get(
+            "/api/models/model-options",
+            params={"workflow": "hdr-ic-lora"},
+            headers=_ADMIN_HEADERS,
+        )
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["workflow"] == "hdr-ic-lora"
+        by_id = {o["id"]: o for o in data["options"]}
+
+        # Same candidate catalog as T2V/I2V.
+        assert [o["id"] for o in data["options"]] == _EXPECTED_MODEL_SELECTION_IDS
+
+        # Supported workflow: no option carries the unsupported-workflow reason.
+        for opt in data["options"]:
+            assert opt["disabled_reason"] != _UNSUPPORTED_WORKFLOW_REASON, (
+                f"{opt['id']} must not be unsupported-reason under hdr-ic-lora"
+            )
+
+        # The official distilled (runtime_readiness="none") is installed and
+        # enabled (no sidecars required).
+        distilled = by_id["ltx-2.3-22b-distilled"]
+        assert distilled["installed"] is True
+        assert distilled["disabled_reason"] is None
+
+        # Dev/GGUF candidates are installed-on-disk-absent here, so they stay
+        # missing-disabled (NOT unsupported-disabled).
+        gguf = by_id["ltx-2.3-22b-dev-gguf-q4-k-m"]
+        assert gguf["installed"] is False
+        assert gguf["disabled_reason"] == _NOT_INSTALLED_REASON
+
+    def test_generic_ic_lora_model_options_remain_unsupported(
+        self, client, create_fake_model_files
+    ):
+        """``workflow=ic-lora`` stays unsupported for live model selection.
+
+        Generic IC-LoRA has no live base-model selection path. Every candidate
+        enumerates but is uniformly disabled with the unsupported-workflow
+        reason (now mentioning text-to-video, image-to-video, and HDR IC-LoRA).
+        """
+        create_fake_model_files()
+
+        response = client.get(
+            "/api/models/model-options",
+            params={"workflow": "ic-lora"},
+            headers=_ADMIN_HEADERS,
+        )
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["workflow"] == "ic-lora"
+
+        # Same candidate catalog, but every option is unsupported-disabled.
+        assert [o["id"] for o in data["options"]] == _EXPECTED_MODEL_SELECTION_IDS
+        for opt in data["options"]:
+            assert opt["disabled_reason"] == _UNSUPPORTED_WORKFLOW_REASON, (
+                f"{opt['id']} must be unsupported under generic ic-lora"
+            )
+
+        # Reason text mentions HDR IC-LoRA (updated gating copy).
+        assert "HDR IC-LoRA" in _UNSUPPORTED_WORKFLOW_REASON

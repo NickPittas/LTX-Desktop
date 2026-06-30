@@ -10,6 +10,7 @@ from services.fast_video_pipeline.fast_video_pipeline import FastVideoPipeline
 from services.zit_api_client.zit_api_client import ZitAPIClient
 from services.gpu_cleaner.gpu_cleaner import GpuCleaner
 from services.gpu_info.gpu_info import GpuInfo, GpuTelemetryPayload
+from services.hdr_ic_lora_pipeline.hdr_ic_lora_pipeline import HdrIcLoraPipeline
 from services.http_client.http_client import HTTPClient, HttpResponseLike, HttpTimeoutError
 from services.ic_lora_pipeline.ic_lora_pipeline import IcLoraPipeline
 from services.image_generation_pipeline.image_generation_pipeline import ImageGenerationPipeline
@@ -55,6 +56,7 @@ __all__ = [
     "ZitAPIClient",
     "ImageGenerationPipeline",
     "IcLoraPipeline",
+    "HdrIcLoraPipeline",
     "LTXAPIClient",
     "RetakePipeline",
     "TextEncoder",

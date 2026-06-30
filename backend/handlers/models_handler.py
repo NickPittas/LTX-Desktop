@@ -88,14 +88,20 @@ _TYPED_ADAPTER_FIELD: dict[str, str] = {
 # semantic ``group`` label and the workflow/runtime-readiness gating reasons.
 # No filesystem paths are hardcoded here.
 
-# Workflows eligible for live model selection in Phase 1.
+# Workflows eligible for live model selection. Phase 1: text-to-video and
+# image-to-video. HDR IC-LoRA joins in this slice (dedicated video/sequence
+# input workflow; uses the same base-video transformer candidates and
+# installed/profile-readiness gating). Generic ``ic-lora`` stays unsupported —
+# it has no live base-model selection path.
 _LIVE_MODEL_SELECTION_SUPPORTED_WORKFLOWS: frozenset[ModelSelectionWorkflow] = frozenset[ModelSelectionWorkflow]({
     "text-to-video",
     "image-to-video",
+    "hdr-ic-lora",
 })
 
 _LIVE_MODEL_SELECTION_UNSUPPORTED_REASON: str = (
-    "Live model selection is currently available for text-to-video and image-to-video only"
+    "Live model selection is currently available for text-to-video, "
+    "image-to-video, and HDR IC-LoRA only"
 )
 
 _LIVE_MODEL_SELECTION_NOT_INSTALLED_REASON: str = "Model checkpoint is not installed"

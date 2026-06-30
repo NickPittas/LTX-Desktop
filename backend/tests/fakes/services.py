@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from PIL import Image
 from api_types import ImageConditioningInput, OutputFormat, VideoCameraMotion
@@ -14,6 +14,9 @@ from services.interfaces import VideoInfoPayload
 from services.ltx_api_client.ltx_api_client import LTXRetakeResult
 from services.media_encoder.media_encoder import EncoderResult
 from tests.fakes.fake_gpu_info import FakeGpuInfo
+
+if TYPE_CHECKING:
+    from ltx_pipelines.utils.types import OffloadMode
 
 
 @dataclass
@@ -463,7 +466,7 @@ class _FakeVideoPipelineBase:
         self.last_gemma_root: str | None = None
         self.last_upsampler_path: str | None = None
         self.last_transformer_format: str | None = None
-        self.last_streaming_prefetch_count: int | None = None
+        self.last_offload_mode: OffloadMode | None = None
         # Phase 3D: dev-vs-distilled routing metadata captured from create().
         self.last_components: ResolvedLtxComponents | None = None
         self.last_base_family: str | None = None
@@ -513,7 +516,7 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
         gemma_root: str | None,
         upsampler_path: str,
         device: str | object,
-        streaming_prefetch_count: int | None,
+        offload_mode: OffloadMode,
         components: ResolvedLtxComponents | None = None,
         *,
         transformer_format: str = "safetensors",
@@ -529,15 +532,17 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
         pipeline.last_transformer_format = transformer_format
         pipeline.last_distilled_lora_path = distilled_lora_path
         pipeline.last_base_family = components.base_family if components is not None else "distilled"
-        # ponytail: match real __init__ guard — split safetensors needs streaming
+        # ponytail: match real __init__ guard — split safetensors streams from CPU.
+        from ltx_pipelines.utils.types import OffloadMode
+
         _is_split = (
             transformer_format == "safetensors"
             and components is not None
             and components.video_vae_path is not None
         )
-        if _is_split and streaming_prefetch_count is None:
-            streaming_prefetch_count = 2
-        pipeline.last_streaming_prefetch_count = streaming_prefetch_count
+        if _is_split and offload_mode == OffloadMode.NONE:
+            offload_mode = OffloadMode.CPU
+        pipeline.last_offload_mode = offload_mode
         return pipeline
 
     def generate(
@@ -633,7 +638,7 @@ class FakeIcLoraPipeline:
         upsampler_path: str,
         lora_paths: list[str],
         device: str | object,
-        streaming_prefetch_count: int | None,
+        offload_mode: OffloadMode,
         components: ResolvedLtxComponents | None = None,
         lora_strength: float = 1.0,
     ) -> "FakeIcLoraPipeline":
@@ -645,15 +650,17 @@ class FakeIcLoraPipeline:
         pipeline.last_lora_paths = lora_paths
         pipeline.last_lora_path = lora_paths[-1] if lora_paths else None
         pipeline.last_lora_strength = lora_strength
-        # ponytail: match real __init__ guard — split safetensors needs streaming
+        # ponytail: match real __init__ guard — split safetensors streams from CPU.
+        from ltx_pipelines.utils.types import OffloadMode
+
         _is_split = (
             components is not None
             and components.transformer_format == "safetensors"
             and components.video_vae_path is not None
         )
-        if _is_split and streaming_prefetch_count is None:
-            streaming_prefetch_count = 2
-        pipeline.last_streaming_prefetch_count = streaming_prefetch_count
+        if _is_split and offload_mode == OffloadMode.NONE:
+            offload_mode = OffloadMode.CPU
+        pipeline.last_offload_mode = offload_mode
         return pipeline
 
     def __init__(self) -> None:
@@ -664,7 +671,7 @@ class FakeIcLoraPipeline:
         self.last_lora_paths: list[str] | None = None
         self.last_lora_path: str | None = None
         self.last_lora_strength: float | None = None
-        self.last_streaming_prefetch_count: int | None = None
+        self.last_offload_mode: OffloadMode | None = None
 
     def generate(self, **kwargs: Any) -> None:
         self.generate_calls.append(kwargs)
@@ -685,6 +692,86 @@ class FakeIcLoraPipeline:
         output_path.write_bytes(b"fake-ic-lora-inpaint-video")
 
     # ponytail: generate_inpaint accepts **kwargs, mask_grow_px captured in generate_calls
+
+
+class FakeHdrIcLoraPipeline:
+    """Test double for :class:`HdrIcLoraPipeline` (dedicated HDR IC-LoRA path).
+
+    Records ``create()`` kwargs (so tests can assert on the resolved checkpoint
+    path / components / base family / LoRA paths threaded by
+    ``PipelinesHandler.load_hdr_ic_lora``) and ``generate()`` kwargs (so tests
+    can assert source-video-driven conditioning, source-derived dims/fps, EXR
+    output format, and proxy path).
+    """
+
+    pipeline_kind = "hdr_ic_lora"
+
+    _singleton: ClassVar["FakeHdrIcLoraPipeline | None"] = None
+
+    @classmethod
+    def bind_singleton(cls, pipeline: "FakeHdrIcLoraPipeline") -> None:
+        cls._singleton = pipeline
+
+    @staticmethod
+    def create(  # noqa: PLR0913
+        checkpoint_path: CheckpointPath,
+        upsampler_path: str,
+        hdr_lora_path: str,
+        scene_embeddings_path: str,
+        device: str | object,
+        components: ResolvedLtxComponents | None = None,
+        transformer_format: str = "safetensors",
+        base_family: str = "distilled",
+        distilled_lora_path: str | None = None,
+        offload_mode: Any = None,
+        *,
+        gemma_root: str | None = None,
+    ) -> "FakeHdrIcLoraPipeline":
+        del upsampler_path, device, gemma_root
+        pipeline = FakeHdrIcLoraPipeline._singleton
+        if pipeline is None:
+            raise RuntimeError("FakeHdrIcLoraPipeline singleton is not bound")
+        pipeline.last_checkpoint_path = checkpoint_path
+        pipeline.last_components = components
+        pipeline.last_transformer_format = transformer_format
+        pipeline.last_base_family = base_family
+        pipeline.last_distilled_lora_path = distilled_lora_path
+        pipeline.last_hdr_lora_path = hdr_lora_path
+        pipeline.last_scene_embeddings_path = scene_embeddings_path
+        pipeline.last_offload_mode = offload_mode
+        return pipeline
+
+    def __init__(self) -> None:
+        self.generate_calls: list[dict[str, Any]] = []
+        self.raise_on_generate: Exception | None = None
+        self.last_checkpoint_path: CheckpointPath | None = None
+        self.last_components: ResolvedLtxComponents | None = None
+        self.last_transformer_format: str | None = None
+        self.last_base_family: str | None = None
+        self.last_distilled_lora_path: str | None = None
+        self.last_hdr_lora_path: str | None = None
+        self.last_scene_embeddings_path: str | None = None
+        self.last_offload_mode: Any | None = None
+
+    def generate(self, **kwargs: Any) -> None:
+        self.generate_calls.append(kwargs)
+        if self.raise_on_generate is not None:
+            raise self.raise_on_generate
+
+        output_path = Path(kwargs["output_path"])
+        # Mirror FakeMediaEncoder: EXR outputs are directories; write a frame.
+        output_format = kwargs.get("output_format")
+        if output_format is not None and str(output_format).endswith("exr_zip_half"):
+            output_path.mkdir(parents=True, exist_ok=True)
+            (output_path / "frame_00000.exr").write_bytes(b"fake-hdr-exr")
+        else:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"fake-hdr-video")
+        proxy_path = kwargs.get("proxy_path")
+        if proxy_path is not None:
+            proxy = Path(proxy_path)
+            proxy.parent.mkdir(parents=True, exist_ok=True)
+            proxy.write_bytes(b"fake-hdr-proxy")
 
 
 class FakeDepthProcessorPipeline:
@@ -753,7 +840,7 @@ class FakeA2VPipeline:
         gemma_root: str | None,
         upsampler_path: str,
         device: str | object,
-        streaming_prefetch_count: int | None,
+        offload_mode: OffloadMode,
         components: ResolvedLtxComponents | None = None,
     ) -> "FakeA2VPipeline":
         pipeline = FakeA2VPipeline._singleton
@@ -761,15 +848,17 @@ class FakeA2VPipeline:
             raise RuntimeError("FakeA2VPipeline singleton is not bound")
         pipeline.last_checkpoint_path = checkpoint_path
         pipeline.last_components = components
-        # ponytail: match real __init__ guard — split safetensors needs streaming
+        # ponytail: match real __init__ guard — split safetensors streams from CPU.
+        from ltx_pipelines.utils.types import OffloadMode
+
         _is_split = (
             components is not None
             and components.transformer_format == "safetensors"
             and components.video_vae_path is not None
         )
-        if _is_split and streaming_prefetch_count is None:
-            streaming_prefetch_count = 2
-        pipeline.last_streaming_prefetch_count = streaming_prefetch_count
+        if _is_split and offload_mode == OffloadMode.NONE:
+            offload_mode = OffloadMode.CPU
+        pipeline.last_offload_mode = offload_mode
         return pipeline
 
     def __init__(self) -> None:
@@ -777,7 +866,7 @@ class FakeA2VPipeline:
         self.raise_on_generate: Exception | None = None
         self.last_checkpoint_path: CheckpointPath | None = None
         self.last_components: ResolvedLtxComponents | None = None
-        self.last_streaming_prefetch_count: int | None = None
+        self.last_offload_mode: OffloadMode | None = None
 
     def generate(self, **kwargs: Any) -> None:
         self.generate_calls.append(kwargs)
@@ -801,7 +890,7 @@ class FakeRetakePipeline:
         checkpoint_path: CheckpointPath,
         gemma_root: str | None,
         device: str | object,
-        streaming_prefetch_count: int | None,
+        offload_mode: OffloadMode,
         components: ResolvedLtxComponents | None = None,
         *,
         loras: list[object] | None = None,
@@ -812,15 +901,17 @@ class FakeRetakePipeline:
             raise RuntimeError("FakeRetakePipeline singleton is not bound")
         pipeline.last_checkpoint_path = checkpoint_path
         pipeline.last_components = components
-        # ponytail: match real __init__ guard — split safetensors needs streaming
+        # ponytail: match real __init__ guard — split safetensors streams from CPU.
+        from ltx_pipelines.utils.types import OffloadMode
+
         _is_split = (
             components is not None
             and components.transformer_format == "safetensors"
             and components.video_vae_path is not None
         )
-        if _is_split and streaming_prefetch_count is None:
-            streaming_prefetch_count = 2
-        pipeline.last_streaming_prefetch_count = streaming_prefetch_count
+        if _is_split and offload_mode == OffloadMode.NONE:
+            offload_mode = OffloadMode.CPU
+        pipeline.last_offload_mode = offload_mode
         return pipeline
 
     def __init__(self) -> None:
@@ -828,6 +919,7 @@ class FakeRetakePipeline:
         self.raise_on_generate: Exception | None = None
         self.last_checkpoint_path: CheckpointPath | None = None
         self.last_components: ResolvedLtxComponents | None = None
+        self.last_offload_mode: OffloadMode | None = None
 
     def generate(self, **kwargs: Any) -> None:
         self.generate_calls.append(kwargs)
@@ -961,6 +1053,7 @@ class FakeServices:
     fast_video_pipeline: FakeFastVideoPipeline = field(default_factory=FakeFastVideoPipeline)
     image_generation_pipeline: FakeImageGenerationPipeline = field(default_factory=FakeImageGenerationPipeline)
     ic_lora_pipeline: FakeIcLoraPipeline = field(default_factory=FakeIcLoraPipeline)
+    hdr_ic_lora_pipeline: FakeHdrIcLoraPipeline = field(default_factory=FakeHdrIcLoraPipeline)
     depth_processor_pipeline: FakeDepthProcessorPipeline = field(default_factory=FakeDepthProcessorPipeline)
     pose_processor_pipeline: FakePoseProcessorPipeline = field(default_factory=FakePoseProcessorPipeline)
     a2v_pipeline: FakeA2VPipeline = field(default_factory=FakeA2VPipeline)
@@ -972,6 +1065,7 @@ class FakeServices:
         FakeFastVideoPipeline.bind_singleton(self.fast_video_pipeline)
         FakeImageGenerationPipeline.bind_singleton(self.image_generation_pipeline)
         FakeIcLoraPipeline.bind_singleton(self.ic_lora_pipeline)
+        FakeHdrIcLoraPipeline.bind_singleton(self.hdr_ic_lora_pipeline)
         FakeDepthProcessorPipeline.bind_singleton(self.depth_processor_pipeline)
         FakePoseProcessorPipeline.bind_singleton(self.pose_processor_pipeline)
         FakeA2VPipeline.bind_singleton(self.a2v_pipeline)

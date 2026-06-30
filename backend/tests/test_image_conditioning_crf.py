@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from api_types import ImageConditioningInput
+from ltx_pipelines.utils.types import OffloadMode
 from services.ltx_pipeline_common import (
     IMAGE_CONDITIONING_CRF,
     make_ltx_image_conditioning_input,
@@ -72,7 +73,7 @@ def test_fast_pipeline_run_inference_forwards_crf_18() -> None:
     pipe = LTXFastVideoPipeline.__new__(LTXFastVideoPipeline)
     fake = _CapturingPipeline()
     pipe.pipeline = fake  # type: ignore[assignment]
-    pipe._streaming_prefetch_count = None  # type: ignore[attr-defined]
+    pipe._offload_mode = OffloadMode.NONE  # type: ignore[attr-defined]
     # Phase 3D: _run_inference branches on base_family. The CRF override is
     # shared by both routes; test the distilled route (default) here.
     pipe._base_family = "distilled"  # type: ignore[attr-defined]
@@ -114,7 +115,7 @@ def test_fast_pipeline_dev_run_inference_forwards_negative_prompt_and_crf_18() -
     pipe = LTXFastVideoPipeline.__new__(LTXFastVideoPipeline)
     fake = _CapturingPipeline()
     pipe.pipeline = fake  # type: ignore[assignment]
-    pipe._streaming_prefetch_count = None  # type: ignore[attr-defined]
+    pipe._offload_mode = OffloadMode.NONE  # type: ignore[attr-defined]
     pipe._base_family = "dev"  # type: ignore[attr-defined]
 
     images = [ImageConditioningInput(path="a.png", frame_idx=0, strength=1.0)]
@@ -154,7 +155,7 @@ def test_ic_lora_run_inference_forwards_crf_18() -> None:
     pipe = LTXIcLoraPipeline.__new__(LTXIcLoraPipeline)
     fake = _CapturingPipeline()
     pipe.pipeline = fake  # type: ignore[assignment]
-    pipe._streaming_prefetch_count = None  # type: ignore[attr-defined]
+    pipe._offload_mode = OffloadMode.NONE  # type: ignore[attr-defined]
 
     images = [ImageConditioningInput(path="i.png", frame_idx=0, strength=1.0)]
     pipe._run_inference(

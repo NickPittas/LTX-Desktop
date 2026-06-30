@@ -49,13 +49,11 @@ from services.sequence_input import (
     sequence_metadata,
     sequence_metadata_from_dir,
 )
-from services.color_management import detect_colorspace, LINEAR_REC709
-from services.ic_lora_pipeline.hdr_scene_embeddings import load_hdr_scene_embeddings
-from services.ic_lora_pipeline.hdr_utils import apply_hdr_decode_postprocess
+from services.color_management import detect_colorspace
 from services.ltx_pipeline_common import make_encode_progress_callback, make_primary_output_path, make_proxy_output_path
 from services.media_encoder.media_encoder import MediaEncoder
 from services.services_utils import FrameArray
-from state.app_state_types import AppState, ICLoraState
+from state.app_state_types import AppState, HdrICLoraState, ICLoraState
 
 if TYPE_CHECKING:
     from runtime_config.runtime_config import RuntimeConfig
@@ -450,19 +448,30 @@ class IcLoraHandler(StateHandlerBase):
         raise HTTPError(400, "HDR scene embeddings not found. Configure hdr_scene_embeddings adapter path or install the file.")
 
     def _generate_hdr(
-        self, req: IcLoraGenerateRequest, workflow: str
+        self,
+        req: IcLoraGenerateRequest,
+        workflow: str,  # noqa: ARG002
+        *,
+        video_path: Path,
+        is_sequence: bool,
+        video_is_seq_file: bool,
+        video_is_seq_dir: bool,
     ) -> IcLoraGenerateResponse:
-        """HDR generation path: scene embeddings replace prompt encoding, EXR output.
+        """HDR IC-LoRA V2V generation path.
 
-        Upstream semantics (adapted):
-        - Scene embeddings replace text prompt encoding.
-        - HDR is a video-only upscale/HDR mode: audio is of no interest and no
-          audio modality is produced or conditioned. Audio scene embeddings are
-          intentionally ignored even if present in the embeddings file (they are
-          loaded only as metadata compatibility, never threaded into inference).
-        - Primary output is EXR (linear). A non-null mp4 SDR proxy_path is
-          forwarded to the encoder (Lane A contract); Lane B owns the actual
-          tonemap policy inside MediaEncoder proxy generation.
+        Official workflow shape:
+        - Source video/sequence is the IC-LoRA guide
+          (``video_conditioning=[(source_video_path, 1.0)]``). No images, no
+          Canny/Depth; prompt/audio/conditioning_type/images are ignored.
+        - Source metadata — not request width/height/fps/num_frames — drives
+          output dimensions and fps.
+        - Frame policy: never reject by frame count and never trim/snap. The
+          Phase 2 wrapper decodes ALL source frames and pads in memory with
+          duplicate copies of the final frame to ``8n+1``.
+        - Scene embeddings replace text prompt encoding; the dedicated HDR
+          pipeline loads them at create time. No ``prepare_text_encoding``.
+        - Primary output is forced to EXR (linear scene-referred); the wrapper
+          writes the EXR primary then an SDR proxy MP4 (Phase 4).
         """
         generation_id = uuid.uuid4().hex[:8]
         t_total_start = time.perf_counter()
@@ -474,22 +483,72 @@ class IcLoraHandler(StateHandlerBase):
             hdr_lora_path = self._resolve_ic_lora_adapter_path(req.adapter_id)
             scene_embeddings_path = self._resolve_hdr_scene_embeddings_path()
 
-            # Load + validate scene embeddings (replaces prompt encoding).
-            t_embed_start = time.perf_counter()
-            scene_embeddings = load_hdr_scene_embeddings(scene_embeddings_path)
-            t_embed_end = time.perf_counter()
-            logger.info(
-                "[ic-lora] HDR scene embeddings loaded: %.2fs (video_context shape=%s)",
-                t_embed_end - t_embed_start,
-                tuple(scene_embeddings.video_context.shape),
-            )
+            # Sequence-input policy: the official HDR workflow documents only
+            # ``.mp4``/``.mov`` source inputs (its ``load_video_conditioning_hdr``
+            # helper decodes via PyAV, which cannot open a single EXR/PNG-seq
+            # frame or a sequence directory). A faithful sequence adapter that
+            # produces the same reflect-pad-resized, LDR-domain, VAE-encoded
+            # reference latent as the official loader is not yet wired. Gate
+            # sequence inputs with a clear HTTP 400 rather than silently
+            # running frames through a non-official decode path. This will be
+            # lifted when the sequence → HDR conditioning adapter lands.
+            if is_sequence:
+                raise HTTPError(
+                    400,
+                    (
+                        "HDR IC-LoRA currently accepts .mp4/.mov source video only. "
+                        "Image-sequence inputs are not yet supported for the HDR "
+                        "workflow (official load_video_conditioning_hdr decodes via "
+                        "PyAV, which cannot open a single sequence frame). Convert "
+                        "the sequence to .mp4/.mov or wait for the sequence adapter."
+                    ),
+                )
 
+            # Source metadata: video files use the cv2-backed VideoProcessor.
+            # Request width/height/fps/num_frames are intentionally ignored for HDR.
+            cap = self._video_processor.open_video(str(video_path))
+            if not cap.isOpened():
+                raise HTTPError(400, f"Cannot open video: {video_path}")
+            info = self._video_processor.get_video_info(cap)
+            input_width = int(info["width"])
+            input_height = int(info["height"])
+            frame_count = int(info["frame_count"])
+            fps = float(info["fps"])
+            self._video_processor.release(cap)
+
+            # Phase 3 frame policy: do not reject by frame count and never
+            # trim/snap. The Phase 2 wrapper decodes ALL source frames and
+            # applies in-memory duplicate-final-frame padding to 8n+1 itself.
+            # ``num_frames`` is passed only as a legacy/advisory arg here (the
+            # wrapper ignores it).
+            num_frames = frame_count
+
+            # Official HDR semantics: the handler passes the ORIGINAL source
+            # width/height to the pipeline. The pipeline internally calls the
+            # official-compatible ``align_resolution(..., REFLECT_PAD, 64)`` to
+            # derive aligned generation dims AND crop-back dims, then decodes
+            # and crops back to these original source dims. Pre-aligning here
+            # would lose the crop-back target. Request width/height/fps/
+            # num_frames are intentionally ignored for HDR.
+            height = input_height
+            width = input_width
+
+            # HDR source is an 8-bit SDR video file; the HDR pipeline's
+            # _create_hdr_conditionings handles the LDR domain mapping
+            # (compress_ldr clamp-identity) and reflect-pad resize, so no
+            # input colorspace detection is needed here.
+            input_colorspace = None
+
+            # Load the dedicated HDR pipeline BEFORE start_generation so the
+            # GPU slot is populated (start_generation rejects when gpu_slot is
+            # None) and so base-family / upscaler / distilled-LoRA validation
+            # (which raises actionable HTTPErrors) surfaces before the
+            # generation state machine is marked running.
             t_load_start = time.perf_counter()
-            ic_state = self._pipelines.load_ic_lora(
-                [hdr_lora_path],
-                None,  # no depth
-                adapter_path=hdr_lora_path,
-                lora_strength=req.lora_strength,
+            hdr_state: HdrICLoraState = self._pipelines.load_hdr_ic_lora(
+                req.model_selection,
+                hdr_lora_path,
+                scene_embeddings_path,
             )
             t_load_end = time.perf_counter()
             logger.info("[ic-lora] HDR pipeline load: %.2fs", t_load_end - t_load_start)
@@ -501,16 +560,6 @@ class IcLoraHandler(StateHandlerBase):
             # Clear any stale API embeddings.
             self._text.clear_api_embeddings()
 
-            height = _align_up(req.height, 64)
-            width = _align_up(req.width, 64)
-            num_frames = _snap_frame_count(req.num_frames)
-            frame_rate = req.frame_rate
-
-            images: list[ImageConditioningInput] = [
-                ImageConditioningInput(path=img.path, frame_idx=int(img.frame), strength=float(img.strength))
-                for img in req.images
-            ]
-
             self._generation.update_progress("inference", 15, 0, 1)
 
             # Force EXR for HDR primary output (linear scene-referred).
@@ -518,51 +567,35 @@ class IcLoraHandler(StateHandlerBase):
             output_path = make_primary_output_path(
                 str(self.config.outputs_dir), "hdr", output_format, uuid.uuid4().hex[:8]
             )
-            # ponytail: Lane A (HDR completion) — the proxy path is now expected
-            # to be non-null. For EXR primaries, make_proxy_output_path returns
-            # ``<stem>_exr_proxy.mp4``. Lane B owns wiring the actual SDR
-            # tonemap policy inside MediaEncoder's proxy generation; the handler
-            # contract here is just to forward the proxy_path to the encoder so
-            # a non-null mp4 proxy is produced once Lane B lands. The encoder
-            # receives output_format=EXR + proxy_path and is responsible for any
-            # linear→SDR tonemap when materializing the proxy.
+            # For EXR primaries, make_proxy_output_path returns
+            # ``<stem>_exr_proxy.mp4``. The dedicated HDR pipeline threads
+            # ``HdrProxyPolicy.SDR_TONEMAP_REINHARD`` so the sidecar H.264
+            # proxy is Reinhard-tonemapped (no hard-clip HDR highlights) while
+            # the linear EXR primary preserves values >1.0.
             proxy_path = make_proxy_output_path(output_path, output_format)
 
             t_inference_start = time.perf_counter()
-            ic_state.pipeline.generate(
-                prompt=req.prompt,
+            hdr_state.pipeline.generate(
+                source_video_path=str(video_path),
                 seed=self._resolve_seed(),
                 height=height,
                 width=width,
                 num_frames=num_frames,
-                frame_rate=frame_rate,
-                images=images,
-                video_conditioning=[],
+                frame_rate=fps,
                 output_path=output_path,
-                mask_path=None,
-                conditioning_strength=req.conditioning_strength,
-                original_video_path=None,
                 output_format=output_format,
                 encoder=self.media_encoder,
                 proxy_path=proxy_path,
+                input_colorspace=input_colorspace,
                 on_progress=make_encode_progress_callback(self._generation.update_progress),
-                input_colorspace=LINEAR_REC709,
-                hdr_video_context=scene_embeddings.video_context,
-                # HDR is video-only: audio embeddings are intentionally ignored.
-                # Passing None ensures the pinned IC-LoRA pipeline never builds an
-                # audio modality or conditions on audio, even when the scene
-                # embeddings file contains an audio_context tensor.
-                hdr_audio_context=None,
-                output_postprocess=apply_hdr_decode_postprocess,
             )
             t_inference_end = time.perf_counter()
             logger.info("[ic-lora] HDR inference: %.2fs", t_inference_end - t_inference_start)
 
             t_total_end = time.perf_counter()
             logger.info(
-                "[ic-lora] Total HDR generation: %.2fs (embed=%.2fs, load=%.2fs, inference=%.2fs)",
+                "[ic-lora] Total HDR generation: %.2fs (load=%.2fs, inference=%.2fs)",
                 t_total_end - t_total_start,
-                t_embed_end - t_embed_start,
                 t_load_end - t_load_start,
                 t_inference_end - t_inference_start,
             )
@@ -581,6 +614,8 @@ class IcLoraHandler(StateHandlerBase):
             if "cancelled" in str(exc).lower():
                 return IcLoraGenerateCancelledResponse(status="cancelled")
             raise HTTPError(500, f"HDR generation error: {exc}") from exc
+        finally:
+            self._text.clear_api_embeddings()
 
     def generate(self, req: IcLoraGenerateRequest) -> IcLoraGenerateResponse:
         if self._generation.is_generation_running():
@@ -591,11 +626,14 @@ class IcLoraHandler(StateHandlerBase):
         if workflow in _UNAVAILABLE_WORKFLOWS:
             raise HTTPError(400, _UNAVAILABLE_MESSAGES[workflow])
 
-        # ponytail: dispatch HDR before video path validation (HDR is T2V like ingredients)
-        if workflow == "hdr":
-            if not (req.prompt or "").strip():
-                raise HTTPError(400, "Prompt is required for HDR adapter")
-            return self._generate_hdr(req, workflow)
+        # Live model selection is HDR IC-LoRA only. Reject any non-null
+        # ``model_selection`` for non-HDR workflows so generic IC-LoRA behavior
+        # does not silently change (plan §"Product/API contract").
+        if req.model_selection is not None and workflow != "hdr":
+            raise HTTPError(
+                400,
+                "model_selection is supported only for HDR IC-LoRA",
+            )
 
         # ponytail: dispatch ingredients before any video path validation
         if workflow == "ingredients":
@@ -630,6 +668,22 @@ class IcLoraHandler(StateHandlerBase):
         video_is_seq_file = is_sequence_file(str(video_path))
         video_is_seq_dir = (not video_is_seq_file) and is_sequence_dir(str(video_path))
         is_sequence = video_is_seq_file or video_is_seq_dir
+
+        # HDR IC-LoRA: dedicated source-video-driven two-stage workflow. HDR
+        # requires a source video/sequence (validated above like other V2V
+        # workflows). It ignores prompt / audio / conditioning_type / images
+        # (the source video is the IC-LoRA guide; scene embeddings replace the
+        # prompt), so missing/empty values for those fields must not fail the
+        # request. The fields are accepted but unused for HDR.
+        if workflow == "hdr":
+            return self._generate_hdr(
+                req,
+                workflow,
+                video_path=video_path,
+                is_sequence=is_sequence,
+                video_is_seq_file=video_is_seq_file,
+                video_is_seq_dir=video_is_seq_dir,
+            )
 
         if workflow == "union_control" and req.conditioning_type is None:
             raise HTTPError(400, "Union Control requires conditioning_type (canny or depth)")

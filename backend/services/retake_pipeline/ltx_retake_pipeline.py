@@ -25,6 +25,7 @@ from ltx_core.model.video_vae import TilingConfig, get_video_chunks_number
 from ltx_core.quantization import QuantizationPolicy
 from ltx_core.types import Audio
 from ltx_pipelines.utils.media_io import get_videostream_metadata
+from ltx_pipelines.utils.types import OffloadMode
 
 from services.ltx_components import CheckpointPath, ResolvedLtxComponents
 from services.ltx_pipeline_common import encode_video_output
@@ -42,7 +43,7 @@ class LTXRetakePipeline:
         checkpoint_path: CheckpointPath,
         gemma_root: str | None,
         device: torch.device,
-        streaming_prefetch_count: int | None,
+        offload_mode: OffloadMode,
         components: ResolvedLtxComponents | None = None,
         *,
         loras: list[LoraPathStrengthAndSDOps] | None = None,
@@ -52,7 +53,7 @@ class LTXRetakePipeline:
             checkpoint_path=checkpoint_path,
             gemma_root=gemma_root,
             device=device,
-            streaming_prefetch_count=streaming_prefetch_count,
+            offload_mode=offload_mode,
             components=components,
             loras=loras or [],
             quantization=quantization,
@@ -63,7 +64,7 @@ class LTXRetakePipeline:
         checkpoint_path: CheckpointPath,
         gemma_root: str | None,
         device: torch.device,
-        streaming_prefetch_count: int | None,
+        offload_mode: OffloadMode,
         components: ResolvedLtxComponents | None = None,
         *,
         loras: list[LoraPathStrengthAndSDOps],
@@ -92,18 +93,19 @@ class LTXRetakePipeline:
             install_gguf_prompt_encoder_patch()
 
         # ponytail: split safetensors 22B does not fit full residency on 32GB;
-        # stream 2 layers at a time unless explicit mode set.
-        if is_split and streaming_prefetch_count is None:
-            streaming_prefetch_count = 2
+        # stream from CPU unless an explicit non-NONE offload mode is set.
+        if is_split and offload_mode == OffloadMode.NONE:
+            offload_mode = OffloadMode.CPU
         self.device = device
         self.dtype = torch.bfloat16
-        self._streaming_prefetch_count = streaming_prefetch_count
+        self._offload_mode = offload_mode
 
         self.prompt_encoder = PromptEncoder(
             checkpoint_path=checkpoint_path,  # type: ignore[arg-type]  # ponytail: ltx_pipelines accepts tuple per M5 spec
             gemma_root=gemma_root or "",
             dtype=self.dtype,
             device=device,
+            offload_mode=self._offload_mode,
         )
         self.image_conditioner = ImageConditioner(
             checkpoint_path=checkpoint_path,  # type: ignore[arg-type]
@@ -130,6 +132,7 @@ class LTXRetakePipeline:
             device=device,
             loras=tuple(loras),
             quantization=stage_quantization,
+            offload_mode=self._offload_mode,
         )
         self.video_decoder = VideoDecoder(
             checkpoint_path=checkpoint_path,  # type: ignore[arg-type]
@@ -184,7 +187,6 @@ class LTXRetakePipeline:
         regenerate_audio: bool = True,
         enhance_prompt: bool = False,
         distilled: bool = False,
-        streaming_prefetch_count: int | None = None,
     ) -> tuple[Iterator[torch.Tensor], Audio]:
         from ltx_core.components.guiders import MultiModalGuider
         from ltx_core.components.noisers import GaussianNoiser
@@ -270,7 +272,6 @@ class LTXRetakePipeline:
             prompts_to_encode,
             enhance_first_prompt=enhance_prompt,
             enhance_prompt_seed=effective_seed,
-            streaming_prefetch_count=streaming_prefetch_count,
         )
 
 
@@ -324,7 +325,6 @@ class LTXRetakePipeline:
             fps=output_shape.fps,
             video=video_modality_spec,
             audio=audio_modality_spec,
-            streaming_prefetch_count=streaming_prefetch_count,
         )
 
 
@@ -382,7 +382,6 @@ class LTXRetakePipeline:
             regenerate_audio=regenerate_audio,
             enhance_prompt=enhance_prompt,
             distilled=distilled,
-            streaming_prefetch_count=self._streaming_prefetch_count,
         )
         audio_out: Audio | None = audio
         tiling_config = TilingConfig.default()

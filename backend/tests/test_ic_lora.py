@@ -995,32 +995,32 @@ class TestIcLoraWorkflowGating:
         assert len(fake_services.text_encoder.encode_calls) == 1
         assert fake_services.text_encoder.encode_calls[0]["enhance_prompt"] is False
 
-    def test_hdr_generates_with_proper_artifacts(self, client, test_state, create_fake_model_files):
-        """HDR adapter dispatches to the HDR path and succeeds when artifacts are present."""
-        create_fake_model_files()
-        test_state.state.app_settings.use_local_text_encoder = True
+    def _setup_hdr_artifacts(self, test_state, *, include_scene_embeddings: bool = True):
+        """Install HDR LoRA (+ optional scene embeddings) at canonical paths.
 
-        # Create HDR LoRA at canonical adapters/ path.
+        Returns ``(models_dir, adapters_dir, hdr_lora_path, scene_emb_path)``.
+        """
         from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
+        from safetensors.torch import save_file
+        import torch as _torch
+
         models_dir = test_state.config.default_models_dir
         adapters_dir = models_dir / "adapters"
         adapters_dir.mkdir(parents=True, exist_ok=True)
         hdr_lora = adapters_dir / OFFICIAL_LTX23_ADAPTERS["hdr"].filename
         hdr_lora.write_bytes(b"\x00" * 1024)
-
-        # Create synthetic scene embeddings (valid safetensors with both
-        # video_context AND audio_context). HDR is video-only, so even when an
-        # audio_context is present it must NOT reach the pipeline.
-        from safetensors.torch import save_file
-        import torch as _torch
         scene_emb = adapters_dir / OFFICIAL_LTX23_ADAPTERS["hdr_scene_embeddings"].filename
-        save_file(
-            {
-                "video_context": _torch.zeros(1, 768, dtype=_torch.float32),
-                "audio_context": _torch.zeros(1, 768, dtype=_torch.float32),
-            },
-            str(scene_emb),
-        )
+        if include_scene_embeddings:
+            save_file(
+                {"video_context": _torch.zeros(1, 768, dtype=_torch.float32)},
+                str(scene_emb),
+            )
+        return models_dir, adapters_dir, str(hdr_lora), str(scene_emb)
+
+    def test_hdr_requires_video_path(self, client, test_state, create_fake_model_files):
+        """HDR is a V2V workflow: missing video_path returns 400 (no early T2V dispatch)."""
+        create_fake_model_files()
+        self._setup_hdr_artifacts(test_state)
 
         response = client.post(
             "/api/ic-lora/generate",
@@ -1028,153 +1028,452 @@ class TestIcLoraWorkflowGating:
                 "prompt": "HDR test",
                 "images": [],
                 "adapter_id": "hdr",
+            },
+        )
+        assert_http_error(
+            response, status_code=400, code="HTTP_400",
+            message="video_path is required for this adapter",
+        )
+
+    def test_hdr_ignores_conditioning_type(self, client, test_state, fake_services, create_fake_model_files):
+        """HDR ignores conditioning_type (the source video is the guide) — request succeeds."""
+        create_fake_model_files()
+        self._setup_hdr_artifacts(test_state)
+        test_state.state.app_settings.use_local_text_encoder = True
+
+        video_path = test_state.config.outputs_dir / "src.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(
+            str(video_path), FakeCapture(frames=["a"] * 9, width=512, height=512)
+        )
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "prompt": "HDR test",
+                "images": [],
+                "adapter_id": "hdr",
+                "conditioning_type": "canny",
+            },
+        )
+        assert response.status_code == 200, response.text
+        # conditioning_type is ignored (not forwarded): HDR is handled by the
+        # dedicated HDR pipeline, not the generic IC-LoRA pipeline.
+        assert fake_services.ic_lora_pipeline.generate_calls == []
+        assert len(fake_services.hdr_ic_lora_pipeline.generate_calls) == 1
+
+    def test_hdr_ignores_images(self, client, test_state, fake_services, create_fake_model_files):
+        """HDR ignores images (the source video is the guide) — request succeeds."""
+        create_fake_model_files()
+        self._setup_hdr_artifacts(test_state)
+        test_state.state.app_settings.use_local_text_encoder = True
+
+        video_path = test_state.config.outputs_dir / "src.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(
+            str(video_path), FakeCapture(frames=["a"] * 9, width=512, height=512)
+        )
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "prompt": "HDR test",
+                "images": [{"path": "/fake/img.png", "frame": 0, "strength": 1.0}],
+                "adapter_id": "hdr",
+            },
+        )
+        assert response.status_code == 200, response.text
+        # images are ignored (not forwarded): HDR is handled by the dedicated
+        # HDR pipeline, not the generic IC-LoRA pipeline.
+        assert fake_services.ic_lora_pipeline.generate_calls == []
+        assert len(fake_services.hdr_ic_lora_pipeline.generate_calls) == 1
+
+    def test_hdr_rejects_model_selection_for_non_hdr(
+        self, client, test_state, create_fake_model_files, create_fake_ic_lora_files
+    ):
+        """Non-HDR IC-LoRA must reject model_selection with HTTP 400."""
+        create_fake_model_files()
+        create_fake_ic_lora_files()
+        test_state.state.app_settings.use_local_text_encoder = True
+
+        video_path = test_state.config.outputs_dir / "src.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(
+            str(video_path), FakeCapture(frames=["a", "b"])
+        )
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "conditioning_type": "canny",
+                "prompt": "test prompt",
+                "images": [{"path": "/fake/img.png", "frame": 0, "strength": 1.0}],
+                "model_selection": "ltx-2.3-22b-distilled",
+            },
+        )
+        assert_http_error(
+            response, status_code=400, code="HTTP_400",
+            message="model_selection is supported only for HDR IC-LoRA",
+        )
+
+    def test_hdr_rejects_sequence_input(self, client, test_state, create_fake_model_files, tmp_path):
+        """HDR sequence inputs are gated: official load_video_conditioning_hdr decodes
+        via PyAV which cannot open a single EXR/PNG-seq frame. Reject with HTTP 400
+        until the sequence → HDR conditioning adapter lands."""
+        create_fake_model_files()
+        self._setup_hdr_artifacts(test_state)
+        test_state.state.app_settings.use_local_text_encoder = True
+
+        # A sequence file (single .exr frame) — is_sequence_file() returns True
+        # for supported sequence extensions even though the file exists.
+        seq_dir = test_state.config.outputs_dir / "seq"
+        seq_dir.mkdir(parents=True, exist_ok=True)
+        seq_file = seq_dir / "shot_0001.exr"
+        seq_file.write_bytes(b"\x00" * 100)
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(seq_file),
+                "prompt": "HDR sequence test",
+                "images": [],
+                "adapter_id": "hdr",
+            },
+        )
+        assert response.status_code == 400
+        msg = response.json()["message"].lower()
+        assert ".mp4" in msg and ".mov" in msg, (
+            f"Sequence gate message must name .mp4/.mov, got: {msg!r}"
+        )
+
+    def test_hdr_uses_source_video_metadata_and_conditioning(
+        self, client, test_state, fake_services, create_fake_model_files
+    ):
+        """HDR success contract: source-video-driven metadata + dedicated HDR pipeline.
+
+        Verifies:
+        - Source video dims/fps drive the pipeline (request width/height/fps/num_frames ignored).
+        - num_frames snapped DOWN to nearest 1+8k ≤ source frame count.
+        - output_format forced to EXR_ZIP_HALF; proxy_path non-null.
+        - source_video_path threaded as the IC-LoRA guide.
+        - No text encoder call (scene embeddings replace prompt encoding).
+        """
+        create_fake_model_files()
+        self._setup_hdr_artifacts(test_state)
+        test_state.state.app_settings.use_local_text_encoder = True
+
+        # Source video: 1920x1080, 30fps, 25 frames. num_frames must snap to
+        # 1 + 8*((25-1)//8) = 1 + 8*3 = 25. Height 1080 → aligned to 1088.
+        video_path = test_state.config.outputs_dir / "hdr_src.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(
+            str(video_path),
+            FakeCapture(frames=[f"f{i}" for i in range(25)], width=1920, height=1080, fps=30.0),
+        )
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "prompt": "HDR test",
+                "images": [],
+                "adapter_id": "hdr",
+                # Request dims/fps/num_frames must be IGNORED for HDR.
                 "num_frames": 9,
                 "height": 512,
                 "width": 512,
                 "frame_rate": 24,
             },
         )
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         data = response.json()
         assert data["status"] == "complete"
-        assert "_exr" in data["video_path"]  # EXR output forced
-        # Lane A contract: proxy_path must be non-null for EXR primaries
-        # (forwarded to the encoder; Lane B owns the tonemap policy inside
-        # MediaEncoder proxy generation).
+        assert "_exr" in data["video_path"]  # EXR forced
         assert data["proxy_path"] is not None
         assert data["proxy_path"].endswith("_exr_proxy.mp4")
 
-        # Verify HDR-specific parameters reached the pipeline.
-        from tests.fakes.services import FakeIcLoraPipeline
-        singleton = FakeIcLoraPipeline._singleton
-        assert singleton is not None
-        assert len(singleton.generate_calls) == 1
-        call = singleton.generate_calls[0]
-        # Non-null proxy_path forwarded to the pipeline/encoder.
+        # Dedicated HDR pipeline received the call (NOT the generic IC-LoRA one).
+        assert fake_services.ic_lora_pipeline.generate_calls == [], (
+            "HDR must not dispatch through the generic IC-LoRA pipeline"
+        )
+        assert len(fake_services.hdr_ic_lora_pipeline.generate_calls) == 1
+        call = fake_services.hdr_ic_lora_pipeline.generate_calls[0]
+        # Source video threaded as the IC-LoRA guide.
+        assert call["source_video_path"] == str(video_path)
+        # Source-derived ORIGINAL dims (request 512x512 ignored). The handler
+        # passes the original source dims (1920x1080); the pipeline internally
+        # aligns to 64 (1088) for generation and crops back to 1080.
+        assert call["width"] == 1920
+        assert call["height"] == 1080
+        assert call["frame_rate"] == 30.0
+        # num_frames snapped from source frame count (25), not request (9).
+        assert call["num_frames"] == 25
+        # EXR primary + non-null proxy.
+        assert str(call["output_format"]) == "OutputFormat.EXR_ZIP_HALF"
         assert call["proxy_path"] == data["proxy_path"]
-        # Scene embeddings threaded into inference path.
-        assert "hdr_video_context" in call
-        assert call["hdr_video_context"] is not None
-        # HDR is video-only: audio_context must be dropped even though the
-        # synthetic embeddings file above contains one.
-        assert call.get("hdr_audio_context") is None
-        # LogC3 → linear postprocess applied before encode.
-        assert "output_postprocess" in call
-        assert call["output_postprocess"] is not None
-        # Linear EXR passthrough (no EOTF).
-        assert call.get("input_colorspace") is not None
-        assert call["input_colorspace"].transfer == "linear"
+        # No text encoder call (scene embeddings replace prompt encoding).
+        assert fake_services.text_encoder.encode_calls == []
+
+    def test_hdr_does_not_reject_short_source_video(
+        self, client, test_state, fake_services, create_fake_model_files
+    ):
+        """HDR never rejects by frame count — a 2-frame source succeeds (wrapper pads in memory)."""
+        create_fake_model_files()
+        self._setup_hdr_artifacts(test_state)
+        test_state.state.app_settings.use_local_text_encoder = True
+
+        video_path = test_state.config.outputs_dir / "short.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(
+            str(video_path), FakeCapture(frames=["a", "b"], width=512, height=512)
+        )
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "prompt": "HDR test",
+                "images": [],
+                "adapter_id": "hdr",
+            },
+        )
+        assert response.status_code == 200, response.text
+        # No handler-side frame-count rejection. num_frames is passed only as
+        # an advisory legacy arg (== source frame count); in-memory padding to
+        # 8n+1 is wrapper-owned (the fake does not pad, so it is not asserted).
+        assert len(fake_services.hdr_ic_lora_pipeline.generate_calls) == 1
+        assert fake_services.hdr_ic_lora_pipeline.generate_calls[0]["num_frames"] == 2
+
+    def test_hdr_rejects_dev_base(
+        self, client, test_state, create_fake_model_files, tmp_path
+    ):
+        """HDR initial support is distilled-only — a dev base is rejected."""
+        create_fake_model_files()
+        self._setup_hdr_artifacts(test_state)
+        test_state.state.app_settings.use_local_text_encoder = True
+
+        # Dev profile with NO distilled LoRA installed.
+        dev_transformer = tmp_path / "dev.safetensors"
+        dev_transformer.write_bytes(b"\x00" * 1024)
+        upsampler = tmp_path / "ups.safetensors"
+        upsampler.write_bytes(b"\x00" * 1024)
+        profile = ModelProfilePayload(
+            id="dev-no-lora",
+            name="Dev No LoRA",
+            source="official",
+            components=ModelComponentPaths(
+                transformer=str(dev_transformer),
+                transformer_format="official_safetensors",
+                upsampler=str(upsampler),
+                text_encoder_format="api",
+            ),
+        )
+        test_state.state.model_profiles = [profile]
+        test_state.state.active_model_profile_id = profile.id
+
+        video_path = test_state.config.outputs_dir / "src.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(
+            str(video_path), FakeCapture(frames=["a"] * 17, width=512, height=512)
+        )
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "prompt": "HDR dev test",
+                "images": [],
+                "adapter_id": "hdr",
+            },
+        )
+        # Dev base is not supported for HDR initial support — explicit reject
+        # with an actionable code (no silent fallback).
+        assert response.status_code == 409
+        payload = response.json()
+        assert payload["code"] == "UNSUPPORTED_MODEL_BASE_FAMILY"
+
+    def test_hdr_distilled_selected_base_does_not_require_distilled_lora(
+        self, client, test_state, fake_services, create_fake_model_files
+    ):
+        """Distilled base family runs HDR WITHOUT any distilled LoRA."""
+        create_fake_model_files()
+        _models, _adapters, _hdr_lora, scene_emb_path = self._setup_hdr_artifacts(test_state)
+        test_state.state.app_settings.use_local_text_encoder = True
+
+        # Default active profile is None → downloaded distilled bundle. The
+        # official distilled monolith is a distilled base; no distilled LoRA
+        # is installed and none is required.
+        video_path = test_state.config.outputs_dir / "src.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(
+            str(video_path), FakeCapture(frames=["a"] * 17, width=512, height=512)
+        )
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "prompt": "HDR distilled test",
+                "images": [],
+                "adapter_id": "hdr",
+            },
+        )
+        assert response.status_code == 200, response.text
+        # Dedicated HDR pipeline loaded with base_family=distilled, no distilled LoRA.
+        assert fake_services.hdr_ic_lora_pipeline.last_base_family == "distilled"
+        assert fake_services.hdr_ic_lora_pipeline.last_distilled_lora_path is None
+        # scene_embeddings_path is forwarded into the HDR pipeline create().
+        assert fake_services.hdr_ic_lora_pipeline.last_scene_embeddings_path == scene_emb_path
+
+    def test_hdr_model_selection_threads_to_component_resolver(
+        self, client, test_state, fake_services, create_fake_model_files, tmp_path
+    ):
+        """HDR threads model_selection through the component resolver.
+
+        With an active profile + a selected base, ``_resolve_active_components``
+        returns a ``ResolvedLtxComponents`` carrying the selection (selected_cp_id
+        appears in the cache key) so the HDR pipeline ``create()`` receives it.
+        """
+        create_fake_model_files()
+        self._setup_hdr_artifacts(test_state)
+        test_state.state.app_settings.use_local_text_encoder = True
+
+        # Active profile so _resolve_active_components(model_selection) returns
+        # a non-None ResolvedLtxComponents carrying the selection metadata.
+        transformer = tmp_path / "distilled.safetensors"
+        transformer.write_bytes(b"\x00" * 1024)
+        profile = ModelProfilePayload(
+            id="hdr-sel-profile",
+            name="HDR Selection Profile",
+            source="official",
+            components=ModelComponentPaths(
+                transformer=str(transformer),
+                transformer_format="official_safetensors",
+                text_encoder_format="api",
+            ),
+        )
+        test_state.state.model_profiles = [profile]
+        test_state.state.active_model_profile_id = "hdr-sel-profile"
+
+        video_path = test_state.config.outputs_dir / "src.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(
+            str(video_path), FakeCapture(frames=["a"] * 17, width=512, height=512)
+        )
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "prompt": "HDR selection test",
+                "images": [],
+                "adapter_id": "hdr",
+                "model_selection": "ltx-2.3-22b-distilled",
+            },
+        )
+        assert response.status_code == 200, response.text
+        # The HDR pipeline create() received components carrying the selection.
+        components = fake_services.hdr_ic_lora_pipeline.last_components
+        assert components is not None
+        assert "model_selection" in components.cache_key
+        assert "ltx-2.3-22b-distilled" in components.cache_key
+
+    def test_hdr_rejects_kijai_or_split_selection(
+        self, client, test_state, create_fake_model_files, tmp_path
+    ):
+        """HDR initial support rejects Kijai/split-safetensors selections (distilled-only)."""
+        create_fake_model_files()
+        self._setup_hdr_artifacts(test_state)
+        test_state.state.app_settings.use_local_text_encoder = True
+
+        models_dir = test_state.config.default_models_dir
+        # Kijai-style split distilled transformer at its canonical registry path.
+        kijai_rel = (
+            "diffusion_models/ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v3.safetensors"
+        )
+        kijai_path = models_dir / kijai_rel
+        kijai_path.parent.mkdir(parents=True, exist_ok=True)
+        kijai_path.write_bytes(b"FP8")
+
+        # Active split-component profile providing the sidecars the Kijai
+        # build needs.
+        sidecars: dict[str, str] = {}
+        for name in ("tp", "vvae", "avae", "ups"):
+            p = tmp_path / f"{name}.safetensors"
+            p.write_bytes(b"x")
+            sidecars[name] = str(p)
+        profile = ModelProfilePayload(
+            id="kijai-hdr",
+            name="Kijai HDR",
+            source="kijai",
+            components=ModelComponentPaths(
+                transformer="/placeholder.safetensors",
+                transformer_format="split_safetensors",
+                text_projection=sidecars["tp"],
+                video_vae=sidecars["vvae"],
+                audio_vae=sidecars["avae"],
+                upsampler=sidecars["ups"],
+                text_encoder_format="api",
+            ),
+        )
+        test_state.state.model_profiles = [profile]
+        test_state.state.active_model_profile_id = "kijai-hdr"
+
+        video_path = test_state.config.outputs_dir / "src.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(
+            str(video_path), FakeCapture(frames=["a"] * 17, width=512, height=512)
+        )
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "prompt": "HDR Kijai test",
+                "images": [],
+                "adapter_id": "hdr",
+                "model_selection": "ltx-2.3-22b-distilled-fp8-kijai-v3",
+            },
+        )
+        # Kijai/split-safetensors is not supported for HDR initial support —
+        # explicit reject with an actionable gating code (no silent fallback).
+        assert response.status_code == 409, response.text
+        payload = response.json()
+        assert payload["code"] in ("UNSUPPORTED_MODEL_BASE_FAMILY", "UNSUPPORTED_MODEL_FORMAT"), (
+            f"Expected HDR model gating rejection, got {payload!r}"
+        )
 
     def test_hdr_missing_scene_embeddings_returns_400(
         self, client, test_state, create_fake_model_files
     ):
-        """HDR without scene embeddings returns a clear 400 error."""
+        """HDR without scene embeddings returns a clear 400 error (after video_path validates)."""
         create_fake_model_files()
+        # Install HDR LoRA but NOT scene embeddings.
+        self._setup_hdr_artifacts(test_state, include_scene_embeddings=False)
         test_state.state.app_settings.use_local_text_encoder = True
 
-        # Create HDR LoRA but NOT scene embeddings.
-        from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
-        models_dir = test_state.config.default_models_dir
-        adapters_dir = models_dir / "adapters"
-        adapters_dir.mkdir(parents=True, exist_ok=True)
-        hdr_lora = adapters_dir / OFFICIAL_LTX23_ADAPTERS["hdr"].filename
-        hdr_lora.write_bytes(b"\x00" * 1024)
+        video_path = test_state.config.outputs_dir / "src.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(
+            str(video_path), FakeCapture(frames=["a"] * 9, width=512, height=512)
+        )
 
         response = client.post(
             "/api/ic-lora/generate",
             json={
+                "video_path": str(video_path),
                 "prompt": "HDR test",
                 "images": [],
                 "adapter_id": "hdr",
-                "num_frames": 9,
-                "height": 512,
-                "width": 512,
-                "frame_rate": 24,
             },
         )
         assert_http_error(
             response, status_code=400, code="HTTP_400",
             message="HDR scene embeddings not found. Configure hdr_scene_embeddings adapter path or install the file.",
         )
-
-    def test_hdr_requires_prompt(self, client, test_state, create_fake_model_files):
-        """HDR adapter requires a non-blank prompt."""
-        create_fake_model_files()
-
-        response = client.post(
-            "/api/ic-lora/generate",
-            json={
-                "prompt": "",
-                "images": [],
-                "adapter_id": "hdr",
-                "num_frames": 9,
-                "height": 512,
-                "width": 512,
-                "frame_rate": 24,
-            },
-        )
-        assert_http_error(response, status_code=400, code="HTTP_400",
-                          message="Prompt is required for HDR adapter")
-
-    def test_hdr_works_with_kijai_gguf_profile(self, client, test_state, create_fake_model_files):
-        """HDR must work with Kijai/GGUF profiles, not only official checkpoints.
-
-        Verifies structurally that HDR reuses the same profile-aware pipeline
-        loading (load_ic_lora → ResolvedLtxComponents) as non-HDR IC-LoRA,
-        not a separate official-only path.
-        """
-        create_fake_model_files()
-
-        # Create a profile with a custom (Kijai-style) transformer path.
-        from api_types import ModelComponentPaths, ModelProfilePayload
-        from pathlib import Path as _Path
-        models_dir = test_state.config.default_models_dir
-        kijai_transformer = models_dir / "diffusion_models" / "ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v3.safetensors"
-        kijai_transformer.parent.mkdir(parents=True, exist_ok=True)
-        kijai_transformer.write_bytes(b"\x00" * 1024)
-
-        profile = ModelProfilePayload(
-            id="kijai-hdr-profile",
-            name="Kijai HDR Profile",
-            source="kijai",
-            components=ModelComponentPaths(
-                transformer=str(kijai_transformer),
-                transformer_format="official_safetensors",
-                transformer_quantization="fp8_input_scaled",
-                upsampler=str(models_dir / "latent_upscale_models" / "ltx-2.3-spatial-upscaler-x2-1.0.safetensors"),
-                text_encoder_format="api",
-            ),
-            capabilities=["t2v"],
-        )
-        test_state.state.model_profiles = [profile]
-        test_state.state.active_model_profile_id = profile.id
-
-        # Create HDR LoRA + scene embeddings at adapters/.
-        from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
-        from safetensors.torch import save_file
-        import torch as _torch
-        adapters_dir = models_dir / "adapters"
-        adapters_dir.mkdir(parents=True, exist_ok=True)
-        (adapters_dir / OFFICIAL_LTX23_ADAPTERS["hdr"].filename).write_bytes(b"\x00" * 1024)
-        save_file(
-            {"video_context": _torch.zeros(1, 768, dtype=_torch.float32)},
-            str(adapters_dir / OFFICIAL_LTX23_ADAPTERS["hdr_scene_embeddings"].filename),
-        )
-
-        response = client.post(
-            "/api/ic-lora/generate",
-            json={
-                "prompt": "Kijai HDR test",
-                "images": [],
-                "adapter_id": "hdr",
-                "num_frames": 9,
-                "height": 512,
-                "width": 512,
-                "frame_rate": 24,
-            },
-        )
-        assert response.status_code == 200
-        assert response.json()["status"] == "complete"
 
     def test_hdr_scene_embeddings_returns_400_unavailable(self, client, test_state, create_fake_model_files, create_fake_ic_lora_files):
         """hdr_scene_embeddings is a support asset, not a standalone adapter."""
@@ -1898,7 +2197,7 @@ class TestHdrPromptEncoderAudioFallback:
             original_encoder=_FakeRealEncoder(),
         )
 
-        (ctx,) = wrapper(["prompt"], enhance_first_prompt=True, streaming_prefetch_count=None)
+        (ctx,) = wrapper(["prompt"], enhance_first_prompt=True)
 
         # Real encoder invoked exactly once for the audio fallback.
         assert len(calls) == 1, f"expected one fallback call, got {len(calls)}"
@@ -1914,35 +2213,6 @@ class TestHdrPromptEncoderAudioFallback:
         assert ctx.audio_encoding is not None
         # Borrowed from the real encoder, cast to the wrapper's dtype.
         assert torch.equal(ctx.audio_encoding, real_audio)
-
-    def test_none_audio_propagates_streaming_prefetch(self):
-        """Fallback call forwards caller kwargs (e.g. streaming_prefetch_count)."""
-        import torch
-
-        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import (
-            _HDRPromptEncoderWrapper,
-        )
-
-        class _FakeRealCtx:
-            def __init__(self) -> None:
-                self.video_encoding = torch.zeros(1, 1, 1)
-                self.audio_encoding = torch.zeros(1, 8, 8)
-
-        class _FakeRealEncoder:
-            def __call__(self, prompts, **kwargs):
-                self.last_kwargs = kwargs
-                return (_FakeRealCtx(),)
-
-        enc = _FakeRealEncoder()
-        wrapper = _HDRPromptEncoderWrapper(
-            video_context=torch.zeros(1, 1024, 4096),
-            audio_context=None,
-            device=torch.device("cpu"),
-            dtype=torch.float32,
-            original_encoder=enc,
-        )
-        wrapper(["p"], enhance_first_prompt=False, streaming_prefetch_count=3)
-        assert enc.last_kwargs.get("streaming_prefetch_count") == 3
 
     def test_explicit_audio_context_skips_real_encoder(self):
         """When audio_context is supplied, the real encoder must not run."""

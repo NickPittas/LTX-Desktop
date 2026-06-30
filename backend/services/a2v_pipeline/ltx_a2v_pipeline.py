@@ -13,6 +13,7 @@ from services.ltx_pipeline_common import default_tiling_config, encode_video_out
 from services.services_utils import AudioOrNone, TilingConfigType, device_supports_fp8
 
 if TYPE_CHECKING:
+    from ltx_pipelines.utils.types import OffloadMode
     from services.media_encoder.media_encoder import MediaEncoder
     from services.color_management import ColorSpace
 
@@ -24,7 +25,7 @@ class LTXa2vPipeline:
         gemma_root: str | None,
         upsampler_path: str,
         device: torch.device,
-        streaming_prefetch_count: int | None,
+        offload_mode: OffloadMode,
         components: ResolvedLtxComponents | None = None,
     ) -> "LTXa2vPipeline":
         return LTXa2vPipeline(
@@ -32,7 +33,7 @@ class LTXa2vPipeline:
             gemma_root=gemma_root,
             upsampler_path=upsampler_path,
             device=device,
-            streaming_prefetch_count=streaming_prefetch_count,
+            offload_mode=offload_mode,
             components=components,
         )
 
@@ -42,7 +43,7 @@ class LTXa2vPipeline:
         gemma_root: str | None,
         upsampler_path: str,
         device: torch.device,
-        streaming_prefetch_count: int | None,
+        offload_mode: OffloadMode,
         components: ResolvedLtxComponents | None = None,
     ) -> None:
         self._components = components
@@ -67,21 +68,24 @@ class LTXa2vPipeline:
 
             quantization = kijai_fp8_quantization_policy()
         else:
-            from ltx_core.quantization import QuantizationPolicy
+            from ltx_core.quantization.fp8_cast import build_policy
 
-            quantization = QuantizationPolicy.fp8_cast() if device_supports_fp8(device) else None
+            quantization = build_policy(checkpoint_path) if device_supports_fp8(device) else None  # type: ignore[arg-type]  # non-split branch → str checkpoint
 
         # ponytail: split safetensors 22B does not fit full residency on 32GB;
-        # stream 2 layers at a time unless explicit mode set.
-        if is_split and streaming_prefetch_count is None:
-            streaming_prefetch_count = 2
-        self._streaming_prefetch_count = streaming_prefetch_count
+        # stream from CPU unless an explicit non-NONE offload mode is set.
+        from ltx_pipelines.utils.types import OffloadMode
+
+        if is_split and offload_mode == OffloadMode.NONE:
+            offload_mode = OffloadMode.CPU
+        self._offload_mode = offload_mode
         self.pipeline = DistilledA2VPipeline(
             distilled_checkpoint_path=checkpoint_path,  # type: ignore[arg-type]  # ponytail: ltx_pipelines accepts tuple per M5 spec
             gemma_root=gemma_root or "",
             spatial_upsampler_path=upsampler_path,
             device=device,
             quantization=quantization,
+            offload_mode=self._offload_mode,
         )
 
         if is_gguf:
@@ -137,7 +141,6 @@ class LTXa2vPipeline:
             audio_start_time=audio_start_time,
             audio_max_duration=audio_max_duration,
             tiling_config=tiling_config,
-            streaming_prefetch_count=self._streaming_prefetch_count,
         )
 
     @torch.inference_mode()

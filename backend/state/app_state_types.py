@@ -14,6 +14,7 @@ if TYPE_CHECKING:
         A2VPipeline,
         DepthProcessorPipeline,
         FastVideoPipeline,
+        HdrIcLoraPipeline,
         ImageGenerationPipeline,
         IcLoraPipeline,
         PoseProcessorPipeline,
@@ -147,6 +148,21 @@ class RetakePipelineState:
     quantized: bool
 
 
+@dataclass
+class HdrICLoraState:
+    """HDR IC-LoRA pipeline state on the GPU slot.
+
+    Distinct from :class:`ICLoraState` (generic IC-LoRA) because the HDR
+    workflow has its own pipeline service, LoRA stack, and source-video-driven
+    contract. ``cache_key`` mirrors the components/selection/LoRA/embeddings
+    identity computed by :meth:`PipelinesHandler.load_hdr_ic_lora` so a second
+    HDR run with the same configuration cache-hits.
+    """
+
+    pipeline: HdrIcLoraPipeline
+    cache_key: tuple[str, ...] = ()
+
+
 # ============================================================
 # Generation state
 # ============================================================
@@ -226,7 +242,14 @@ ActiveGeneration = GpuGeneration | ApiGeneration
 
 @dataclass
 class GpuSlot:
-    active_pipeline: VideoPipelineState | ICLoraState | A2VPipelineState | RetakePipelineState | ImageGenerationPipeline
+    active_pipeline: (
+        VideoPipelineState
+        | ICLoraState
+        | A2VPipelineState
+        | RetakePipelineState
+        | HdrICLoraState
+        | ImageGenerationPipeline
+    )
 
 
 @dataclass

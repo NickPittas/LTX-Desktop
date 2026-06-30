@@ -583,6 +583,7 @@ function PromptBar({
   showIcLoraOutputSettings,
   onFpsChange,
   isApiMode,
+  icLoraAdapterId,
 }: {
   mode: 'image' | 'video' | 'retake' | 'ic-lora'
   onModeChange: (mode: 'image' | 'video' | 'retake' | 'ic-lora') => void
@@ -622,6 +623,7 @@ function PromptBar({
   showIcLoraOutputSettings?: boolean
   onFpsChange?: (fps: number) => void
   isApiMode: boolean
+  icLoraAdapterId?: string | null
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const audioInputRef = useRef<HTMLInputElement>(null)
@@ -643,7 +645,8 @@ function PromptBar({
   )
 
   const modelSelectionWorkflow: ModelSelectionWorkflow | null = (() => {
-    if (isRetake || isIcLora || isApiMode) return null
+    if (isRetake || isApiMode) return null
+    if (isIcLora) return icLoraAdapterId === 'hdr' ? 'hdr-ic-lora' : null
     if (mode !== 'video') return null
     if (inputAudio) return null
     return inputImage ? 'image-to-video' : 'text-to-video'
@@ -901,65 +904,100 @@ function PromptBar({
           </>
         ) : isIcLora ? (
           <>
-            <SettingsDropdown
-              title="CONDITIONING TYPE"
-              value={icLoraCondType ?? ''}
-              onChange={(v) => onIcLoraCondTypeChange?.(v === '' ? null : v as ICLoraConditioningType)}
-              options={CONDITIONING_TYPES.map(ct => ({ value: ct.value ?? '', label: ct.label }))}
-              trigger={
-                <>
-                  <span className="text-zinc-300 font-medium">{CONDITIONING_TYPES.find(ct => ct.value === icLoraCondType)?.label || 'None'}</span>
-                  <ChevronUp className="h-3 w-3 text-zinc-500" />
-                </>
-              }
-            />
-            <div className="w-px h-4 bg-zinc-700 mx-0.5" />
-            <SettingsDropdown
-              title="STRENGTH"
-              value={String(icLoraStrength ?? 1.0)}
-              onChange={(v) => onIcLoraStrengthChange?.(parseFloat(v))}
-              options={[
-                { value: '0.5', label: '0.50' },
-                { value: '0.75', label: '0.75' },
-                { value: '1', label: '1.00' },
-                { value: '1.25', label: '1.25' },
-                { value: '1.5', label: '1.50' },
-                { value: '2', label: '2.00' },
-              ]}
-              trigger={
-                <>
-                  <span className="text-zinc-500 text-[10px]">STR</span>
-                  <span className="text-zinc-300 font-medium">{(icLoraStrength ?? 1.0).toFixed(2)}</span>
-                  <ChevronUp className="h-3 w-3 text-zinc-500" />
-                </>
-              }
-            />
-            <div className="w-px h-4 bg-zinc-700 mx-0.5" />
-            <SettingsDropdown
-              title="LORA WEIGHT"
-              value={String(loraStrength ?? 1.0)}
-              onChange={(v) => onLoraStrengthChange?.(parseFloat(v))}
-              options={[
-                { value: '0', label: '0.00' },
-                { value: '0.25', label: '0.25' },
-                { value: '0.5', label: '0.50' },
-                { value: '0.75', label: '0.75' },
-                { value: '1', label: '1.00' },
-                { value: '1.25', label: '1.25' },
-                { value: '1.5', label: '1.50' },
-                { value: '1.75', label: '1.75' },
-                { value: '2', label: '2.00' },
-              ]}
-              trigger={
-                <>
-                  <span className="text-zinc-500 text-[10px]">W</span>
-                  <span className="text-zinc-300 font-medium">{(loraStrength ?? 1.0).toFixed(2)}</span>
-                  <ChevronUp className="h-3 w-3 text-zinc-500" />
-                </>
-              }
-            />
-            <div className="w-px h-4 bg-zinc-700 mx-0.5" />
-            {formatDropdown}
+            {icLoraAdapterId !== 'hdr' && (
+              <>
+                <SettingsDropdown
+                  title="CONDITIONING TYPE"
+                  value={icLoraCondType ?? ''}
+                  onChange={(v) => onIcLoraCondTypeChange?.(v === '' ? null : v as ICLoraConditioningType)}
+                  options={CONDITIONING_TYPES.map(ct => ({ value: ct.value ?? '', label: ct.label }))}
+                  trigger={
+                    <>
+                      <span className="text-zinc-300 font-medium">{CONDITIONING_TYPES.find(ct => ct.value === icLoraCondType)?.label || 'None'}</span>
+                      <ChevronUp className="h-3 w-3 text-zinc-500" />
+                    </>
+                  }
+                />
+                <div className="w-px h-4 bg-zinc-700 mx-0.5" />
+                <SettingsDropdown
+                  title="STRENGTH"
+                  value={String(icLoraStrength ?? 1.0)}
+                  onChange={(v) => onIcLoraStrengthChange?.(parseFloat(v))}
+                  options={[
+                    { value: '0.5', label: '0.50' },
+                    { value: '0.75', label: '0.75' },
+                    { value: '1', label: '1.00' },
+                    { value: '1.25', label: '1.25' },
+                    { value: '1.5', label: '1.50' },
+                    { value: '2', label: '2.00' },
+                  ]}
+                  trigger={
+                    <>
+                      <span className="text-zinc-500 text-[10px]">STR</span>
+                      <span className="text-zinc-300 font-medium">{(icLoraStrength ?? 1.0).toFixed(2)}</span>
+                      <ChevronUp className="h-3 w-3 text-zinc-500" />
+                    </>
+                  }
+                />
+                <div className="w-px h-4 bg-zinc-700 mx-0.5" />
+              </>
+            )}
+            {icLoraAdapterId !== 'hdr' && (
+              <>
+                <SettingsDropdown
+                  title="LORA WEIGHT"
+                  value={String(loraStrength ?? 1.0)}
+                  onChange={(v) => onLoraStrengthChange?.(parseFloat(v))}
+                  options={[
+                    { value: '0', label: '0.00' },
+                    { value: '0.25', label: '0.25' },
+                    { value: '0.5', label: '0.50' },
+                    { value: '0.75', label: '0.75' },
+                    { value: '1', label: '1.00' },
+                    { value: '1.25', label: '1.25' },
+                    { value: '1.5', label: '1.50' },
+                    { value: '1.75', label: '1.75' },
+                    { value: '2', label: '2.00' },
+                  ]}
+                  trigger={
+                    <>
+                      <span className="text-zinc-500 text-[10px]">W</span>
+                      <span className="text-zinc-300 font-medium">{(loraStrength ?? 1.0).toFixed(2)}</span>
+                      <ChevronUp className="h-3 w-3 text-zinc-500" />
+                    </>
+                  }
+                />
+                <div className="w-px h-4 bg-zinc-700 mx-0.5" />
+                {formatDropdown}
+              </>
+            )}
+            {icLoraAdapterId === 'hdr' && (
+              <>
+                {/* HDR forces per-LoRA strengths (HDR@1.0, distilled@0.5 for dev)
+                    and an EXR linear primary; LoRA weight and Format controls are
+                    intentionally omitted so users do not expect them to affect HDR. */}
+                <div
+                  className="flex items-center gap-1 px-1.5 py-1 cursor-default select-none"
+                  title="HDR output is linear EXR (forced)"
+                >
+                  <span className="text-zinc-500 text-[10px]">FMT</span>
+                  <span className="text-zinc-500 font-medium">EXR</span>
+                </div>
+              </>
+            )}
+            {modelSelectionWorkflow === 'hdr-ic-lora' && (
+              <>
+                <div className="w-px h-4 bg-zinc-700 mx-0.5" />
+                <ModelSelectionPopover
+                  options={visibleModelSelectionOptions}
+                  selectedId={settings.modelSelection ?? null}
+                  onChange={(id) => onSettingsChange({ ...settings, modelSelection: id })}
+                  disabled={!modelSelectionWorkflow || isLoadingModelSelectionOptions}
+                  isLoading={isLoadingModelSelectionOptions}
+                  errorMessage={modelSelectionErrorMessage}
+                />
+              </>
+            )}
           {showIcLoraOutputSettings && (() => {
             // ponytail: direct call for Ingredients; can't reuse resolvedVideoOptions (null in ic-lora)
             const ico = resolveVideoGenerationOptions({ settings, modelSpecs: videoModelSpecs, hasAudio: false })
@@ -1610,10 +1648,10 @@ export function GenSpace() {
   const handleGenerate = async () => {
     if (mode === 'ic-lora') {
       if (!icLoraInput.ready) return
-      if (icLoraInput.adapterId !== 'ingredients' && icLoraInput.adapterId !== 'hdr' && !icLoraInput.videoPath) return
-      if (!prompt.trim() && icLoraInput.adapterId !== 'in_outpainting') return
+      if (!icLoraInput.videoPath && icLoraInput.adapterId !== 'ingredients') return
+      if (!prompt.trim() && icLoraInput.adapterId !== 'in_outpainting' && icLoraInput.adapterId !== 'hdr') return
 
-      // Derive prompt-only output settings (Ingredients + HDR) from PromptBar controls
+      // Derive Ingredients output settings from PromptBar controls
       const fpsForIcLora = settings.fps
       // ponytail: local resolution map mirrors backend; move to shared schema if more res added
       const RES_MAP: Record<string, { width: number; height: number }> = {
@@ -1629,22 +1667,24 @@ export function GenSpace() {
       const icNumFrames = Math.max(9, 1 + 8 * Math.floor((icDuration * fpsForIcLora) / 8))
 
       const resolvedPrompt = prompt
-      const isNoInputAdapter = icLoraInput.adapterId === 'ingredients' || icLoraInput.adapterId === 'hdr'
+      const isIngredients = icLoraInput.adapterId === 'ingredients'
+      const isHdr = icLoraInput.adapterId === 'hdr'
       await submitIcLora({
         videoPath: icLoraInput.videoPath,
-        conditioningType: icLoraInput.adapterId === 'hdr' ? null : icLoraCondType,
-        conditioningStrength: icLoraInput.adapterId === 'hdr' ? 1.0 : icLoraStrength,
+        conditioningType: isHdr ? null : icLoraCondType,
+        conditioningStrength: isHdr ? 1.0 : icLoraStrength,
         loraStrength: loraStrength,
         adapterId: icLoraInput.adapterId,
         maskPath: icLoraInput.maskPath,
-        images: icLoraInput.images,
+        images: isHdr ? [] : icLoraInput.images,
         prompt: resolvedPrompt,
         maskGrowPx: icLoraInput.maskGrowPx,
         laplacianBlendGrow: icLoraInput.laplacianBlendGrow,
         finalMaskBlurPx: icLoraInput.finalMaskBlurPx,
-        frameRate: fpsForIcLora,
+        frameRate: isIngredients ? fpsForIcLora : undefined,
         outputFormat: settings.outputFormat,
-        ...(isNoInputAdapter
+        modelSelection: isHdr ? settings.modelSelection ?? null : null,
+        ...(isIngredients
           ? { width: icWidth, height: icHeight, numFrames: icNumFrames }
           : {}),
       }, async (result) => {
@@ -1932,7 +1972,7 @@ export function GenSpace() {
   const canSubmit = isRetakeMode
     ? retakeInput.ready && !!retakeInput.videoPath && !isRetaking
     : isIcLoraMode
-      ? (isInOutpainting || !!prompt.trim()) && icLoraInput.ready && (!!icLoraInput.videoPath || isIngredients || isHdr) && !isIcLoraGenerating
+      ? (isInOutpainting || isHdr || !!prompt.trim()) && icLoraInput.ready && (!!icLoraInput.videoPath || isIngredients) && !isIcLoraGenerating
       : !!prompt.trim() && hasCompatibleVideoSettings
   const promptButtonLabel = isRetakeMode ? 'Retake' : isIcLoraMode ? 'Generate' : 'Generate'
   const promptButtonIcon = isRetakeMode
@@ -2206,9 +2246,10 @@ export function GenSpace() {
           onIcLoraStrengthChange={setIcLoraStrength}
           loraStrength={loraStrength}
           onLoraStrengthChange={setLoraStrength}
-          showIcLoraOutputSettings={isIngredients || isHdr}
+          showIcLoraOutputSettings={isIngredients}
           onFpsChange={(fps) => setSettings((prev) => ({ ...prev, fps }))}
           isApiMode={shouldVideoGenerateWithLtxApi}
+          icLoraAdapterId={icLoraInput.adapterId}
         />
       </div>
       

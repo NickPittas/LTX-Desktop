@@ -6,7 +6,7 @@ import pytest
 
 from runtime_config.runtime_policy import (
     decide_local_generation_mode,
-    streaming_prefetch_count_for_mode,
+    offload_mode_value_for_mode,
 )
 
 
@@ -63,14 +63,14 @@ def test_other_systems_fail_closed() -> None:
     assert decide_local_generation_mode(system="FreeBSD", cuda_available=True, vram_gb=48) == "unsupported"
 
 
-def test_streaming_prefetch_count_for_full_loading_is_none() -> None:
-    assert streaming_prefetch_count_for_mode("full_models_loading") is None
+def test_offload_mode_value_for_full_loading_is_none() -> None:
+    assert offload_mode_value_for_mode("full_models_loading") == "none"
 
 
-def test_streaming_prefetch_count_for_streaming_mode_is_two() -> None:
-    assert streaming_prefetch_count_for_mode("streaming_models_loading") == 2
+def test_offload_mode_value_for_streaming_mode_is_cpu() -> None:
+    assert offload_mode_value_for_mode("streaming_models_loading") == "cpu"
 
 
-def test_streaming_prefetch_count_for_unsupported_asserts() -> None:
+def test_offload_mode_value_for_unsupported_asserts() -> None:
     with pytest.raises(AssertionError):
-        streaming_prefetch_count_for_mode("unsupported")
+        offload_mode_value_for_mode("unsupported")

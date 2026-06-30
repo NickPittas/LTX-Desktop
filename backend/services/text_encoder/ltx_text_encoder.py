@@ -49,10 +49,13 @@ class LTXTextEncoder:
         try:
             from ltx_pipelines.utils.blocks import PromptEncoder
 
-            if getattr(PromptEncoder.__init__, "_ltx_desktop_api_init_patch", False):
+            # Upstream PromptEncoder.__init__ exposes an unparameterized
+            # BuilderProtocol[Unknown] in its stubs; the partial-unknown is not
+            # ours to fix, so read/assign with type: ignore here.
+            if getattr(PromptEncoder.__init__, "_ltx_desktop_api_init_patch", False):  # type: ignore
                 return
 
-            original_init = PromptEncoder.__init__
+            original_init = PromptEncoder.__init__  # type: ignore[unknown-member-type]
 
             def patched_init(
                 self_encoder: PromptEncoder,
@@ -61,6 +64,8 @@ class LTXTextEncoder:
                 dtype: Any,
                 device: Any,
                 registry: Any = None,
+                offload_mode: Any = None,
+                text_encoder_builder: Any = None,
             ) -> None:
                 logger.info("PromptEncoder init gemma_root=%s checkpoint=%s", gemma_root or "<api>", checkpoint_path)
                 if not gemma_root:
@@ -69,7 +74,22 @@ class LTXTextEncoder:
                     self_encoder._text_encoder_builder = None  # type: ignore[attr-defined]
                     self_encoder._embeddings_processor_builder = None  # type: ignore[attr-defined]
                     return
-                original_init(self_encoder, checkpoint_path, gemma_root, dtype, device, registry)
+                # Callers that omit offload_mode (e.g. DistilledNativePipeline)
+                # must resolve to the upstream default (NONE), not None.
+                if offload_mode is None:
+                    from ltx_pipelines.utils.types import OffloadMode
+
+                    offload_mode = OffloadMode.NONE
+                original_init(
+                    self_encoder,
+                    checkpoint_path,
+                    gemma_root,
+                    dtype,
+                    device,
+                    registry,
+                    offload_mode=offload_mode,
+                    text_encoder_builder=text_encoder_builder,
+                )
 
             patched_init._ltx_desktop_api_init_patch = True  # type: ignore[attr-defined]
             PromptEncoder.__init__ = patched_init  # type: ignore[assignment]

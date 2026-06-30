@@ -1697,6 +1697,17 @@
             ],
             "title": "Mask Path"
           },
+          "model_selection": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Selection"
+          },
           "negative_prompt": {
             "default": "",
             "title": "Negative Prompt",
@@ -3268,6 +3279,7 @@
               "image-to-video",
               "audio-to-video",
               "ic-lora",
+              "hdr-ic-lora",
               "retake"
             ],
             "title": "Workflow",
@@ -5251,6 +5263,7 @@
                 "image-to-video",
                 "audio-to-video",
                 "ic-lora",
+                "hdr-ic-lora",
                 "retake"
               ],
               "title": "Workflow",

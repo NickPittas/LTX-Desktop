@@ -66,8 +66,9 @@ export const IC_LORA_ADAPTERS: AdapterEntry[] = [
   { value: 'ingredients', label: 'Ingredients', workflow: 'ingredients' },
   // in_outpainting — inpaint supported; outpaint not yet
   { value: 'in_outpainting', label: 'In/Outpainting', workflow: 'in_outpainting' },
-  // hdr — prompt-only text-to-video that outputs a linear EXR frame sequence.
-  // The backend may also return an SDR proxy for in-app preview.
+  // hdr — video-to-HDR workflow that takes an existing 8-bit video or image
+  // sequence as guide and writes a linear EXR frame sequence. The backend may
+  // also return an SDR proxy for in-app preview.
   { value: 'hdr', label: 'HDR', workflow: 'hdr' },
   // unavailable — visible but cannot be selected
   { value: 'motion_track_control', label: 'Motion Track Control', workflow: 'unavailable', reason: 'Motion track workflow not wired yet' },
@@ -172,22 +173,22 @@ export function ICLoraPanel({
   useEffect(() => {
     const selectedEntry = getAdapterEntry(internalAdapterId)
     const selectedWorkflow = selectedEntry?.workflow
-    // ponytail: ingredients & hdr are no-source-video, prompt-driven workflows.
-    // ingredients needs reference images; hdr needs neither video nor images nor conditioning.
-    const isNoInputWorkflow = selectedWorkflow === 'ingredients' || selectedWorkflow === 'hdr'
+    // ponytail: ingredients is the only no-source-video IC-LoRA workflow.
+    // hdr is a source-video/sequence-to-HDR workflow and requires inputVideoPath.
+    const isNoInputWorkflow = selectedWorkflow === 'ingredients'
+    const isHdrWorkflow = selectedWorkflow === 'hdr'
     const requiredSlotsReady = selectedEntry?.workflow === 'in_outpainting'
       ? !!maskPath
       : selectedEntry?.workflow === 'ingredients'
         ? ingredientPaths.length > 0
         : true
     const adapterReady = internalAdapterId !== null && selectedEntry?.workflow !== 'unavailable'
-    // ponytail: ingredients/hdr don't need driving video; conditioning is always null for both
     const needsVideo = !isNoInputWorkflow
     const ready = (needsVideo ? !!inputVideoPath : true) && icLoraReady && requiredSlotsReady && (conditioningType !== null || adapterReady)
     const images = selectedWorkflow === 'ingredients' ? ingredientPaths.map(p => ({ path: p })) : []
     onChange?.({
       videoPath: isNoInputWorkflow ? null : inputVideoPath,
-      conditioningType: isNoInputWorkflow ? null : conditioningType,
+      conditioningType: isNoInputWorkflow || isHdrWorkflow ? null : conditioningType,
       conditioningStrength,
       adapterId: internalAdapterId,
       maskPath: selectedEntry?.workflow === 'in_outpainting' ? maskPath : null,
@@ -579,7 +580,7 @@ export function ICLoraPanel({
             <div className="px-3 py-2 border-b border-zinc-800 flex items-center justify-between gap-2">
               <span className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider shrink-0">Input</span>
               {isHdrWorkflow ? (
-                <span className="text-[10px] text-amber-500 truncate min-w-0">HDR — prompt only (no source video)</span>
+                <span className="text-[10px] text-amber-500 truncate min-w-0">HDR — source video/sequence guide</span>
               ) : getAdapterEntry(internalAdapterId)?.workflow === 'ingredients' ? (
                 <span className="text-[10px] text-amber-500 truncate min-w-0">Ingredients — prompt + reference sheet</span>
               ) : inputVideoPath ? (
@@ -588,19 +589,7 @@ export function ICLoraPanel({
                 </span>
               ) : null}
             </div>
-            {isHdrWorkflow ? (
-              <div className="flex-1 flex items-center justify-center bg-zinc-900/50 m-3 rounded-lg border border-dashed border-zinc-700">
-                <div className="text-center p-6">
-                  <div className="w-12 h-12 rounded-full bg-amber-500/10 flex items-center justify-center mx-auto mb-3">
-                    <Sparkles className="h-6 w-6 text-amber-500" />
-                  </div>
-                  <p className="text-zinc-300 text-sm font-medium">HDR</p>
-                  <p className="text-zinc-500 text-xs mt-1 max-w-xs">
-                    Prompt-driven text-to-video. No source video, reference images, or conditioning required.
-                  </p>
-                </div>
-              </div>
-            ) : getAdapterEntry(internalAdapterId)?.workflow === 'ingredients' ? (
+            {getAdapterEntry(internalAdapterId)?.workflow === 'ingredients' ? (
               <div className="flex-1 flex items-center justify-center bg-zinc-900/50 m-3 rounded-lg border border-dashed border-zinc-700">
                 <div className="text-center p-6">
                   <div className="w-12 h-12 rounded-full bg-amber-500/10 flex items-center justify-center mx-auto mb-3">
@@ -633,7 +622,7 @@ export function ICLoraPanel({
                     <div className="w-12 h-12 rounded-full bg-zinc-800 flex items-center justify-center mx-auto mb-2">
                       <Film className="h-6 w-6 text-zinc-600" />
                     </div>
-                    <p className="text-zinc-400 text-xs">Drop or import a driving video</p>
+                    <p className="text-zinc-400 text-xs">{isHdrWorkflow ? 'Drop or import a source video/sequence' : 'Drop or import a driving video'}</p>
                     <button
                       onClick={handleBrowse}
                       className="mt-2 px-3 py-1.5 text-[10px] text-blue-400 border border-blue-500/30 rounded-lg hover:bg-blue-600/10 transition-colors"

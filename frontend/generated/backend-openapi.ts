@@ -1201,6 +1201,8 @@ export interface components {
             mask_grow_px: number;
             /** Mask Path */
             mask_path?: string | null;
+            /** Model Selection */
+            model_selection?: string | null;
             /**
              * Negative Prompt
              * @default
@@ -1710,7 +1712,7 @@ export interface components {
              * Workflow
              * @enum {string}
              */
-            workflow: "text-to-video" | "image-to-video" | "audio-to-video" | "ic-lora" | "retake";
+            workflow: "text-to-video" | "image-to-video" | "audio-to-video" | "ic-lora" | "hdr-ic-lora" | "retake";
         };
         /** ModelStatusItem */
         ModelStatusItem: {
@@ -3113,7 +3115,7 @@ export interface operations {
     route_model_options_api_models_model_options_get: {
         parameters: {
             query: {
-                workflow: "text-to-video" | "image-to-video" | "audio-to-video" | "ic-lora" | "retake";
+                workflow: "text-to-video" | "image-to-video" | "audio-to-video" | "ic-lora" | "hdr-ic-lora" | "retake";
             };
             header?: never;
             path?: never;

@@ -9,6 +9,7 @@ from api_types import ImageConditioningInput, OutputFormat
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from ltx_pipelines.utils.types import OffloadMode
     from services.ltx_components import CheckpointPath, ResolvedLtxComponents
     from services.media_encoder.media_encoder import MediaEncoder
     from services.color_management import ColorSpace
@@ -24,7 +25,7 @@ class FastVideoPipeline(Protocol):
         gemma_root: str | None,
         upsampler_path: str,
         device: torch.device,
-        streaming_prefetch_count: int | None,
+        offload_mode: OffloadMode,
         components: ResolvedLtxComponents | None = None,
         *,
         transformer_format: str = "safetensors",

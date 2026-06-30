@@ -40,19 +40,24 @@ def decide_local_generation_mode(
     return "unsupported"
 
 
-def streaming_prefetch_count_for_mode(mode: LocalGenerationMode) -> int | None:
-    """Return the streaming_prefetch_count to pass to a local pipeline.
+def offload_mode_value_for_mode(mode: LocalGenerationMode) -> Literal["none", "cpu"]:
+    """Return the ``OffloadMode`` value string to pass to a local pipeline.
+
+    Maps the local generation mode to the upstream offload strategy:
+    - ``full_models_loading`` -> ``"none"`` (full residency, no streaming).
+    - ``streaming_models_loading`` -> ``"cpu"`` (stream weights from pinned host RAM).
+    The caller converts this to ``OffloadMode(value)`` (never ``OffloadMode.DISK``).
 
     Must not be called when local generation is unsupported — callers should
     route through the API instead.
     """
     if mode == "unsupported":
         raise AssertionError(
-            "streaming_prefetch_count_for_mode called with 'unsupported' mode; "
+            "offload_mode_value_for_mode called with 'unsupported' mode; "
             "callers must route to the API instead of constructing a local pipeline."
         )
     if mode == "full_models_loading":
-        return None
+        return "none"
     if mode == "streaming_models_loading":
-        return 2
+        return "cpu"
     raise AssertionError(f"Unexpected LocalGenerationMode: {mode!r}")

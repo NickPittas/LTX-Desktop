@@ -8,6 +8,7 @@ import pytest
 
 from _routes._errors import HTTPError
 from api_types import ModelComponentPaths, ModelProfilePayload
+from ltx_pipelines.utils.types import OffloadMode
 from runtime_config.model_download_specs import UPSAMPLER_CP_ID, resolve_model_path
 
 
@@ -217,20 +218,20 @@ class TestLtxGgufFormatIntegration:
         assert fake_services.fast_video_pipeline.compile_calls == 1
 
 
-class TestStreamingPrefetchCountGuard:
+class TestOffloadModeGuard:
     """Kijai split-safetensors 22B does not fit full residency on 32GB.
 
-    Guard forces streaming_prefetch_count=2 when None is passed for split
-    safetensors; explicit values preserved; GGUF/monolith unaffected.
+    Guard forces offload_mode=CPU when NONE is passed for split safetensors;
+    explicit CPU is preserved; GGUF/monolith (non-split) stay NONE in full mode.
     """
 
-    def test_split_none_uses_two(self, test_state, tmp_path, fake_services):
+    def test_split_none_uses_cpu(self, test_state, tmp_path, fake_services):
         _activate_split_profile(test_state, tmp_path)
         test_state.pipelines.load_gpu_pipeline("fast")
-        assert fake_services.fast_video_pipeline.last_streaming_prefetch_count == 2
+        assert fake_services.fast_video_pipeline.last_offload_mode == OffloadMode.CPU
 
-    def test_split_none_uses_two_retake(self, test_state, tmp_path, fake_services):
-        """Retake guard: split safetensors None→2.
+    def test_split_none_uses_cpu_retake(self, test_state, tmp_path, fake_services):
+        """Retake guard: split safetensors NONE→CPU.
 
         Skipped when CUDA/GPU unavailable (retake loads ltx_core which
         imports GPU-specific modules).
@@ -241,10 +242,10 @@ class TestStreamingPrefetchCountGuard:
         except ImportError:
             import pytest
             pytest.skip("ltx_core GPU imports not available")
-        assert fake_services.retake_pipeline.last_streaming_prefetch_count == 2
+        assert fake_services.retake_pipeline.last_offload_mode == OffloadMode.CPU
 
-    def test_split_explicit_one_preserved(self, test_state, tmp_path, fake_services):
-        """Explicit streaming_prefetch_count=1 preserved (not overridden to 2)."""
+    def test_split_explicit_cpu_preserved(self, test_state, tmp_path, fake_services):
+        """Explicit offload_mode=CPU preserved (guard only overrides NONE→CPU)."""
         _activate_split_profile(test_state, tmp_path)
         # Load pipeline first to get resolved components
         test_state.pipelines.load_gpu_pipeline("fast")
@@ -254,46 +255,30 @@ class TestStreamingPrefetchCountGuard:
             gemma_root=None,
             upsampler_path="ups",
             device="cpu",
-            streaming_prefetch_count=1,
+            offload_mode=OffloadMode.CPU,
             components=fake_services.fast_video_pipeline.last_components,
             transformer_format="safetensors",
         )
-        assert fake_services.fast_video_pipeline.last_streaming_prefetch_count == 1
+        assert fake_services.fast_video_pipeline.last_offload_mode == OffloadMode.CPU
 
-    def test_split_explicit_three_preserved(self, test_state, tmp_path, fake_services):
-        """Explicit streaming_prefetch_count=3 preserved (not overridden to 2)."""
-        _activate_split_profile(test_state, tmp_path)
-        test_state.pipelines.load_gpu_pipeline("fast")
-        from tests.fakes.services import FakeFastVideoPipeline
-        FakeFastVideoPipeline.create(
-            checkpoint_path=("t", "tp", "ec", "vv", "av"),
-            gemma_root=None,
-            upsampler_path="ups",
-            device="cpu",
-            streaming_prefetch_count=3,
-            components=fake_services.fast_video_pipeline.last_components,
-            transformer_format="safetensors",
-        )
-        assert fake_services.fast_video_pipeline.last_streaming_prefetch_count == 3
-
-    def test_gguf_none_remains_none(self, test_state, tmp_path, fake_services):
+    def test_gguf_remains_none(self, test_state, tmp_path, fake_services):
         _activate_gguf_profile(test_state, tmp_path)
         test_state.pipelines.load_gpu_pipeline("fast")
-        assert fake_services.fast_video_pipeline.last_streaming_prefetch_count is None
+        assert fake_services.fast_video_pipeline.last_offload_mode == OffloadMode.NONE
 
-    def test_official_none_remains_none(self, test_state, tmp_path, fake_services):
+    def test_official_remains_none(self, test_state, tmp_path, fake_services):
         _activate_official_profile(test_state, tmp_path)
         test_state.pipelines.load_gpu_pipeline("fast")
-        assert fake_services.fast_video_pipeline.last_streaming_prefetch_count is None
+        assert fake_services.fast_video_pipeline.last_offload_mode == OffloadMode.NONE
 
     # --- IC-LoRA pipeline guard ---
 
-    def test_ic_lora_split_none_uses_two(self, test_state, tmp_path, fake_services):
+    def test_ic_lora_split_none_uses_cpu(self, test_state, tmp_path, fake_services):
         _activate_split_profile(test_state, tmp_path)
         test_state.pipelines.load_ic_lora(lora_paths=[], depth_model_path=None)
-        assert fake_services.ic_lora_pipeline.last_streaming_prefetch_count == 2
+        assert fake_services.ic_lora_pipeline.last_offload_mode == OffloadMode.CPU
 
-    def test_ic_lora_split_explicit_one_preserved(self, test_state, tmp_path, fake_services):
+    def test_ic_lora_split_explicit_cpu_preserved(self, test_state, tmp_path, fake_services):
         _activate_split_profile(test_state, tmp_path)
         test_state.pipelines.load_ic_lora(lora_paths=[], depth_model_path=None)
         from tests.fakes.services import FakeIcLoraPipeline
@@ -303,29 +288,29 @@ class TestStreamingPrefetchCountGuard:
             upsampler_path="ups",
             lora_paths=[],
             device="cpu",
-            streaming_prefetch_count=1,
+            offload_mode=OffloadMode.CPU,
             components=fake_services.ic_lora_pipeline.last_components,
         )
-        assert fake_services.ic_lora_pipeline.last_streaming_prefetch_count == 1
+        assert fake_services.ic_lora_pipeline.last_offload_mode == OffloadMode.CPU
 
-    def test_ic_lora_gguf_none_remains_none(self, test_state, tmp_path, fake_services):
+    def test_ic_lora_gguf_remains_none(self, test_state, tmp_path, fake_services):
         _activate_gguf_profile(test_state, tmp_path)
         test_state.pipelines.load_ic_lora(lora_paths=[], depth_model_path=None)
-        assert fake_services.ic_lora_pipeline.last_streaming_prefetch_count is None
+        assert fake_services.ic_lora_pipeline.last_offload_mode == OffloadMode.NONE
 
-    def test_ic_lora_official_none_remains_none(self, test_state, tmp_path, fake_services):
+    def test_ic_lora_official_remains_none(self, test_state, tmp_path, fake_services):
         _activate_official_profile(test_state, tmp_path)
         test_state.pipelines.load_ic_lora(lora_paths=[], depth_model_path=None)
-        assert fake_services.ic_lora_pipeline.last_streaming_prefetch_count is None
+        assert fake_services.ic_lora_pipeline.last_offload_mode == OffloadMode.NONE
 
     # --- A2V pipeline guard ---
 
-    def test_a2v_split_none_uses_two(self, test_state, tmp_path, fake_services):
+    def test_a2v_split_none_uses_cpu(self, test_state, tmp_path, fake_services):
         _activate_split_profile(test_state, tmp_path)
         test_state.pipelines.load_a2v_pipeline()
-        assert fake_services.a2v_pipeline.last_streaming_prefetch_count == 2
+        assert fake_services.a2v_pipeline.last_offload_mode == OffloadMode.CPU
 
-    def test_a2v_split_explicit_one_preserved(self, test_state, tmp_path, fake_services):
+    def test_a2v_split_explicit_cpu_preserved(self, test_state, tmp_path, fake_services):
         _activate_split_profile(test_state, tmp_path)
         test_state.pipelines.load_a2v_pipeline()
         from tests.fakes.services import FakeA2VPipeline
@@ -334,20 +319,20 @@ class TestStreamingPrefetchCountGuard:
             gemma_root=None,
             upsampler_path="ups",
             device="cpu",
-            streaming_prefetch_count=1,
+            offload_mode=OffloadMode.CPU,
             components=fake_services.a2v_pipeline.last_components,
         )
-        assert fake_services.a2v_pipeline.last_streaming_prefetch_count == 1
+        assert fake_services.a2v_pipeline.last_offload_mode == OffloadMode.CPU
 
-    def test_a2v_gguf_none_remains_none(self, test_state, tmp_path, fake_services):
+    def test_a2v_gguf_remains_none(self, test_state, tmp_path, fake_services):
         _activate_gguf_profile(test_state, tmp_path)
         test_state.pipelines.load_a2v_pipeline()
-        assert fake_services.a2v_pipeline.last_streaming_prefetch_count is None
+        assert fake_services.a2v_pipeline.last_offload_mode == OffloadMode.NONE
 
-    def test_a2v_official_none_remains_none(self, test_state, tmp_path, fake_services):
+    def test_a2v_official_remains_none(self, test_state, tmp_path, fake_services):
         _activate_official_profile(test_state, tmp_path)
         test_state.pipelines.load_a2v_pipeline()
-        assert fake_services.a2v_pipeline.last_streaming_prefetch_count is None
+        assert fake_services.a2v_pipeline.last_offload_mode == OffloadMode.NONE
 
 
 def _activate_profile_with_upsampler(test_state, tmp_path: Path, upsampler_path: str):

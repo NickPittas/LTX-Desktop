@@ -22,6 +22,7 @@ from services.media_encoder.media_encoder import HdrProxyPolicy
 from services.services_utils import AudioOrNone, TilingConfigType, device_supports_fp8
 
 if TYPE_CHECKING:
+    from ltx_pipelines.utils.types import OffloadMode
     from services.media_encoder.media_encoder import MediaEncoder
     from services.color_management import ColorSpace
 
@@ -224,7 +225,7 @@ class LTXIcLoraPipeline:
         upsampler_path: str,
         lora_paths: list[str],
         device: torch.device,
-        streaming_prefetch_count: int | None,
+        offload_mode: OffloadMode,
         components: ResolvedLtxComponents | None = None,
         lora_strength: float = 1.0,
     ) -> "LTXIcLoraPipeline":
@@ -234,7 +235,7 @@ class LTXIcLoraPipeline:
             upsampler_path=upsampler_path,
             lora_paths=lora_paths,
             device=device,
-            streaming_prefetch_count=streaming_prefetch_count,
+            offload_mode=offload_mode,
             components=components,
             lora_strength=lora_strength,
         )
@@ -246,7 +247,7 @@ class LTXIcLoraPipeline:
         upsampler_path: str,
         lora_paths: list[str],
         device: torch.device,
-        streaming_prefetch_count: int | None,
+        offload_mode: OffloadMode,
         components: ResolvedLtxComponents | None = None,
         lora_strength: float = 1.0,
     ) -> None:
@@ -274,15 +275,17 @@ class LTXIcLoraPipeline:
 
             quantization = kijai_fp8_quantization_policy()
         else:
-            from ltx_core.quantization import QuantizationPolicy
+            from ltx_core.quantization.fp8_cast import build_policy
 
-            quantization = QuantizationPolicy.fp8_cast() if device_supports_fp8(device) else None
+            quantization = build_policy(checkpoint_path) if device_supports_fp8(device) else None  # type: ignore[arg-type]  # non-split branch → str checkpoint
 
         # ponytail: split safetensors 22B does not fit full residency on 32GB;
-        # stream 2 layers at a time unless explicit mode set.
-        if is_split and streaming_prefetch_count is None:
-            streaming_prefetch_count = 2
-        self._streaming_prefetch_count = streaming_prefetch_count
+        # stream from CPU unless an explicit non-NONE offload mode is set.
+        from ltx_pipelines.utils.types import OffloadMode
+
+        if is_split and offload_mode == OffloadMode.NONE:
+            offload_mode = OffloadMode.CPU
+        self._offload_mode = offload_mode
         # ponytail: one strength applies uniformly to all LoRAs in the stack;
         # split per-LoRA only if product needs it.
         lora_entries = [
@@ -296,6 +299,7 @@ class LTXIcLoraPipeline:
             loras=lora_entries,
             device=device,
             quantization=quantization,
+            offload_mode=self._offload_mode,
         )
 
         if is_gguf:
@@ -323,35 +327,6 @@ class LTXIcLoraPipeline:
                 video_vae_path=c.video_vae_path,
                 audio_vae_path=c.audio_vae_path,
             )
-
-    def _inpaint_streaming_prefetch_count(self, frames: int) -> int | None:
-        """Return streaming_prefetch_count for inpaint based on frame count.
-
-        If self._streaming_prefetch_count is explicitly set (not None), return it unchanged
-        (env override does not override explicit pipeline mode).
-
-        Otherwise, try LTX_INPAINT_STREAM_PREFETCH env var for long inpaint:
-        - unset/empty/invalid/<=0: default 2 for frames >=97, None for short frames.
-        - valid positive int >=1: use that value for frames >=97.
-        """
-        if self._streaming_prefetch_count is not None:
-            return self._streaming_prefetch_count
-
-        if frames >= 97:
-            import os
-
-            raw = os.environ.get("LTX_INPAINT_STREAM_PREFETCH", "")
-            if raw:
-                try:
-                    val = int(raw)
-                    if val >= 1:
-                        return val
-                except (ValueError, TypeError):
-                    pass
-            # ponytail: default 2 streams more layers than safest 1, better VRAM
-            # utilization but higher risk of OOM on small GPUs. Tune after measurement.
-            return 2
-        return None
 
     def _run_inference(
         self,
@@ -403,7 +378,6 @@ class LTXIcLoraPipeline:
             ],
             video_conditioning=video_conditioning,
             tiling_config=tiling_config,
-            streaming_prefetch_count=self._streaming_prefetch_count,
             conditioning_attention_mask=mask,
             conditioning_attention_strength=conditioning_strength,
         )
@@ -707,7 +681,6 @@ class LTXIcLoraPipeline:
 
         half_h, half_w = height // 2, width // 2
         num_frames_vae_padded = _vae_padded_frame_count(num_frames)
-        denoise_streaming_prefetch_count = self._inpaint_streaming_prefetch_count(num_frames_vae_padded)
         device = self.pipeline.device
         dtype = torch.bfloat16  # ponytail: matches ICLoraPipeline.dtype
 
@@ -725,7 +698,6 @@ class LTXIcLoraPipeline:
         (ctx_p,) = self.pipeline.prompt_encoder(
             [prompt],
             enhance_first_prompt=False,
-            streaming_prefetch_count=self._streaming_prefetch_count,
         )
         video_context, audio_context = ctx_p.video_encoding, ctx_p.audio_encoding
         assert video_context is not None and audio_context is not None
@@ -867,7 +839,6 @@ class LTXIcLoraPipeline:
             audio=ModalitySpec(
                 context=audio_context,
             ),
-            streaming_prefetch_count=denoise_streaming_prefetch_count,
         )
 
         # ------------------------------------------------------------------ #
@@ -991,7 +962,6 @@ class LTXIcLoraPipeline:
                 noise_scale=stage2_sigmas[0].item(),
                 initial_latent=audio_state_s1.latent,  # type: ignore[union-attr]
             ),
-            streaming_prefetch_count=denoise_streaming_prefetch_count,
         )
 
         # ------------------------------------------------------------------ #

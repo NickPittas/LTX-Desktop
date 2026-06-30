@@ -32,9 +32,10 @@ class DistilledA2VPipeline:
         distilled_checkpoint_path: str,
         gemma_root: str,
         spatial_upsampler_path: str,
+        device: torch.device,
         loras: LoraPathStrengthAndSDOps | None = None,
-        device: torch.device | None = None,
         quantization: Any | None = None,
+        offload_mode: Any = None,
     ) -> None:
         from ltx_pipelines.utils.blocks import (
             AudioConditioner,
@@ -44,16 +45,13 @@ class DistilledA2VPipeline:
             VideoDecoder,
             VideoUpsampler,
         )
-        from ltx_pipelines.utils.helpers import get_device
-
-        if device is None:
-            device = get_device()
 
         self.device = device
         self.dtype = torch.bfloat16
 
         self.prompt_encoder = PromptEncoder(
             distilled_checkpoint_path, gemma_root, self.dtype, device,
+            offload_mode=offload_mode,
         )
         self.image_conditioner = ImageConditioner(
             distilled_checkpoint_path, self.dtype, device,
@@ -67,6 +65,7 @@ class DistilledA2VPipeline:
             device,
             loras=tuple(loras) if loras else (),  # type: ignore[arg-type]
             quantization=quantization,
+            offload_mode=offload_mode,
         )
         self.upsampler = VideoUpsampler(
             distilled_checkpoint_path, spatial_upsampler_path, self.dtype, device,
@@ -89,7 +88,6 @@ class DistilledA2VPipeline:
         audio_start_time: float = 0.0,
         audio_max_duration: float | None = None,
         tiling_config: TilingConfigType | None = None,
-        streaming_prefetch_count: int | None = None,
     ) -> tuple[Iterator[torch.Tensor], AudioOrNone]:
         from ltx_core.components.noisers import GaussianNoiser
         from ltx_core.model.audio_vae import encode_audio as vae_encode_audio
@@ -114,7 +112,7 @@ class DistilledA2VPipeline:
         dtype = torch.bfloat16
 
         # Text encode (positive only).
-        (ctx_p,) = self.prompt_encoder([prompt], streaming_prefetch_count=streaming_prefetch_count)
+        (ctx_p,) = self.prompt_encoder([prompt])
         video_context = ctx_p.video_encoding
         audio_context = ctx_p.audio_encoding
         assert audio_context is not None, "A2V pipeline requires audio context from text encoder"
@@ -165,7 +163,6 @@ class DistilledA2VPipeline:
                 noise_scale=0.0,
                 initial_latent=encoded_audio_latent,
             ),
-            streaming_prefetch_count=streaming_prefetch_count,
         )
 
         # Upsample video 2x.
@@ -205,7 +202,6 @@ class DistilledA2VPipeline:
                 noise_scale=0.0,
                 initial_latent=encoded_audio_latent,
             ),
-            streaming_prefetch_count=streaming_prefetch_count,
         )
 
         # Decode video; return original audio (not VAE-decoded) for fidelity.

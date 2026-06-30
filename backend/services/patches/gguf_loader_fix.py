@@ -681,7 +681,6 @@ def _install_llama_cpp_prompt_encoder_call_patch() -> None:
         enhance_first_prompt: bool = False,
         enhance_prompt_image: str | None = None,
         enhance_prompt_seed: int = 42,
-        streaming_prefetch_count: int | None = None,
     ) -> list[object]:
         gguf_model_path = getattr(self, "_ltx_desktop_llama_cpp_model_path", None)
         if enhance_first_prompt and gguf_model_path is not None:
@@ -713,7 +712,6 @@ def _install_llama_cpp_prompt_encoder_call_patch() -> None:
                 enhance_first_prompt=False,
                 enhance_prompt_image=None,
                 enhance_prompt_seed=enhance_prompt_seed,
-                streaming_prefetch_count=streaming_prefetch_count,
             )
         return original_call(
             self,
@@ -721,7 +719,6 @@ def _install_llama_cpp_prompt_encoder_call_patch() -> None:
             enhance_first_prompt=enhance_first_prompt,
             enhance_prompt_image=enhance_prompt_image,
             enhance_prompt_seed=enhance_prompt_seed,
-            streaming_prefetch_count=streaming_prefetch_count,
         )
 
     patched_call._ltx_desktop_gguf_call_patch = True  # type: ignore[attr-defined]

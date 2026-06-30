@@ -33,6 +33,7 @@ from services.interfaces import (
     GpuCleaner,
     GpuInfo,
     HTTPClient,
+    HdrIcLoraPipeline,
     IcLoraPipeline,
     LTXAPIClient,
     MediaEncoder,
@@ -66,6 +67,7 @@ class AppHandler:
         fast_video_pipeline_class: type[FastVideoPipeline],
         image_generation_pipeline_class: type[ImageGenerationPipeline],
         ic_lora_pipeline_class: type[IcLoraPipeline],
+        hdr_ic_lora_pipeline_class: type[HdrIcLoraPipeline],
         depth_processor_pipeline_class: type[DepthProcessorPipeline],
         pose_processor_pipeline_class: type[PoseProcessorPipeline],
         a2v_pipeline_class: type[A2VPipeline],
@@ -87,6 +89,7 @@ class AppHandler:
         self.fast_video_pipeline_class = fast_video_pipeline_class
         self.image_generation_pipeline_class = image_generation_pipeline_class
         self.ic_lora_pipeline_class = ic_lora_pipeline_class
+        self.hdr_ic_lora_pipeline_class = hdr_ic_lora_pipeline_class
         self.depth_processor_pipeline_class = depth_processor_pipeline_class
         self.pose_processor_pipeline_class = pose_processor_pipeline_class
         self.a2v_pipeline_class = a2v_pipeline_class
@@ -159,6 +162,7 @@ class AppHandler:
             fast_video_pipeline_class=fast_video_pipeline_class,
             image_generation_pipeline_class=image_generation_pipeline_class,
             ic_lora_pipeline_class=ic_lora_pipeline_class,
+            hdr_ic_lora_pipeline_class=hdr_ic_lora_pipeline_class,
             depth_processor_pipeline_class=depth_processor_pipeline_class,
             pose_processor_pipeline_class=pose_processor_pipeline_class,
             a2v_pipeline_class=a2v_pipeline_class,
@@ -254,6 +258,7 @@ class ServiceBundle:
     fast_video_pipeline_class: type[FastVideoPipeline]
     image_generation_pipeline_class: type[ImageGenerationPipeline]
     ic_lora_pipeline_class: type[IcLoraPipeline]
+    hdr_ic_lora_pipeline_class: type[HdrIcLoraPipeline]
     depth_processor_pipeline_class: type[DepthProcessorPipeline]
     pose_processor_pipeline_class: type[PoseProcessorPipeline]
     a2v_pipeline_class: type[A2VPipeline]
@@ -271,6 +276,7 @@ def build_default_service_bundle(config: RuntimeConfig) -> ServiceBundle:
     from services.http_client.http_client_impl import HTTPClientImpl
     from services.a2v_pipeline.ltx_a2v_pipeline import LTXa2vPipeline
     from services.depth_processor_pipeline.midas_dpt_pipeline import MidasDPTPipeline
+    from services.hdr_ic_lora_pipeline.ltx_hdr_ic_lora_pipeline import LTXHdrIcLoraPipeline
     from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
     from services.image_generation_pipeline.zit_image_generation_pipeline import ZitImageGenerationPipeline
     from services.ltx_api_client.ltx_api_client_impl import LTXAPIClientImpl
@@ -303,6 +309,7 @@ def build_default_service_bundle(config: RuntimeConfig) -> ServiceBundle:
         fast_video_pipeline_class=LTXFastVideoPipeline,
         image_generation_pipeline_class=ZitImageGenerationPipeline,
         ic_lora_pipeline_class=LTXIcLoraPipeline,
+        hdr_ic_lora_pipeline_class=LTXHdrIcLoraPipeline,
         depth_processor_pipeline_class=MidasDPTPipeline,
         pose_processor_pipeline_class=DWPosePipeline,
         a2v_pipeline_class=LTXa2vPipeline,
@@ -334,6 +341,7 @@ def build_initial_state(
         fast_video_pipeline_class=bundle.fast_video_pipeline_class,
         image_generation_pipeline_class=bundle.image_generation_pipeline_class,
         ic_lora_pipeline_class=bundle.ic_lora_pipeline_class,
+        hdr_ic_lora_pipeline_class=bundle.hdr_ic_lora_pipeline_class,
         depth_processor_pipeline_class=bundle.depth_processor_pipeline_class,
         pose_processor_pipeline_class=bundle.pose_processor_pipeline_class,
         a2v_pipeline_class=bundle.a2v_pipeline_class,

@@ -65,6 +65,7 @@ def _build_schema() -> dict[str, object]:
             fast_video_pipeline_class=cast(Any, type(fake.fast_video_pipeline)),
             image_generation_pipeline_class=cast(Any, type(fake.image_generation_pipeline)),
             ic_lora_pipeline_class=cast(Any, type(fake.ic_lora_pipeline)),
+            hdr_ic_lora_pipeline_class=cast(Any, type(fake.hdr_ic_lora_pipeline)),
             depth_processor_pipeline_class=cast(Any, type(fake.depth_processor_pipeline)),
             pose_processor_pipeline_class=cast(Any, type(fake.pose_processor_pipeline)),
             a2v_pipeline_class=cast(Any, type(fake.a2v_pipeline)),

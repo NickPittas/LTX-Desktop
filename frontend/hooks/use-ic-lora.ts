@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from 'react'
 import { ApiClient, type ApiRequestBodyOf } from '../lib/api-client'
 import { logger } from '../lib/logger'
 import type { OutputFormat } from '../lib/output-formats'
+import type { ModelSelectionID } from '../lib/model-selection'
 
 export type IcLoraConditioningType = 'canny' | 'depth'
 
@@ -22,6 +23,7 @@ export interface IcLoraSubmitParams {
   numFrames?: number
   images?: { path: string; frame?: number; strength?: number }[]
   outputFormat?: OutputFormat
+  modelSelection?: ModelSelectionID | null
 }
 
 export interface IcLoraResult {
@@ -87,6 +89,9 @@ export function useIcLora() {
     if (params.numFrames !== undefined) body.num_frames = params.numFrames
     if (params.images && params.images.length > 0) {
       body.images = params.images
+    }
+    if (params.modelSelection !== undefined && params.modelSelection !== null) {
+      body.model_selection = params.modelSelection
     }
     const result = await ApiClient.generateIcLora(body as GenerateIcLoraBody)
     if (!result.ok) {

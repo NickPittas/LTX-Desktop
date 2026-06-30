@@ -9,6 +9,7 @@ from api_types import OutputFormat
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from ltx_pipelines.utils.types import OffloadMode
     from services.ltx_components import CheckpointPath, ResolvedLtxComponents
     from services.media_encoder.media_encoder import MediaEncoder
     from services.color_management import ColorSpace
@@ -24,7 +25,7 @@ class RetakePipeline(Protocol):
         checkpoint_path: CheckpointPath,
         gemma_root: str | None,
         device: "torch.device",
-        streaming_prefetch_count: int | None,
+        offload_mode: OffloadMode,
         components: ResolvedLtxComponents | None = None,
         *,
         loras: list["LoraPathStrengthAndSDOps"] | None = None,

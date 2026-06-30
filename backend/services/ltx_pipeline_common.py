@@ -212,7 +212,7 @@ class DistilledNativePipeline:
         device: torch.device | None = None,
         fp8transformer: bool = False,
     ) -> None:
-        from ltx_core.quantization import QuantizationPolicy
+        from ltx_core.quantization.fp8_cast import build_policy
         from ltx_pipelines.utils.blocks import (
             AudioDecoder,
             DiffusionStage,
@@ -238,7 +238,7 @@ class DistilledNativePipeline:
             checkpoint_path,
             self.dtype,
             device,
-            quantization=QuantizationPolicy.fp8_cast() if fp8transformer and device_supports_fp8(device) else None,
+            quantization=build_policy(checkpoint_path) if fp8transformer and device_supports_fp8(device) else None,
         )
         self.video_decoder = VideoDecoder(checkpoint_path, self.dtype, device)
         self.audio_decoder = AudioDecoder(checkpoint_path, self.dtype, device)

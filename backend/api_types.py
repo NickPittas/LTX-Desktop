@@ -727,6 +727,7 @@ ModelSelectionWorkflow: TypeAlias = Literal[
     "image-to-video",
     "audio-to-video",
     "ic-lora",
+    "hdr-ic-lora",
     "retake",
 ]
 
@@ -974,6 +975,11 @@ class IcLoraGenerateRequest(BaseModel):
     negative_prompt: str = ""
     images: list[IcLoraImageInput] = Field(default_factory=_default_ic_lora_images)
     adapter_id: AdapterID | None = None
+    # Live model selection for HDR IC-LoRA only (plan §"Product/API contract").
+    # Non-HDR IC-LoRA workflows reject any non-null value with HTTP 400 so the
+    # generic IC-LoRA behavior does not silently change. ``None`` preserves the
+    # legacy active-profile/downloaded-model routing.
+    model_selection: ModelSelectionID | None = None
     mask_path: str | None = None
     mask_grow_px: int = Field(default=30, ge=0, le=128, description="Mask dilation radius in pixels. Controls LTXVDilateVideoMask radii. 0=no dilation, default=30 matches official full-res (stage2) radius")
     laplacian_blend_grow: int = Field(default=12, ge=0, le=64, description="Controls Laplacian pyramid blend mask_low_res_dilation for inpaint. Larger values expand blend region at low-res level. Separate from mask_grow_px (dilation radii) and final_mask_blur_px (raw mask feather).")

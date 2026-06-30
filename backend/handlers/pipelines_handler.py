@@ -20,7 +20,7 @@ from runtime_config.model_download_specs import (
     get_ltx_model_spec,
     resolve_model_path,
 )
-from runtime_config.runtime_policy import streaming_prefetch_count_for_mode
+from runtime_config.runtime_policy import offload_mode_value_for_mode
 from services.base_video_model_registry import (
     BaseVideoModelRegistryEntry,
     resolve_base_video_model_selection,
@@ -35,6 +35,7 @@ from services.interfaces import (
     A2VPipeline,
     DepthProcessorPipeline,
     FastVideoPipeline,
+    HdrIcLoraPipeline,
     ImageGenerationPipeline,
     GpuCleaner,
     IcLoraPipeline,
@@ -50,6 +51,7 @@ from state.app_state_types import (
     GpuGeneration,
     GenerationRunning,
     GpuSlot,
+    HdrICLoraState,
     ICLoraState,
     RetakePipelineState,
     VideoPipelineState,
@@ -71,6 +73,7 @@ class PipelinesHandler(StateHandlerBase):
         fast_video_pipeline_class: type[FastVideoPipeline],
         image_generation_pipeline_class: type[ImageGenerationPipeline],
         ic_lora_pipeline_class: type[IcLoraPipeline],
+        hdr_ic_lora_pipeline_class: type[HdrIcLoraPipeline],
         depth_processor_pipeline_class: type[DepthProcessorPipeline],
         pose_processor_pipeline_class: type[PoseProcessorPipeline],
         a2v_pipeline_class: type[A2VPipeline],
@@ -83,6 +86,7 @@ class PipelinesHandler(StateHandlerBase):
         self._fast_video_pipeline_class = fast_video_pipeline_class
         self._image_generation_pipeline_class = image_generation_pipeline_class
         self._ic_lora_pipeline_class = ic_lora_pipeline_class
+        self._hdr_ic_lora_pipeline_class = hdr_ic_lora_pipeline_class
         self._depth_processor_pipeline_class = depth_processor_pipeline_class
         self._pose_processor_pipeline_class = pose_processor_pipeline_class
         self._a2v_pipeline_class = a2v_pipeline_class
@@ -393,6 +397,17 @@ class PipelinesHandler(StateHandlerBase):
             (model_id,),
         )
 
+    def _local_offload_mode(self):
+        """Resolve the upstream ``OffloadMode`` for the active local generation mode.
+
+        Maps the runtime policy to the upstream offload enum (``NONE`` for full
+        residency, ``CPU`` for streaming; never ``DISK``). The policy function
+        raises for ``unsupported`` — callers must not build a local pipeline then.
+        """
+        from ltx_pipelines.utils.types import OffloadMode
+
+        return OffloadMode(offload_mode_value_for_mode(self.config.local_generations_mode))
+
     def _create_video_pipeline(
         self,
         model_type: VideoPipelineModelType,
@@ -461,7 +476,7 @@ class PipelinesHandler(StateHandlerBase):
             gemma_root,
             upsampler_path,
             self.config.device,
-            streaming_prefetch_count_for_mode(self.config.local_generations_mode),
+            self._local_offload_mode(),
             components=components,
             transformer_format=transformer_format,
             distilled_lora_path=distilled_lora_path,
@@ -588,10 +603,183 @@ class PipelinesHandler(StateHandlerBase):
         if state is None:
             self._evict_gpu_pipeline_for_swap()
             state = self._create_video_pipeline(model_type, model_selection)
-            with self._lock:
-                self.state.gpu_slot = GpuSlot(active_pipeline=state)
-                self._assert_invariants()
+        with self._lock:
+            self.state.gpu_slot = GpuSlot(active_pipeline=state)
+            self._assert_invariants()
+        return state
 
+    # ------------------------------------------------------------------
+    # HDR IC-LoRA (dedicated two-stage video/sequence-input workflow)
+    # ------------------------------------------------------------------
+
+    def _hdr_cache_key(
+        self,
+        components: ResolvedLtxComponents | None,
+        model_selection: ModelSelectionID | None,
+        hdr_lora_path: str,
+        scene_embeddings_path: str,
+        effective_distilled_lora_path: str | None,
+    ) -> tuple[str, ...]:
+        """Cache key for the HDR IC-LoRA pipeline state.
+
+        Includes the active component cache key (which already keys on
+        selection/profile/transformer path/format/base family), the literal
+        ``"hdr_ic_lora_official_v1"`` discriminator (official-parity rebuild
+        generation tag), the model selection id (or empty), the HDR LoRA
+        path, the scene-embeddings path (so changing scene embeddings
+        invalidates the cache), and the effective distilled LoRA path (or
+        empty) so toggling any of these invalidates the cache.
+        """
+        if components is None:
+            component_key: tuple[str, ...] = ()
+        else:
+            component_key = components.cache_key
+        return (
+            *component_key,
+            "hdr_ic_lora_official_v1",
+            model_selection or "",
+            hdr_lora_path,
+            scene_embeddings_path,
+            effective_distilled_lora_path or "",
+        )
+
+    def load_hdr_ic_lora(
+        self,
+        model_selection: ModelSelectionID | None,
+        hdr_lora_path: str,
+        scene_embeddings_path: str,
+    ) -> HdrICLoraState:
+        """Load (or cache-hit) the dedicated HDR IC-LoRA two-stage pipeline.
+
+        Phase 3 initial HDR support is restricted to the **official distilled
+        safetensors** base checkpoint (single, non-split). It reuses the same
+        component/checkpoint/upsampler resolution helpers as the fast pipeline
+        load path and surfaces actionable error codes:
+
+        - ``UNSUPPORTED_MODEL_BASE_FAMILY`` (409) when the base family is not
+          ``distilled`` (dev/full/unknown are rejected).
+        - ``UNSUPPORTED_MODEL_FORMAT`` (409) for GGUF/non-safetensors or
+          split/tuple checkpoint paths.
+        - ``UPSCALER_REQUIRED`` (409) when no usable spatial upscaler exists.
+
+        ``scene_embeddings_path`` is forwarded into the pipeline ``create()``
+        and included in the cache key. Cache hit returns the existing
+        ``HdrICLoraState`` when the computed cache key matches.
+        """
+        self._install_text_patches_if_needed()
+
+        components = self._resolve_active_components(model_selection)
+
+        # Validate base family before any heavy work. Phase 3 initial HDR
+        # support is restricted to the official distilled base; reject dev/
+        # full/unknown families with an explicit, user-readable reason and
+        # never silently fall back.
+        base_family = components.base_family if components is not None else "distilled"
+        if base_family != "distilled":
+            raise HTTPError(
+                409,
+                (
+                    "HDR IC-LoRA initial support requires the official distilled "
+                    "LTX-2.3 safetensors base checkpoint. The active model's base "
+                    f"family is {base_family!r}, which is not supported for HDR. "
+                    "Select the official distilled base model."
+                ),
+                code="UNSUPPORTED_MODEL_BASE_FAMILY",
+            )
+
+        # Distilled-only HDR: no distilled-LoRA stacking (dev-only) applies.
+        effective_distilled_lora_path: str | None = None
+
+        cache_key = self._hdr_cache_key(
+            components,
+            model_selection,
+            hdr_lora_path,
+            scene_embeddings_path,
+            effective_distilled_lora_path,
+        )
+
+        with self._lock:
+            match self.state.gpu_slot:
+                case GpuSlot(active_pipeline=HdrICLoraState(cache_key=cached_key) as state) if cached_key == cache_key:
+                    return state
+                case _:
+                    pass
+
+        # Upsampler is required for the HDR two-stage spatial upsample step.
+        # ``_resolve_profile_upsampler_path`` short-circuits to "" when there is
+        # no active profile (components is None); fall back to the canonical
+        # models-dir upscaler so the no-profile downloaded-bundle path (which
+        # ``create_fake_model_files`` installs) works for HDR too. Mirror the
+        # fast-pipeline UPSCALER_REQUIRED guard so the error is actionable and
+        # surfaces before any GPU work.
+        upsampler_path = self._resolve_profile_upsampler_path()
+        if not upsampler_path:
+            canonical = resolve_model_path(self.models_dir, UPSAMPLER_CP_ID)
+            if canonical.exists():
+                upsampler_path = str(canonical)
+        if not upsampler_path:
+            canonical = resolve_model_path(self.models_dir, UPSAMPLER_CP_ID)
+            raise HTTPError(
+                409,
+                (
+                    "Spatial upscaler is required for HDR IC-LoRA generation but was not found. "
+                    "The active profile's upsampler path is missing or stale, and no canonical "
+                    f"upscaler is installed at {canonical}. "
+                    "Install 'ltx-2.3-spatial-upscaler-x2-1.0' or update the profile's upsampler path."
+                ),
+                code="UPSCALER_REQUIRED",
+            )
+
+        # Resolve checkpoint paths (threads model_selection) and derive the
+        # transformer format for the HDR loader path. checkpoint_path_arg
+        # returns either a single path or a tuple for split builds.
+        checkpoint_path, gemma_root, _upsampler, _resolved_cache_key = self._resolve_checkpoint_paths(model_selection)
+        transformer_format = components.transformer_format if components is not None else "safetensors"
+        resolved_checkpoint = checkpoint_path_arg(components) if components is not None else checkpoint_path
+
+        # Phase 3 initial HDR gating: official distilled safetensors, single
+        # (non-split) checkpoint only. Reject GGUF / non-safetensors and
+        # split/tuple checkpoint paths with an explicit reason; never fall back.
+        if transformer_format != "safetensors":
+            raise HTTPError(
+                409,
+                (
+                    "HDR IC-LoRA initial support requires the official distilled "
+                    f"safetensors base checkpoint; transformer_format={transformer_format!r} "
+                    "(e.g. GGUF) is not supported for HDR."
+                ),
+                code="UNSUPPORTED_MODEL_FORMAT",
+            )
+        if isinstance(resolved_checkpoint, tuple):
+            raise HTTPError(
+                409,
+                (
+                    "HDR IC-LoRA initial support requires a single (non-split) "
+                    "official distilled safetensors checkpoint; a split/tuple "
+                    "checkpoint path is not supported for HDR."
+                ),
+                code="UNSUPPORTED_MODEL_FORMAT",
+            )
+
+        self._evict_gpu_pipeline_for_swap()
+
+        pipeline = self._hdr_ic_lora_pipeline_class.create(
+            checkpoint_path=resolved_checkpoint,
+            upsampler_path=upsampler_path,
+            hdr_lora_path=hdr_lora_path,
+            scene_embeddings_path=scene_embeddings_path,
+            device=self.config.device,
+            components=components,
+            transformer_format=transformer_format,
+            base_family=base_family,
+            distilled_lora_path=effective_distilled_lora_path,
+            gemma_root=gemma_root,
+        )
+        state = HdrICLoraState(pipeline=pipeline, cache_key=cache_key)
+
+        with self._lock:
+            self.state.gpu_slot = GpuSlot(active_pipeline=state)
+            self._assert_invariants()
         return state
 
     def load_ic_lora(
@@ -632,7 +820,7 @@ class PipelinesHandler(StateHandlerBase):
             upsampler_path,
             lora_paths,
             self.config.device,
-            streaming_prefetch_count_for_mode(self.config.local_generations_mode),
+            self._local_offload_mode(),
             components=components,
             lora_strength=lora_strength,
         )
@@ -672,7 +860,7 @@ class PipelinesHandler(StateHandlerBase):
             gemma_root,
             upsampler_path,
             self.config.device,
-            streaming_prefetch_count_for_mode(self.config.local_generations_mode),
+            self._local_offload_mode(),
             components=components,
         )
         state = A2VPipelineState(pipeline=pipeline)
@@ -698,16 +886,25 @@ class PipelinesHandler(StateHandlerBase):
 
         self._evict_gpu_pipeline_for_swap()
 
-        from ltx_core.quantization import QuantizationPolicy
-
-        quantization = QuantizationPolicy.fp8_cast() if quantized else None
         checkpoint_path, gemma_root, _upsampler_path, _cache_key = self._resolve_checkpoint_paths()
+        # build_policy needs a single checkpoint path; split-safetensors
+        # checkpoints arrive as a tuple of shards — read from the first shard
+        # (for non-prequant checkpoints this is equivalent to the old path-less
+        # fp8_cast(), and the retake pipeline overrides split+fp8 with its own
+        # kijai guard regardless). Net gating is unchanged.
+        if quantized:
+            from ltx_core.quantization.fp8_cast import build_policy
+
+            cp = checkpoint_path[0] if isinstance(checkpoint_path, tuple) else checkpoint_path
+            quantization = build_policy(cp)
+        else:
+            quantization = None
         components = self._resolve_active_components()
         pipeline = self._retake_pipeline_class.create(
             checkpoint_path=checkpoint_path,
             gemma_root=gemma_root,
             device=self.config.device,
-            streaming_prefetch_count=streaming_prefetch_count_for_mode(self.config.local_generations_mode),
+            offload_mode=self._local_offload_mode(),
             components=components,
             loras=[],
             quantization=quantization,
