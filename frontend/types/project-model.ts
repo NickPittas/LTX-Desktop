@@ -80,6 +80,7 @@ export const assetTakeSchema = z.object({
   width: z.number().optional(),
   height: z.number().optional(),
   createdAt: z.number(),
+  generationElapsedSeconds: z.number().optional(),
 })
 
 export const subtitleStyleSchema = z.object({
@@ -280,6 +281,7 @@ export const assetSchema = z.object({
   takes: z.array(assetTakeSchema).optional(),
   activeTakeIndex: z.number().optional(),
   colorLabel: z.string().optional(),
+  generationElapsedSeconds: z.number().optional(),
 })
 
 export const timelineClipSchema = z.object({

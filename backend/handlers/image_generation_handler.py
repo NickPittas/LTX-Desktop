@@ -130,7 +130,7 @@ class ImageGenerationHandler(StateHandlerBase):
                 seed=seed + i,
             )
 
-            output_path = self.config.outputs_dir / f"zit_image_{timestamp}_{uuid.uuid4().hex[:8]}.png"
+            output_path = self.outputs_dir / f"zit_image_{timestamp}_{uuid.uuid4().hex[:8]}.png"
             result.images[0].save(str(output_path))
             outputs.append(str(output_path))
 
@@ -183,7 +183,7 @@ class ImageGenerationHandler(StateHandlerBase):
                 download_progress = 75 + int(((idx + 1) / num_images) * 20)
                 self._generation.update_progress("downloading_output", download_progress, None, None)
 
-                output_path = self.config.outputs_dir / f"zit_api_image_{timestamp}_{uuid.uuid4().hex[:8]}.png"
+                output_path = self.outputs_dir / f"zit_api_image_{timestamp}_{uuid.uuid4().hex[:8]}.png"
                 output_path.write_bytes(image_bytes)
                 output_paths.append(output_path)
 

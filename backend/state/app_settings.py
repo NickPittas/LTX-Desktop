@@ -58,6 +58,7 @@ class AppSettings(SettingsBaseModel):
     seed_locked: bool = False
     locked_seed: int = 42
     models_dir: str = ""
+    project_assets_dir: str = ""
     adapter_paths: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("prompt_cache_size", mode="before")
@@ -128,6 +129,7 @@ class SettingsResponse(SettingsBaseModel):
     seed_locked: bool = False
     locked_seed: int = 42
     models_dir: str = ""
+    project_assets_dir: str = ""
 
 
 def to_settings_response(settings: AppSettings) -> SettingsResponse:

@@ -32,8 +32,14 @@ Handlers in this folder:
 
 **Lock-aware base (`base.py`).** `StateHandlerBase.__init__(state, lock, config)`
 stores the shared `AppState`, `RLock`, and `RuntimeConfig`. Exposes `state`,
-`lock`, `config` properties and a derived `models_dir` property
-(`state.app_settings.models_dir` if set, else `config.default_models_dir`).
+`lock`, `config` properties and two derived path properties: `models_dir`
+(`state.app_settings.models_dir` if set, else `config.default_models_dir`) and
+`outputs_dir` (when `state.app_settings.project_assets_dir` is set, returns
+`<projectAssetsDir>/.ltx-generations` — created on demand — so all backend
+generation outputs/intermediates land under the user-chosen assets folder with
+no app-data output collision; unset → `config.outputs_dir`). All handlers use
+`self.outputs_dir` (not `self.config.outputs_dir`) for output/temp path
+construction.
 `with_state_lock` is a generic decorator (`ParamSpec`/`TypeVar` bound to
 `StateHandlerBase`) that wraps a method in `with self.lock:`.
 

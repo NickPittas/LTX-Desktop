@@ -22,6 +22,10 @@ interface GenerationState {
   ramTotalMb: number | null
   gpuUtilPct: number | null
   cpuUtilPct: number | null
+  // Preserved final wall-clock generation time (seconds) for the last completed
+  // video generation; not reset to null at completion. Read by callers to stamp
+  // generated assets. null until a video generation completes.
+  generationElapsedSeconds: number | null
 }
 
 type GenerateVideoRequest = ApiRequestBodyOf<'generateVideo'>
@@ -75,10 +79,11 @@ const NULL_METRICS = {
   ramTotalMb: null as number | null,
   gpuUtilPct: null as number | null,
   cpuUtilPct: null as number | null,
+  generationElapsedSeconds: null as number | null,
 }
 
 // Map phase to user-friendly message
-function getPhaseMessage(phase: string): string {
+export function getPhaseMessage(phase: string): string {
   switch (phase) {
     case 'validating_request':
       return 'Validating request...'
@@ -148,6 +153,7 @@ export function useGeneration(): UseGenerationReturn {
     abortControllerRef.current = new AbortController()
     let progressInterval: ReturnType<typeof setInterval> | null = null
     let shouldApplyPollingUpdates = true
+    const startWall = Date.now()
 
     try {
       // Prepare JSON body
@@ -178,6 +184,7 @@ export function useGeneration(): UseGenerationReturn {
       // Poll for real progress from backend with time-based interpolation
       let lastPhase = ''
       let inferenceStartTime = 0
+      let latestElapsed: number | null = null
       // Estimated inference time in seconds based on model
       const estimatedInferenceTime = settings.model === 'pro' ? 120 : 45
       
@@ -209,6 +216,7 @@ export function useGeneration(): UseGenerationReturn {
         }
 
         lastPhase = data.phase
+        if (data.elapsedSeconds != null) latestElapsed = data.elapsedSeconds
 
         setState(prev => ({
           ...prev,
@@ -243,6 +251,10 @@ export function useGeneration(): UseGenerationReturn {
 
       const payload = result.data
       if (payload.status === 'complete') {
+        // Preserve final wall-clock generation time (prefer latest polled
+        // elapsedSeconds when available); not reset to null so callers can stamp
+        // generated assets. Other live metrics stay null (no longer relevant).
+        const finalElapsed = Math.max(latestElapsed ?? 0, (Date.now() - startWall) / 1000)
         setState({
           isGenerating: false,
           progress: 100,
@@ -253,6 +265,7 @@ export function useGeneration(): UseGenerationReturn {
           imagePaths: [],
           error: null,
       ...NULL_METRICS,
+          generationElapsedSeconds: finalElapsed,
         })
       } else if (payload.status === 'cancelled') {
         setState(prev => ({

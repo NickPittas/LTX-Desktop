@@ -334,6 +334,46 @@ def _remove_old_handles(model: "torch.nn.Module") -> None:
             )
 
 
+def _move_lora_attr(mod: "torch.nn.Module", device: "torch.device") -> None:
+    """Move any tensors in a module's ``lora_pairs`` attribute to ``device``.
+
+    Runtime LoRA pairs on GgufLinear/KijaiFp8ScaledLinear are plain attributes
+    (not registered params/buffers), so the group param/buffer move does not
+    touch them. Move them with the group so they track the group device under
+    blockswap residency/eviction instead of getting stranded on a stale device.
+    Expected shape: an iterable of ``(lora_A, lora_B, strength)`` tuples (A/B
+    tensors, strength numeric); tensor entries are moved, non-tensor entries and
+    the tuple/list container shape are preserved. No-op for modules without
+    ``lora_pairs``; never raises on an unexpected shape.
+    """
+    pairs = getattr(mod, "lora_pairs", None)
+    if pairs is None:
+        return
+    try:
+        import torch  # noqa: PLC0415
+    except Exception:
+        return
+
+    def _move(obj: Any) -> Any:
+        if isinstance(obj, torch.Tensor):
+            return obj.to(device)
+        if isinstance(obj, list):
+            elems = cast("list[object]", obj)
+            return [_move(x) for x in elems]
+        if isinstance(obj, tuple):
+            elems = cast("tuple[object, ...]", obj)
+            return tuple(_move(x) for x in elems)
+        return obj
+
+    try:
+        moved = _move(pairs)
+    except Exception:
+        logger.debug("block_offload: lora_pairs move skipped (unexpected shape)", exc_info=True)
+        return
+    if moved is not pairs:
+        setattr(mod, "lora_pairs", moved)
+
+
 def apply_block_offload(
     model: "torch.nn.Module", config: BlockOffloadConfig
 ) -> BlockOffloadResult:
@@ -403,6 +443,9 @@ def apply_block_offload(
                 param.data = param.data.to(device)
             for buf in mod.buffers(recurse=True):
                 buf.data = buf.data.to(device)
+            # Runtime LoRA pairs are plain attributes (not params/buffers); move
+            # them with the group so they track the group device under blockswap.
+            _move_lora_attr(mod, device)
 
     # One-shot trace proof that hooks actually fire: the first pre/post hook
     # invocation records a single event, then the flag suppresses the rest so a
@@ -621,6 +664,8 @@ def release_block_offload_residency(model: "torch.nn.Module") -> bool:
                 param.data = param.data.to(offload)
             for buf in mod.buffers(recurse=True):
                 buf.data = buf.data.to(offload)
+            # Drop runtime LoRA pairs back to CPU with the block tensors.
+            _move_lora_attr(mod, offload)
         moved = len(blocks)
     except Exception:
         logger.warning("block_offload: release_residency block move failed", exc_info=True)

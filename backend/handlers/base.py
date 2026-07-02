@@ -44,6 +44,23 @@ class StateHandlerBase:
         custom = self._state.app_settings.models_dir
         return Path(custom) if custom else self._config.default_models_dir
 
+    @property
+    def outputs_dir(self) -> Path:
+        """Effective generation outputs dir.
+
+        When ``projectAssetsDir`` is set, backend-generated files (EXR/MP4/ProRes/
+        image/control temp) are written under a hidden subfolder
+        ``<projectAssetsDir>/.ltx-generations`` so the Electron/project copy step
+        can organize final assets into per-project folders without source/dest
+        collision. Unset -> the startup ``RuntimeConfig.outputs_dir`` fallback.
+        """
+        custom = self._state.app_settings.project_assets_dir
+        if custom:
+            out = Path(custom).expanduser().resolve() / ".ltx-generations"
+            out.mkdir(parents=True, exist_ok=True)
+            return out
+        return self._config.outputs_dir
+
 
 def with_state_lock(
     method: Callable[Concatenate[_S, _P], _R],

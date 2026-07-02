@@ -393,6 +393,17 @@
             ],
             "title": "Modelsdir"
           },
+          "projectAssetsDir": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Projectassetsdir"
+          },
           "promptCacheSize": {
             "anyOf": [
               {
@@ -3517,6 +3528,11 @@
           "modelsDir": {
             "default": "",
             "title": "Modelsdir",
+            "type": "string"
+          },
+          "projectAssetsDir": {
+            "default": "",
+            "title": "Projectassetsdir",
             "type": "string"
           },
           "promptCacheSize": {

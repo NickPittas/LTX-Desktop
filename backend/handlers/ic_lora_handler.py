@@ -380,7 +380,7 @@ class IcLoraHandler(StateHandlerBase):
 
             output_format = req.output_format or OutputFormat.MP4
             output_path = make_primary_output_path(
-                str(self.config.outputs_dir), "ic_lora", output_format, uuid.uuid4().hex[:8]
+                str(self.outputs_dir), "ic_lora", output_format, uuid.uuid4().hex[:8]
             )
             proxy_path = make_proxy_output_path(output_path, output_format)
 
@@ -565,7 +565,7 @@ class IcLoraHandler(StateHandlerBase):
             # Force EXR for HDR primary output (linear scene-referred).
             output_format = OutputFormat.EXR_ZIP_HALF
             output_path = make_primary_output_path(
-                str(self.config.outputs_dir), "hdr", output_format, uuid.uuid4().hex[:8]
+                str(self.outputs_dir), "hdr", output_format, uuid.uuid4().hex[:8]
             )
             # For EXR primaries, make_proxy_output_path returns
             # ``<stem>_exr_proxy.mp4``. The dedicated HDR pipeline threads
@@ -793,7 +793,7 @@ class IcLoraHandler(StateHandlerBase):
                     t_preprocess_start = time.perf_counter()
 
                     control_video_path = str(
-                        self.config.outputs_dir
+                        self.outputs_dir
                         / f"_control_{req.conditioning_type}_{uuid.uuid4().hex[:8]}.mp4"
                     )
                     writer = self._video_processor.create_writer(
@@ -887,7 +887,7 @@ class IcLoraHandler(StateHandlerBase):
             else:
                 input_colorspace = None
             output_path = make_primary_output_path(
-                str(self.config.outputs_dir), "ic_lora", output_format, uuid.uuid4().hex[:8]
+                str(self.outputs_dir), "ic_lora", output_format, uuid.uuid4().hex[:8]
             )
             proxy_path = make_proxy_output_path(output_path, output_format)
 

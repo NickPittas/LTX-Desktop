@@ -303,7 +303,7 @@ class VideoGenerationHandler(StateHandlerBase):
             images = [ImageConditioningInput(path=temp_image_path, frame_idx=0, strength=1.0)]
 
         output_path = make_primary_output_path(
-            str(self.config.outputs_dir), "ltx2_video", output_format, self._make_generation_id()
+            str(self.outputs_dir), "ltx2_video", output_format, self._make_generation_id()
         )
         proxy_path = make_proxy_output_path(output_path, output_format)
 
@@ -405,7 +405,7 @@ class VideoGenerationHandler(StateHandlerBase):
                 images = [ImageConditioningInput(path=temp_image_path, frame_idx=0, strength=1.0)]
 
             output_path = make_primary_output_path(
-                str(self.config.outputs_dir), "ltx2_video", req.output_format or OutputFormat.MP4, self._make_generation_id()
+                str(self.outputs_dir), "ltx2_video", req.output_format or OutputFormat.MP4, self._make_generation_id()
             )
             proxy_path = make_proxy_output_path(output_path, req.output_format or OutputFormat.MP4)
 
@@ -507,7 +507,7 @@ class VideoGenerationHandler(StateHandlerBase):
 
     def _make_output_path(self) -> Path:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return self.config.outputs_dir / f"ltx2_video_{timestamp}_{self._make_generation_id()}.mp4"
+        return self.outputs_dir / f"ltx2_video_{timestamp}_{self._make_generation_id()}.mp4"
 
     def _generate_forced_api(self, req: GenerateVideoRequest) -> GenerateVideoResponse:
         # Honest-workflow gate (§0A.D): API mode cannot produce ProRes/EXR — there

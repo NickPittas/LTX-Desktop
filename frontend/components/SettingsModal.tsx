@@ -184,7 +184,12 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
       .then((state: { analyticsEnabled: boolean }) => setAnalyticsEnabled(state.analyticsEnabled))
       .catch(() => {})
     window.electronAPI.getProjectAssetsPath()
-      .then((p: string) => setProjectAssetsPath(p))
+      .then((p: string) => {
+        setProjectAssetsPath(p)
+        if (settings.projectAssetsDir !== p) {
+          updateSettings({ projectAssetsDir: p })
+        }
+      })
       .catch(() => {})
   }, [isOpen])
 
@@ -463,6 +468,7 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                       const result = await window.electronAPI.openProjectAssetsPathChangeDialog()
                       if (result.success) {
                         setProjectAssetsPath(result.path)
+                        updateSettings({ projectAssetsDir: result.path })
                       }
                     }}
                   >

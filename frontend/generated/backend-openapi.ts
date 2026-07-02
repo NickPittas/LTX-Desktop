@@ -727,6 +727,8 @@ export interface components {
             ltxApiKey?: string | null;
             /** Modelsdir */
             modelsDir?: string | null;
+            /** Projectassetsdir */
+            projectAssetsDir?: string | null;
             /** Promptcachesize */
             promptCacheSize?: number | null;
             /** Promptenhancerenabledi2V */
@@ -1835,6 +1837,11 @@ export interface components {
              * @default
              */
             modelsDir: string;
+            /**
+             * Projectassetsdir
+             * @default
+             */
+            projectAssetsDir: string;
             /**
              * Promptcachesize
              * @default 100

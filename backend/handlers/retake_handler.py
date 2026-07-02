@@ -136,7 +136,7 @@ class RetakeHandler(StateHandlerBase):
             raise HTTPError(exc.status_code, exc.detail) from exc
 
         if result.video_bytes is not None:
-            output = self.config.outputs_dir / f"retake_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.mp4"
+            output = self.outputs_dir / f"retake_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.mp4"
             with open(output, "wb") as out:
                 out.write(result.video_bytes)
             return RetakeVideoResponse(status="complete", video_path=str(output))
@@ -177,7 +177,7 @@ class RetakeHandler(StateHandlerBase):
         generation_id = uuid.uuid4().hex[:8]
         seed = self._resolve_seed()
         output_path = make_primary_output_path(
-            str(self.config.outputs_dir), "retake", output_format, generation_id
+            str(self.outputs_dir), "retake", output_format, generation_id
         )
         proxy_path = make_proxy_output_path(output_path, output_format)
         # CM-2: detect source CS for sequence/EXR inputs (output-CS preservation).

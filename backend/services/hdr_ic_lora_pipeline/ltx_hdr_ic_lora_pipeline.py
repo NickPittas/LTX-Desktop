@@ -49,8 +49,10 @@ from ltx_core.quantization import QuantizationPolicy
 from ltx_core.tools import VideoLatentPatchifier, VideoLatentTools
 from ltx_core.types import LatentState
 from ltx_pipelines.hdr_ic_lora import (
+    ALIGNMENT_DIVISOR,
     HDRICLoraPipeline,
     HdrLoraConfig,
+    MIN_RESOLUTION,
     TileCountConfig,
     read_hdr_lora_config,
 )
@@ -60,9 +62,12 @@ from ltx_pipelines.utils.blocks import (
     VideoDecoder,
     VideoUpsampler,
 )
+from ltx_pipelines.utils.constants import DISTILLED_SIGMA_VALUES
 from ltx_pipelines.utils.denoisers import SimpleDenoiser
 from ltx_pipelines.utils.helpers import modality_from_latent_state
 from ltx_pipelines.utils.media_io import (
+    ResizeMode,
+    align_resolution,
     decode_video_by_frame,
     encode_exr_sequence_to_mp4,
     resize_and_reflect_pad,
@@ -270,9 +275,10 @@ def _hdr_decode_tiling_config() -> tuple[TilingConfig, int, int]:
 
 # ── HDR temporal ContextWindows (harness/debug knob, NOT production UI policy) ──
 #
-# ComfyUI-style temporal context windows inside the denoising loop. Env-gated;
-# fully off (current single-shot behavior) when ``LTX_HDR_CONTEXT_WINDOW`` is
-# unset/0. NOT LoopingSampler/full-pipeline chunking: the pipeline runs once,
+# ComfyUI-style temporal context windows inside the denoising loop. On by
+# default for one-stage HDR (VRAM-based defaults below); set
+# ``LTX_HDR_CONTEXT_WINDOW=0`` to disable. Explicit env values override the
+# defaults. NOT LoopingSampler/full-pipeline chunking: the pipeline runs once,
 # and each denoise step fans the transformer out over overlapping temporal
 # latent windows, fusing the denoised target tokens back into the full state.
 _LTX_HDR_CONTEXT_WINDOW_ENV = "LTX_HDR_CONTEXT_WINDOW"
@@ -286,53 +292,85 @@ class _ContextWindowConfig(NamedTuple):
     fuse: str  # "pyramid" | "flat"
 
 
-def _hdr_context_config() -> _ContextWindowConfig | None:
-    """Parse the HDR context-window env knobs. Unset/0 -> None (disabled).
+def _default_context_window_px(vram_gib: int | None) -> tuple[int, int]:
+    """Default (window_px, overlap_px) for HDR one-stage rolling windows.
 
-    Pixel frames are converted to latent frames via the LTX ``((px-1)//8)+1``
-    formula; overlap via ``px//8``. Malformed values raise ``ValueError``.
+    Measured on RTX 5090 31GiB: 65-frame window with 16 overlap + 46 resident
+    blocks passes full 201f Kijai; 73 fails. Smaller GPUs get tighter windows.
     """
-    win_env = os.environ.get(_LTX_HDR_CONTEXT_WINDOW_ENV)
-    if not win_env:
-        return None
-    try:
-        window_px = int(win_env)
-    except ValueError as exc:
-        raise ValueError(
-            f"{_LTX_HDR_CONTEXT_WINDOW_ENV} must be an int, got {win_env!r}"
-        ) from exc
-    if window_px <= 0:
-        return None  # 0/negative disables
+    if vram_gib is not None and vram_gib >= 31:
+        return 65, 16
+    if vram_gib is not None and vram_gib >= 24:
+        return 49, 16
+    return 33, 8
 
-    overlap_env = os.environ.get(_LTX_HDR_CONTEXT_OVERLAP_ENV, "16")
-    try:
-        overlap_px = int(overlap_env)
-    except ValueError as exc:
-        raise ValueError(
-            f"{_LTX_HDR_CONTEXT_OVERLAP_ENV} must be an int, got {overlap_env!r}"
-        ) from exc
-    if overlap_px < 0:
-        raise ValueError(f"{_LTX_HDR_CONTEXT_OVERLAP_ENV} must be >= 0, got {overlap_px}")
 
-    fuse = os.environ.get(_LTX_HDR_CONTEXT_FUSE_ENV, "pyramid")
-    if fuse not in ("pyramid", "flat"):
-        raise ValueError(
-            f"{_LTX_HDR_CONTEXT_FUSE_ENV} must be 'pyramid' or 'flat', got {fuse!r}"
-        )
-
+def _build_context_config(window_px: int, overlap_px: int, fuse: str) -> _ContextWindowConfig:
+    """Convert pixel window/overlap to latent frames and validate."""
     window_latent = ((window_px - 1) // 8) + 1
     overlap_latent = overlap_px // 8
     if window_latent < 2:
         raise ValueError(
-            f"{_LTX_HDR_CONTEXT_WINDOW_ENV}={window_px} -> {window_latent} latent frames; "
+            f"context window {window_px}px -> {window_latent} latent frames; "
             "need >= 2 latent frames (>= 9 pixel frames)."
         )
     if not (0 <= overlap_latent < window_latent):
         raise ValueError(
-            f"context overlap {overlap_latent} latent frames must satisfy "
+            f"context overlap {overlap_px}px -> {overlap_latent} latent frames must satisfy "
             f"0 <= overlap < window ({window_latent})."
         )
     return _ContextWindowConfig(window_latent, overlap_latent, fuse)
+
+
+def _hdr_context_config() -> _ContextWindowConfig | None:
+    """Resolve the HDR rolling-window config.
+
+    ``LTX_HDR_CONTEXT_WINDOW`` set → explicit env override (0/negative disables).
+    Unset → VRAM-based default (on for one-stage HDR): ≥31 GiB → 65/16,
+    ≥24 GiB → 49/16, otherwise → 33/8. Pixel frames are converted to latent
+    frames via the LTX ``((px-1)//8)+1`` formula; overlap via ``px//8``.
+    Malformed values raise ``ValueError``.
+    """
+    win_env = os.environ.get(_LTX_HDR_CONTEXT_WINDOW_ENV)
+    if win_env:
+        # Explicit env override — parse exactly as before.
+        try:
+            window_px = int(win_env)
+        except ValueError as exc:
+            raise ValueError(
+                f"{_LTX_HDR_CONTEXT_WINDOW_ENV} must be an int, got {win_env!r}"
+            ) from exc
+        if window_px <= 0:
+            return None  # explicit 0/negative disables
+        overlap_env = os.environ.get(_LTX_HDR_CONTEXT_OVERLAP_ENV, "16")
+        try:
+            overlap_px = int(overlap_env)
+        except ValueError as exc:
+            raise ValueError(
+                f"{_LTX_HDR_CONTEXT_OVERLAP_ENV} must be an int, got {overlap_env!r}"
+            ) from exc
+        if overlap_px < 0:
+            raise ValueError(f"{_LTX_HDR_CONTEXT_OVERLAP_ENV} must be >= 0, got {overlap_px}")
+        fuse = os.environ.get(_LTX_HDR_CONTEXT_FUSE_ENV, "pyramid")
+        if fuse not in ("pyramid", "flat"):
+            raise ValueError(
+                f"{_LTX_HDR_CONTEXT_FUSE_ENV} must be 'pyramid' or 'flat', got {fuse!r}"
+            )
+    else:
+        # Default: VRAM-based rolling window (on for one-stage HDR).
+        vram_gib = _detect_vram_gib()
+        window_px, overlap_px = _default_context_window_px(vram_gib)
+        fuse = "pyramid"
+        memory_trace.write_event(
+            "hdr_context_default",
+            "hdr_context_config",
+            vram_gib=(vram_gib if vram_gib is not None else -1),
+            window_px=window_px,
+            overlap_px=overlap_px,
+            fuse=fuse,
+        )
+
+    return _build_context_config(window_px, overlap_px, fuse)
 
 
 def _static_windows(num_frames: int, window: int, overlap: int) -> list[tuple[int, int]]:
@@ -1080,6 +1118,90 @@ class LTXHdrIcLoraPipeline(HDRICLoraPipeline):
 
             return conditionings
 
+    def __call__(  # type: ignore[override]  # noqa: PLR0913
+        self,
+        seed: int,
+        height: int,
+        width: int,
+        num_frames: int,
+        frame_rate: float,
+        video_conditioning: list[tuple[str, float]],
+        tiling_config: TilingConfig | None = None,
+        high_quality_hdr: bool = False,
+        **_kwargs: Any,
+    ) -> torch.Tensor:
+        """One-stage HDR generation: full-res /32 latent → sample → decode.
+
+        Overrides upstream two-stage ``__call__`` (which ran stage 1 at half-res,
+        upscaled, then re-sampled at full-res). This runs a single stage-1 pass at
+        the full aligned resolution, then decodes directly — no upsampler, no
+        stage 2, no second conditioning encode. ``stage_2``/``upsampler`` remain
+        constructed by ``__init__`` (component-patch helpers expect the attrs) but
+        are never called. Returns a linear HDR float tensor ``[f, h, w, c]``.
+        """
+        memory_trace.write_event("hdr_one_stage", "LTXHdrIcLoraPipeline.__call__")
+
+        if high_quality_hdr:
+            gen_num_frames = 2 * num_frames - 1
+        else:
+            gen_num_frames = num_frames
+
+        gen_w, gen_h, crop_w, crop_h = align_resolution(
+            width, height, ResizeMode.REFLECT_PAD, divisor=ALIGNMENT_DIVISOR
+        )
+        if gen_h < MIN_RESOLUTION or gen_w < MIN_RESOLUTION:
+            raise ValueError(
+                f"Resolution ({width}x{height}) is too small after alignment "
+                f"(got {gen_w}x{gen_h}, need at least {MIN_RESOLUTION}x{MIN_RESOLUTION})."
+            )
+        needs_crop = crop_w != gen_w or crop_h != gen_h
+
+        generator = torch.Generator(device=self.device).manual_seed(seed)
+        noiser = GaussianNoiser(generator=generator)
+        video_context, _ = self.text_embeddings
+
+        # Single conditioning encode at full aligned resolution (upstream encoded
+        # twice: once at half-res for stage 1, once at full-res for stage 2).
+        conditionings = self.image_conditioner(
+            lambda enc: self._create_conditionings(
+                video_conditioning=video_conditioning,
+                height=gen_h,
+                width=gen_w,
+                video_encoder=enc,
+                num_frames=gen_num_frames,
+                tiling_config=tiling_config,
+                high_quality_hdr=high_quality_hdr,
+            )
+        )
+
+        stage_1_sigmas = torch.Tensor(DISTILLED_SIGMA_VALUES).to(self.device)
+
+        # Single full-resolution stage-1 pass (upstream used gen_w//2, gen_h//2).
+        video_state, _ = self.stage_1(
+            denoiser=SimpleDenoiser(video_context, None),
+            sigmas=stage_1_sigmas,
+            noiser=noiser,
+            width=gen_w,
+            height=gen_h,
+            frames=gen_num_frames,
+            fps=frame_rate,
+            video=ModalitySpec(
+                context=video_context,
+                conditionings=conditionings,
+            ),
+        )
+        assert video_state is not None  # HDR is video-only; audio is skipped
+
+        # Direct decode — no upsampler, no stage-2 re-sampling.
+        crop_size = (crop_w, crop_h) if needs_crop else None
+        return self._decode_video(
+            video_state.latent,
+            tiling_config,
+            generator,
+            crop_size,
+            high_quality_hdr=high_quality_hdr,
+        )
+
     def _run_stage2_phase(  # type: ignore[override]
         self,
         transformer: object,
@@ -1128,25 +1250,56 @@ class LTXHdrIcLoraPipeline(HDRICLoraPipeline):
         *,
         high_quality_hdr: bool = False,
     ) -> torch.Tensor:
-        """VAE decode; always uses the dedicated decode tiling config (default
-        spatial 512 / overlap 128), independent of the encode tiling config that
-        upstream ``__call__`` forwards here. Adds a timing marker.
+        """Chunked VAE decode + HDR postprocess — bounds peak VRAM.
 
-        Wrapping is clean because upstream ``__call__`` dispatches this via
-        ``self._decode_video(...)``. Stage-1, by contrast, runs as
-        ``self.stage_1(...)`` inside upstream ``__call__`` and cannot be timed
-        here without reproducing ``__call__``; it remains the residual of the
-        broad ``generate`` timing bucket.
+        Upstream ``_decode_video`` tiles the VAE decode but then concatenates ALL
+        decoded frames on GPU and runs ``apply_hdr_decode_postprocess`` over the
+        full video, whose ``LogC3.decompress`` temporaries scale with total frame
+        count (OOM on 201-frame HDR). This override decodes chunk by chunk using
+        :func:`_hdr_decode_tiling_config`, postprocesses each chunk separately,
+        and moves it to CPU immediately, so the HDR-postprocess temporary is
+        bounded to one decode tile. The forwarded encode tiling config is ignored
+        (decode always uses its own). ``generate()``'s later ``.cpu()`` is a
+        harmless no-op on the already-CPU result.
         """
+        from ltx_core.hdr import apply_hdr_decode_postprocess
+
         # Decode is always tiled with its OWN config; the forwarded encode config
         # is intentionally ignored so encode (off by default) and decode (always
         # on) stay fully independent.
         decode_tiling, dec_tile_size, dec_tile_overlap = _hdr_decode_tiling_config()
         _dec_timing = _hdr_timing_enabled()
         _dec_t0 = time.perf_counter() if _dec_timing else 0.0
-        result = super()._decode_video(
-            latent, decode_tiling, generator, crop_size, high_quality_hdr=high_quality_hdr
-        )
+        memory_trace.snapshot("hdr_decode:before_chunked_postprocess")
+
+        cpu_chunks: list[torch.Tensor] = []
+        global_offset = 0  # cumulative raw frame count, for high_quality_hdr parity
+        for chunk in self.video_decoder(latent.float(), decode_tiling, generator):
+            chunk = chunk.float()
+            # [f,h,w,c] -> [1,c,f,h,w] (equivalent to einops "f h w c -> 1 c f h w")
+            decoded = chunk.unsqueeze(0).permute(0, 4, 1, 2, 3).contiguous()
+            hdr = apply_hdr_decode_postprocess(
+                decoded, transform=cast(Literal["logc3"], self.hdr_transform)
+            )
+            del decoded
+            # [c,f,h,w] -> [f,h,w,c] (equivalent to einops "c f h w -> f h w c")
+            out = hdr[0].permute(1, 2, 3, 0)
+            del hdr
+            if crop_size is not None:
+                # crop_size is (width, height) -> crop H (dim 1) then W (dim 2)
+                out = out[:, : crop_size[1], : crop_size[0], :]
+            chunk_frames = int(out.shape[0])
+            if high_quality_hdr:
+                # Keep every other GLOBAL frame (matches upstream's full-tensor
+                # out[::2]); per-chunk parity depends on the cumulative offset.
+                out = out[(global_offset % 2) :: 2]
+            global_offset += chunk_frames
+            cpu_chunks.append(out.cpu())
+            del out, chunk
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+
+        memory_trace.snapshot("hdr_decode:after_chunked_postprocess")
         if _dec_timing:
             memory_trace.write_event(
                 "hdr_timing",
@@ -1155,7 +1308,7 @@ class LTXHdrIcLoraPipeline(HDRICLoraPipeline):
                 tile_size=dec_tile_size,
                 tile_overlap=dec_tile_overlap,
             )
-        return result
+        return torch.cat(cpu_chunks, dim=0)
 
     @torch.inference_mode()
     def generate(

@@ -154,6 +154,13 @@ function AssetCard({
           <Heart className="h-3.5 w-3.5 fill-current" />
         </button>
       )}
+
+      {/* Generation time badge (hidden on hover to avoid overlapping controls) */}
+      {!isHovered && asset.type === 'video' && asset.generationElapsedSeconds != null && (
+        <div className="absolute top-2 right-2 px-2 py-1 rounded-lg bg-black/40 backdrop-blur-md text-white/80 text-[11px] tabular-nums z-10 pointer-events-none">
+          Generated in {formatTime(asset.generationElapsedSeconds)}
+        </div>
+      )}
       
       {/* Hover overlay */}
       <div className={`absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-black/30 transition-opacity duration-200 ${
@@ -1386,6 +1393,7 @@ export function GenSpace() {
     ramUsedMb,
     ramTotalMb,
     cpuUtilPct,
+    generationElapsedSeconds,
   } = useGeneration()
 
   const {
@@ -1442,6 +1450,15 @@ export function GenSpace() {
     icLoraStatus,
     icLoraError,
     icLoraResult,
+    icLoraProgress,
+    icLoraElapsedSeconds,
+    icLoraEstimatedRemainingSeconds,
+    icLoraVramUsedMb,
+    icLoraVramTotalMb,
+    icLoraGpuUtilPct,
+    icLoraRamUsedMb,
+    icLoraRamTotalMb,
+    icLoraCpuUtilPct,
   } = useIcLora()
   
   // Handle incoming frame from the Video Editor for editing
@@ -1562,6 +1579,7 @@ export function GenSpace() {
           prompt: lastPrompt,
           resolution: savedVideoSettings.videoResolution,
           duration: savedVideoSettings.duration,
+          generationElapsedSeconds: generationElapsedSeconds ?? undefined,
           generationParams: {
             mode: genMode as 'text-to-video' | 'image-to-video' | 'audio-to-video',
             prompt: lastPrompt,
@@ -1584,6 +1602,7 @@ export function GenSpace() {
             width: copied.width,
             height: copied.height,
             createdAt: Date.now(),
+            generationElapsedSeconds: generationElapsedSeconds ?? undefined,
           }],
           activeTakeIndex: 0,
         })
@@ -1711,6 +1730,7 @@ export function GenSpace() {
               width: copied.width,
               height: copied.height,
               createdAt: Date.now(),
+              generationElapsedSeconds: result.generationElapsedSeconds,
             })
             if (activeIcLoraSource.linkedClipIds?.length) {
               setPendingIcLoraUpdate({
@@ -1731,6 +1751,7 @@ export function GenSpace() {
             height: copied.height,
             prompt: resolvedPrompt,
             resolution: '',
+            generationElapsedSeconds: result.generationElapsedSeconds,
             generationParams: {
               mode: 'ic-lora',
               prompt: resolvedPrompt,
@@ -1752,6 +1773,7 @@ export function GenSpace() {
               width: copied.width,
               height: copied.height,
               createdAt: Date.now(),
+              generationElapsedSeconds: result.generationElapsedSeconds,
             }],
             activeTakeIndex: 0,
           })
@@ -1982,6 +2004,20 @@ export function GenSpace() {
       ? <Sparkles className="h-3.5 w-3.5" />
     : <Sparkles className={`h-3.5 w-3.5 ${isGenerating ? 'animate-pulse' : ''}`} />
   const promptGenerating = isRetakeMode ? isRetaking : isIcLoraMode ? isIcLoraGenerating : isGenerating
+
+  // Unified live metrics for the generating placeholder: whichever of T2V
+  // generation or IC-LoRA/HDR generation is currently active.
+  const activeIsGenerating = isGenerating || isIcLoraGenerating
+  const activeProgress = isIcLoraGenerating ? icLoraProgress : progress
+  const activeStatusMessage = isIcLoraGenerating ? (icLoraStatus || 'Generating...') : (statusMessage || 'Generating...')
+  const activeElapsedSeconds = isIcLoraGenerating ? icLoraElapsedSeconds : elapsedSeconds
+  const activeEstimatedRemainingSeconds = isIcLoraGenerating ? icLoraEstimatedRemainingSeconds : estimatedRemainingSeconds
+  const activeVramUsedMb = isIcLoraGenerating ? icLoraVramUsedMb : vramUsedMb
+  const activeVramTotalMb = isIcLoraGenerating ? icLoraVramTotalMb : vramTotalMb
+  const activeGpuUtilPct = isIcLoraGenerating ? icLoraGpuUtilPct : gpuUtilPct
+  const activeRamUsedMb = isIcLoraGenerating ? icLoraRamUsedMb : ramUsedMb
+  const activeRamTotalMb = isIcLoraGenerating ? icLoraRamTotalMb : ramTotalMb
+  const activeCpuUtilPct = isIcLoraGenerating ? icLoraCpuUtilPct : cpuUtilPct
   
   // Close size menu on click outside
   useEffect(() => {
@@ -2054,7 +2090,7 @@ export function GenSpace() {
       )}
 
       {/* Assets area — full width, no background, above the prompt bar */}
-      {isLibraryMode && (assets.length > 0 || isGenerating) && (
+      {isLibraryMode && (assets.length > 0 || isGenerating || isIcLoraGenerating) && (
         <div className="absolute inset-x-0 top-0 bottom-[160px] flex flex-col px-4 pt-4">
           {/* Top bar */}
           <div className="flex items-center justify-end pb-2 gap-2">
@@ -2122,7 +2158,7 @@ export function GenSpace() {
           {/* Assets grid — fills remaining space, scrollable */}
           <div className="overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable] flex-1">
             <div className={`grid ${gallerySizeClasses[gallerySize]} gap-4`}>
-              {isGenerating && (
+              {activeIsGenerating && (
                 <div className="relative rounded-xl overflow-hidden bg-zinc-800 aspect-video">
                   <div className="absolute inset-0 flex flex-col items-center justify-center">
                     <div className="relative w-16 h-16 mb-3">
@@ -2132,28 +2168,28 @@ export function GenSpace() {
                         <Sparkles className="h-6 w-6 text-violet-400" />
                       </div>
                     </div>
-                    <p className="text-sm text-zinc-400">{statusMessage || 'Generating...'}</p>
-                    {progress > 0 && (
+                    <p className="text-sm text-zinc-400">{activeStatusMessage}</p>
+                    {activeProgress > 0 && (
                       <div className="w-32 h-1 bg-zinc-800 rounded-full mt-2 overflow-hidden">
-                        <div className="h-full bg-violet-500 transition-all" style={{ width: `${progress}%` }} />
+                        <div className="h-full bg-violet-500 transition-all" style={{ width: `${activeProgress}%` }} />
                       </div>
                     )}
-                    {(elapsedSeconds !== null || vramUsedMb !== null) && (
+                    {(activeElapsedSeconds !== null || activeVramUsedMb !== null) && (
                       <div className="flex items-center gap-3 mt-2 text-[11px] text-zinc-500 tabular-nums">
-                        {elapsedSeconds !== null && (
+                        {activeElapsedSeconds !== null && (
                           <span>
-                            {Math.floor(elapsedSeconds / 60)}:{String(Math.floor(elapsedSeconds % 60)).padStart(2, '0')}
-                            {estimatedRemainingSeconds !== null && ` / ETA ${Math.ceil(estimatedRemainingSeconds)}s`}
+                            {Math.floor(activeElapsedSeconds / 60)}:{String(Math.floor(activeElapsedSeconds % 60)).padStart(2, '0')}
+                            {activeEstimatedRemainingSeconds !== null && ` / ETA ${Math.ceil(activeEstimatedRemainingSeconds)}s`}
                           </span>
                         )}
-                        {vramUsedMb !== null && vramTotalMb !== null && (
-                          <span>VRAM {(vramUsedMb / 1024).toFixed(1)}/{(vramTotalMb / 1024).toFixed(0)}GB</span>
+                        {activeVramUsedMb !== null && activeVramTotalMb !== null && (
+                          <span>VRAM {(activeVramUsedMb / 1024).toFixed(1)}/{(activeVramTotalMb / 1024).toFixed(0)}GB</span>
                         )}
-                        {gpuUtilPct !== null && <span>GPU {Math.round(gpuUtilPct)}%</span>}
-                        {ramUsedMb !== null && ramTotalMb !== null && (
-                          <span>RAM {(ramUsedMb / 1024).toFixed(1)}/{(ramTotalMb / 1024).toFixed(0)}GB</span>
+                        {activeGpuUtilPct !== null && <span>GPU {Math.round(activeGpuUtilPct)}%</span>}
+                        {activeRamUsedMb !== null && activeRamTotalMb !== null && (
+                          <span>RAM {(activeRamUsedMb / 1024).toFixed(1)}/{(activeRamTotalMb / 1024).toFixed(0)}GB</span>
                         )}
-                        {cpuUtilPct !== null && <span>CPU {Math.round(cpuUtilPct)}%</span>}
+                        {activeCpuUtilPct !== null && <span>CPU {Math.round(activeCpuUtilPct)}%</span>}
                       </div>
                     )}
                   </div>
