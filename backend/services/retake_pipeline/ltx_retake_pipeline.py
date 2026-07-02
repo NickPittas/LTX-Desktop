@@ -6,8 +6,10 @@ with the following adjustments:
 * ``@torch.no_grad()`` instead of ``@torch.inference_mode()`` — the
   transformer checkpoint uses custom autograd functions incompatible with
   inference-mode tensors.
-* Tiled video encoding via ``video_latent_from_file(..., tiling_config)``
-  — the original encodes all frames in a single pass which OOMs on most GPUs.
+* Tiled source-video encoding via a local helper that decodes through
+  ``iter_video_frames_to_model_domain`` (tagged non-Rec.709 → Rec.709 model
+  domain) then ``tiled_encode`` — the vendored ``video_latent_from_file``
+  encodes all frames in a single pass (OOMs) and skips colorspace transfer.
 * Tiled video decoding via ``VideoDecoder(..., tiling_config)`` — the
   original omits the tiling argument.
 """
@@ -15,7 +17,7 @@ with the following adjustments:
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 import torch
 
 from api_types import OutputFormat
@@ -36,6 +38,55 @@ if TYPE_CHECKING:
     from services.color_management import ColorSpace
     from services.local_memory_plan import LocalMemoryPlan
 
+
+
+def _encode_source_video_latent_model_domain(
+    video_encoder: Any,
+    file_path: str,
+    output_shape: Any,
+    device: torch.device,
+    dtype: torch.dtype,
+    tiling_config: TilingConfig | None = None,
+) -> torch.Tensor:
+    """Encode a source video to a VAE latent, transferring tagged non-Rec.709
+    video into the Rec.709 model domain before the VAE.
+
+    Mirrors ``ltx_pipelines.utils.helpers.video_latent_from_file`` but decodes
+    via ``services.exr_input.iter_video_frames_to_model_domain`` so a tagged
+    non-bt709 source (BT.601 / Rec.2020 / ...) is colour-transferred to Rec.709
+    before ``video_preprocess`` + ``tiled_encode``. Untagged/bt709 video is an
+    exact passthrough (byte-identical to the vendored helper). FPS is validated
+    against ``output_shape.fps`` exactly as the vendored helper does.
+    """
+    from ltx_core.types import VideoLatentShape
+    from ltx_pipelines.utils.media_io import get_videostream_fps, video_preprocess
+    from services.exr_input import iter_video_frames_to_model_domain
+
+    fps = get_videostream_fps(file_path)
+    if fps != output_shape.fps:
+        raise ValueError(
+            f"Input video FPS {fps} does not match output FPS {output_shape.fps}, not supported"
+        )
+    frame_gen = iter_video_frames_to_model_domain(
+        file_path, frame_cap=output_shape.frames, device=device,
+    )
+    frames = video_preprocess(frame_gen, output_shape.height, output_shape.width, dtype, device)
+    latents = video_encoder.tiled_encode(frames, tiling_config or TilingConfig.default())
+    # Conform latent length to the required VAE frame count (trim or zero-pad on
+    # dim 2), matching the vendored video_latent_from_file helper's behavior
+    # (inlined here to avoid importing a private vendored symbol).
+    required_latent_frames = VideoLatentShape.from_pixel_shape(output_shape).frames
+    actual_frames = latents.shape[2]
+    if actual_frames > required_latent_frames:
+        return latents[:, :, :required_latent_frames]
+    if actual_frames < required_latent_frames:
+        pad_shape = list(latents.shape)
+        pad_shape[2] = required_latent_frames - actual_frames
+        latents = torch.cat(
+            [latents, torch.zeros(pad_shape, device=latents.device, dtype=latents.dtype)],
+            dim=2,
+        )
+    return latents
 
 
 class LTXRetakePipeline:
@@ -205,7 +256,7 @@ class LTXRetakePipeline:
         from ltx_core.conditioning.types.noise_mask_cond import TemporalRegionMask
         from ltx_pipelines.utils.constants import DISTILLED_SIGMA_VALUES as _distilled_sigmas
         from ltx_pipelines.utils.denoisers import GuidedDenoiser, SimpleDenoiser
-        from ltx_pipelines.utils.helpers import audio_latent_from_file, video_latent_from_file
+        from ltx_pipelines.utils.helpers import audio_latent_from_file
         from ltx_pipelines.utils.types import ModalitySpec
 
         if start_time >= end_time:
@@ -236,18 +287,29 @@ class LTXRetakePipeline:
         # --- Encode source video (tiled) ---
         output_shape = get_videostream_metadata(video_path)
 
+        # ponytail: LTX VAE needs spatial dims that are multiples of 64; source
+        # videos can be any size (e.g. 1280x720). Align width/height UP to the
+        # next multiple of 64 before generation (matches the other LTX paths).
+        # The API/request dimensions are unchanged; only the internal generation
+        # shape is aligned.
+        _align = 64
+        _h = ((output_shape.height + _align - 1) // _align) * _align
+        _w = ((output_shape.width + _align - 1) // _align) * _align
+
         # ponytail: snap source video frames down to nearest 8n+1 for VAE compatibility.
         from ltx_core.types import SpatioTemporalScaleFactors
         _vae_time = SpatioTemporalScaleFactors.default().time
         if (output_shape.frames - 1) % _vae_time != 0:
-            _snapped = ((output_shape.frames - 1) // _vae_time) * _vae_time + 1
+            _frames = ((output_shape.frames - 1) // _vae_time) * _vae_time + 1
+        else:
+            _frames = output_shape.frames
+        if (_h, _w, _frames) != (output_shape.height, output_shape.width, output_shape.frames):
             output_shape = type(output_shape)(
-                output_shape.batch, _snapped,
-                output_shape.height, output_shape.width, output_shape.fps,
+                output_shape.batch, _frames, _h, _w, output_shape.fps,
             )
 
         initial_video_latent = self.image_conditioner(
-            lambda enc: video_latent_from_file(
+            lambda enc: _encode_source_video_latent_model_domain(
                 video_encoder=enc,
                 file_path=video_path,
                 output_shape=output_shape,

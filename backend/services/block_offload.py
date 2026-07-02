@@ -112,9 +112,9 @@ _PADDED_FRAMES_ENV = "LTX_HDR_PADDED_FRAMES"
 #: Resident-block VRAM curve anchors: (integer GiB -> resident blocks). Monotonic
 #: non-decreasing; evaluated by piecewise-linear interpolation and clamped at the
 #: ends. 31GiB (RTX 5090) -> 46 of 48 blocks; 24GiB -> 37; 16GiB -> 26; <=12GiB
-#: -> 0 (all-streaming). Frame-count pressure is absorbed by the HDR encode
-#: tiling policy, so residency is intentionally flat in padded frames (more VRAM
-#: never yields fewer blocks; more frames never yields more).
+#: -> 0 (all-streaming). The curve drives <31 GiB and >121-frame >=31 GiB runs;
+#: for >=31 GiB with <=121 frames (or unknown frame count) ``_resident_policy``
+#: overrides to 48 (all-resident, no swap) — see its docstring.
 _RESIDENT_VRAM_ANCHORS: tuple[tuple[int, int], ...] = (
     (12, 0),
     (16, 26),
@@ -158,15 +158,26 @@ def _interp_resident_blocks(vram_gib: int) -> int:
 def _resident_policy(vram_gib: int | None, padded_frames: int | None) -> int | None:
     """Compute default resident blocks from VRAM (and, when relevant, frames).
 
-    VRAM-driven via :func:`_interp_resident_blocks`. ``padded_frames`` is accepted
-    so the policy CAN tighten residency for very long clips; today it is flat in
-    frames because the HDR encode tiling policy absorbs frame-count pressure
-    (more frames never increases residency). Returns ``None`` when VRAM is
-    unknown so the caller falls back to its safe ``default``.
+    VRAM-driven via :func:`_interp_resident_blocks`. At >=31 GiB the padded
+    frame count selects between the no-swap and swap-margin regimes — this is
+    what distinguishes "no blockswap" from "no patched builder":
+
+    - ``padded_frames`` is ``None`` (no frame plumbing, e.g. standard harness
+      workflows) or ``<= 121`` (normal-length clips): return 48 — every block
+      resident, no blockswap, but STILL through the patched builder. This is
+      distinct from upstream ``full_resident`` (Kijai FP8 at 31 GiB OOMs on the
+      upstream path even though the weights fit); 48/0 just means the patched
+      builder is selected and then keeps all blocks resident.
+    - ``padded_frames > 121`` (long HDR clips): keep the interpolated curve
+      (46 at 31 GiB) so 2 blocks swap as OOM margin.
+
+    Below 31 GiB, residency follows the interpolated curve unchanged. Returns
+    ``None`` when VRAM is unknown so the caller falls back to its safe ``default``.
     """
-    del padded_frames  # frame-count lever is HDR encode tiling; kept for future use
     if vram_gib is None:
         return None
+    if vram_gib >= 31 and (padded_frames is None or padded_frames <= 121):
+        return 48
     return _interp_resident_blocks(vram_gib)
 
 
@@ -190,7 +201,8 @@ def resolve_resident_blocks(default: int = 0) -> int:
 
     - Unset / empty env -> runtime resident-block curve
       (:func:`_default_resident_blocks`): VRAM-driven via piecewise-linear
-      anchors (31GiB -> 46, 24GiB -> 37, 16GiB -> 26, <=12GiB -> 0), optionally
+      anchors (31GiB -> 46 for >121-frame runs / 48 all-resident for <=121
+      frames or unknown, 24GiB -> 37, 16GiB -> 26, <=12GiB -> 0), optionally
       frame-aware via ``LTX_HDR_PADDED_FRAMES``.
     - Explicit positive int -> that value (overrides the curve).
     - Explicit non-positive int (<=0) -> 0 (disable residency; all-streaming).

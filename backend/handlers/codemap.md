@@ -152,7 +152,7 @@ via `validate_audio_file`. `generate_video()` snaps height/width to multiples of
 `_ADAPTER_WORKFLOW[adapter_id]` (`WorkflowType` literal). Workflows in
 `_UNAVAILABLE_WORKFLOWS` (`motion_track_control`, `hdr_scene_embeddings`,
 `lipdub`) are rejected with `_UNAVAILABLE_MESSAGES` before any path access.
-`hdr` is a **supported** V2V workflow (no longer unavailable). `ingredients`
+`hdr` is a **supported** V2V workflow (no longer unavailable). Live `model_selection` on `POST /api/ic-lora/generate` is accepted for all available IC-LoRA workflows (`hdr`, `ingredients`, `in_outpainting`, `standard_video`, `union_control` — it swaps the main transformer; sidecar components stay componentized); only the still-gated adapters (`motion_track_control`/`hdr_scene_embeddings`/`lipdub`) reject it. The generic V2V path threads `req.model_selection` into `pipelines.load_ic_lora(...)` and `should_use_local_encoding(...)`. `ingredients`
 is dispatched **before** `video_path` validation to `_generate_ingredients`
 (T2V: no video, no conditioning, uses `req` dims aligned via `_align_up(*, 64)`
 and `_snap_frame_count` (min 9, 1+8k), loads only the adapter LoRA with
@@ -194,8 +194,9 @@ reads a single frame, builds canny/depth, returns base64 JPEG data URIs.
 `duration>=2`/prompt, then branches on
 `should_video_generate_with_ltx_api` to `_run_api_retake`
 (`ltx_api_client.retake`, writes bytes) or `_run_local_retake`.
-`_run_local_retake` validates 32-multiple dimensions
-(`_validate_video_metadata` via `ltx_pipelines.utils.media_io.get_videostream_metadata`),
+`_run_local_retake` validates the source video is readable
+(`_validate_video_metadata` via `ltx_pipelines.utils.media_io.get_videostream_metadata` —
+spatial dims are NO LONGER rejected here; the pipeline aligns them up to a multiple of 64 internally),
 prepares text encoding, loads `load_retake_pipeline(distilled=True)`, calls
 `pipeline.generate(..., distilled=True, regenerate_video/regenerate_audio from
 _resolve_retake_mode(mode))`. **Output hardcoded `.mp4`:**

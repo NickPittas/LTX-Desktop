@@ -97,7 +97,7 @@ logger = logging.getLogger(__name__)
 # Encode tiling is chosen by a runtime policy from VRAM + padded frames (31GiB:
 # no tile <=121f, tile512 >121f; lower VRAM tiles earlier) unless
 # LTX_HDR_VAE_TILE_SIZE explicitly overrides. Decode tiling is ALWAYS on, with
-# its own separate config (default spatial 512 / overlap 128).
+# its own separate config (default spatial 768 / overlap 128).
 _LTX_HDR_VAE_TILE_SIZE_ENV = "LTX_HDR_VAE_TILE_SIZE"
 _LTX_HDR_VAE_TILE_THRESHOLD_ENV = "LTX_HDR_VAE_TILE_THRESHOLD"
 _LTX_HDR_DECODE_VAE_TILE_SIZE_ENV = "LTX_HDR_DECODE_VAE_TILE_SIZE"
@@ -119,7 +119,7 @@ _HDR_TEMPORAL_TILE_OVERLAP = 16
 # Encode tile size chosen by the runtime policy when it decides to tile.
 _HDR_ENCODE_POLICY_TILE = 512
 # Decode tiling defaults (always on; independent of the encode config).
-_HDR_DECODE_SPATIAL_TILE = 512
+_HDR_DECODE_SPATIAL_TILE = 768
 _HDR_DECODE_SPATIAL_OVERLAP = 128
 
 
@@ -234,9 +234,9 @@ def _hdr_tiling_overrides(
 def _hdr_decode_tiling_config() -> tuple[TilingConfig, int, int]:
     """Resolve the HDR VAE **decode** tiling config (always on; separate from encode).
 
-    Default spatial tile 512 / overlap 128 (temporal reuses the safe 24/16). The
+    Default spatial tile 768 / overlap 128 (temporal reuses the safe 24/16). The
     default is never silently smaller than 512. ``LTX_HDR_DECODE_VAE_TILE_SIZE``
-    overrides the spatial tile (unset -> 512); an explicit value must exceed the
+    overrides the spatial tile (unset -> 768); an explicit value must exceed the
     128px overlap or a clear ``ValueError`` is raised. Non-int values raise too.
 
     Returns ``(config, spatial_tile_size, spatial_overlap)`` — the ints are
@@ -322,14 +322,20 @@ def _build_context_config(window_px: int, overlap_px: int, fuse: str) -> _Contex
     return _ContextWindowConfig(window_latent, overlap_latent, fuse)
 
 
-def _hdr_context_config() -> _ContextWindowConfig | None:
+def _hdr_context_config(padded_frames: int | None = None) -> _ContextWindowConfig | None:
     """Resolve the HDR rolling-window config.
 
     ``LTX_HDR_CONTEXT_WINDOW`` set → explicit env override (0/negative disables).
-    Unset → VRAM-based default (on for one-stage HDR): ≥31 GiB → 65/16,
-    ≥24 GiB → 49/16, otherwise → 33/8. Pixel frames are converted to latent
-    frames via the LTX ``((px-1)//8)+1`` formula; overlap via ``px//8``.
-    Malformed values raise ``ValueError``.
+    Unset → resolve the padded frame count: prefer the ``padded_frames`` argument
+    (the ``generate()`` caller already knows it as a local); if that is ``None``,
+    fall back to the ``LTX_HDR_PADDED_FRAMES`` env. At or below 121 padded frames
+    the one-stage pass fits without rolling windows, so returns ``None``
+    (disabled, with a trace event); above 121, or when no frame count is
+    available/malformed, falls back to the VRAM-based default (≥31 GiB → 65/16,
+    ≥24 GiB → 49/16, otherwise 33/8). Pixel frames are converted to latent frames
+    via the LTX ``((px-1)//8)+1`` formula; overlap via ``px//8``. Malformed
+    ``CONTEXT_WINDOW`` / overlap / fuse values raise ``ValueError``; a malformed
+    ``PADDED_FRAMES`` is ignored (falls through to the VRAM default).
     """
     win_env = os.environ.get(_LTX_HDR_CONTEXT_WINDOW_ENV)
     if win_env:
@@ -357,8 +363,32 @@ def _hdr_context_config() -> _ContextWindowConfig | None:
                 f"{_LTX_HDR_CONTEXT_FUSE_ENV} must be 'pyramid' or 'flat', got {fuse!r}"
             )
     else:
-        # Default: VRAM-based rolling window (on for one-stage HDR).
+        # Default (LTX_HDR_CONTEXT_WINDOW unset): resolve the padded frame count.
+        # Prefer the explicit argument (generate() has it as a local before this
+        # runs — the LTX_HDR_PADDED_FRAMES env is only set later, inside the
+        # generate() try block); fall back to that env only when no argument was
+        # passed. At or below 121 padded frames the one-stage pass fits without
+        # rolling windows, so context windowing is disabled (None + trace event).
+        # Above 121, or when no frame count is available, use the VRAM-based
+        # default.
         vram_gib = _detect_vram_gib()
+        if padded_frames is None:
+            pf_env = os.environ.get(_LTX_HDR_PADDED_FRAMES_ENV)
+            if pf_env is not None:
+                try:
+                    padded_frames = int(pf_env)
+                except ValueError:
+                    padded_frames = None  # malformed -> fall through to VRAM default
+        if padded_frames is not None and padded_frames <= 121:
+            memory_trace.write_event(
+                "hdr_context_default",
+                "hdr_context_config",
+                vram_gib=(vram_gib if vram_gib is not None else -1),
+                disabled=True,
+                padded_frames=padded_frames,
+                reason="padded_frames <= 121; context windows not needed",
+            )
+            return None
         window_px, overlap_px = _default_context_window_px(vram_gib)
         fuse = "pyramid"
         memory_trace.write_event(
@@ -368,6 +398,7 @@ def _hdr_context_config() -> _ContextWindowConfig | None:
             window_px=window_px,
             overlap_px=overlap_px,
             fuse=fuse,
+            padded_frames=(padded_frames if padded_frames is not None else -1),
         )
 
     return _build_context_config(window_px, overlap_px, fuse)
@@ -974,12 +1005,19 @@ class LTXHdrIcLoraPipeline(HDRICLoraPipeline):
                 video_encoder, fallback_device=self.device, fallback_dtype=self.dtype
             )
 
+            # Transfer tagged non-Rec.709 SDR source video to the Rec.709 model
+            # domain before the per-frame LogC3/VAE transform (untagged/bt709 is
+            # an exact passthrough). frame_cap=None decodes all source frames.
+            from services.exr_input import iter_video_frames_to_model_domain
+
             for video_path, strength in video_conditioning:
                 # Decode ALL source frames (frame_cap=None). Stream decoded frames
                 # straight into one preallocated CPU tensor instead of materializing
                 # source_frames / padded_frames / transformed lists, so no full frame
                 # list stays alive during the VAE encode (peak-memory mitigation).
-                frame_iter = decode_video_by_frame(path=video_path, frame_cap=None, device=self.device)
+                frame_iter = iter_video_frames_to_model_domain(
+                    video_path, frame_cap=None, device=self.device,
+                )
 
                 def _transform(raw_frame: torch.Tensor) -> torch.Tensor:
                     # Same per-frame transform as upstream load_video_conditioning_hdr
@@ -1364,9 +1402,12 @@ class LTXHdrIcLoraPipeline(HDRICLoraPipeline):
             # tile512 >121f; lower VRAM tiles earlier). Decode tiling is always on
             # and resolved separately inside _decode_video.
             tiling_config, threshold_override = _hdr_tiling_overrides(padded_num_frames)
-            # Harness/debug context-window knob (NOT production UI policy). Unset
-            # -> context_cfg is None and the full single-shot path is unchanged.
-            context_cfg = _hdr_context_config()
+            # Context-window config: LTX_HDR_CONTEXT_WINDOW explicitly overrides;
+            # unset -> disabled (None) for <=121 padded frames (the common case),
+            # VRAM-based rolling window only above 121. padded_num_frames is passed
+            # directly — the LTX_HDR_PADDED_FRAMES env is not set until inside the
+            # try block below.
+            context_cfg = _hdr_context_config(padded_num_frames)
             if context_cfg is not None:
                 memory_trace.write_event(
                     "hdr_context_window",

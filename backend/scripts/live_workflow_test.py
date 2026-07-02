@@ -60,8 +60,8 @@ if str(BACKEND_DIR) not in sys.path:
 # --------------------------------------------------------------------------- #
 # Atomic case catalogue + request bodies
 # --------------------------------------------------------------------------- #
-SOURCELESS_ATOMICS = ["fast:default", "kijai:fast", "gguf:fast", "ic-lora:default", "harness:selftest"]
-MEDIA_BACKED_ATOMICS = ["hdr:kijai_fp8_split", "hdr:gguf", "retake:default"]
+SOURCELESS_ATOMICS = ["fast:default", "kijai:fast", "gguf:fast", "i2v:kijai_fast", "i2v:gguf_fast", "ic-lora:default", "ic-lora:kijai", "ic-lora:gguf", "harness:selftest"]
+MEDIA_BACKED_ATOMICS = ["hdr:kijai_fp8_split", "hdr:gguf", "retake:default", "ic-lora-inpaint:kijai", "ic-lora-inpaint:gguf", "ic-lora-standard:kijai", "ic-lora-standard:gguf", "ic-lora-union:kijai", "ic-lora-union:gguf"]
 ALL_ATOMICS = SOURCELESS_ATOMICS + MEDIA_BACKED_ATOMICS
 
 KIJAI_ID = "ltx-2.3-22b-distilled-fp8-kijai-v3"
@@ -469,6 +469,24 @@ def _build_body(
         b = dict(body)
         b["model_selection"] = GGUF_ID
         return "/api/generate", b, None
+    if atomic == "i2v:kijai_fast":
+        _, body, _ = _build_body("fast:default", None, assets_dir)
+        img = assets_dir / "ingredients_input.jpg"
+        if not img.is_file():
+            return "/api/generate", {}, f"i2v image missing: {img}"
+        b = dict(body)
+        b["model_selection"] = KIJAI_ID
+        b["imagePath"] = str(img)
+        return "/api/generate", b, None
+    if atomic == "i2v:gguf_fast":
+        _, body, _ = _build_body("fast:default", None, assets_dir)
+        img = assets_dir / "ingredients_input.jpg"
+        if not img.is_file():
+            return "/api/generate", {}, f"i2v image missing: {img}"
+        b = dict(body)
+        b["model_selection"] = GGUF_ID
+        b["imagePath"] = str(img)
+        return "/api/generate", b, None
     if atomic == "ic-lora:default":
         img = assets_dir / "ingredients_input.jpg"
         if not img.is_file():
@@ -479,6 +497,20 @@ def _build_body(
             "images": [{"path": str(img)}], "width": 704, "height": 1280,
             "num_frames": 121, "frame_rate": 24, "output_format": "mp4",
         }, None
+    if atomic == "ic-lora:kijai":
+        _, body, err = _build_body("ic-lora:default", None, assets_dir)
+        if err:
+            return "/api/ic-lora/generate", {}, err
+        b = dict(body)
+        b["model_selection"] = KIJAI_ID
+        return "/api/ic-lora/generate", b, None
+    if atomic == "ic-lora:gguf":
+        _, body, err = _build_body("ic-lora:default", None, assets_dir)
+        if err:
+            return "/api/ic-lora/generate", {}, err
+        b = dict(body)
+        b["model_selection"] = GGUF_ID
+        return "/api/ic-lora/generate", b, None
     if atomic.startswith("hdr:"):
         # Harness-only: an explicit --hdr-source-path replaces the media-backed
         # source. HDR generate() derives the padded frame count from the decoded
@@ -513,6 +545,48 @@ def _build_body(
         return "/api/retake", {
             "video_path": src, "start_time": 0, "duration": 5,
             "prompt": RETAKE_PROMPT, "mode": "replace_video", "output_format": "mp4",
+        }, None
+    if atomic in ("ic-lora-inpaint:kijai", "ic-lora-inpaint:gguf"):
+        if media is None:
+            return "", {}, "inpaint atomic requires media"
+        src, err = _media_source(atomic, media, assets_dir)
+        if err:
+            return "/api/ic-lora/generate", {}, err
+        mask = assets_dir / "inpainting_mask_input.mp4"
+        if not mask.is_file():
+            return "/api/ic-lora/generate", {}, f"inpaint mask missing: {mask}"
+        model_sel = KIJAI_ID if atomic == "ic-lora-inpaint:kijai" else GGUF_ID
+        return "/api/ic-lora/generate", {
+            "video_path": src, "mask_path": str(mask), "conditioning_type": None,
+            "adapter_id": "in_outpainting", "model_selection": model_sel,
+            "prompt": "replace the masked area with clean background",
+            "images": [], "output_format": "mp4",
+        }, None
+    if atomic in ("ic-lora-standard:kijai", "ic-lora-standard:gguf"):
+        if media is None:
+            return "", {}, "standard-video atomic requires media"
+        src, err = _media_source(atomic, media, assets_dir)
+        if err:
+            return "/api/ic-lora/generate", {}, err
+        model_sel = KIJAI_ID if atomic == "ic-lora-standard:kijai" else GGUF_ID
+        return "/api/ic-lora/generate", {
+            "video_path": src, "conditioning_type": None,
+            "adapter_id": "instant_shave", "model_selection": model_sel,
+            "prompt": "A man with a beard, the beard is being shaved off smoothly",
+            "images": [], "output_format": "mp4",
+        }, None
+    if atomic in ("ic-lora-union:kijai", "ic-lora-union:gguf"):
+        if media is None:
+            return "", {}, "union atomic requires media"
+        src, err = _media_source(atomic, media, assets_dir)
+        if err:
+            return "/api/ic-lora/generate", {}, err
+        model_sel = KIJAI_ID if atomic == "ic-lora-union:kijai" else GGUF_ID
+        return "/api/ic-lora/generate", {
+            "video_path": src, "conditioning_type": "canny",
+            "adapter_id": "union_control", "model_selection": model_sel,
+            "prompt": "A cinematic shot of a city street at golden hour",
+            "images": [], "output_format": "mp4",
         }, None
     return "", {}, f"unknown atomic: {atomic}"
 
@@ -700,8 +774,8 @@ class Harness:
             return True, "preflight ok", code
 
         # Selected model install check (Kijai / GGUF) via the base-video registry.
-        model_sel = KIJAI_ID if atomic in ("kijai:fast", "hdr:kijai_fp8_split") else (
-            GGUF_ID if atomic in ("gguf:fast", "hdr:gguf") else None)
+        model_sel = KIJAI_ID if atomic in ("kijai:fast", "i2v:kijai_fast", "ic-lora:kijai", "ic-lora-inpaint:kijai", "ic-lora-standard:kijai", "ic-lora-union:kijai", "hdr:kijai_fp8_split") else (
+            GGUF_ID if atomic in ("gguf:fast", "i2v:gguf_fast", "ic-lora:gguf", "ic-lora-inpaint:gguf", "ic-lora-standard:gguf", "ic-lora-union:gguf", "hdr:gguf") else None)
         if model_sel:
             installed, detail = _selection_installed(models_dir, model_sel)
             if not installed:

@@ -939,15 +939,16 @@ class PipelinesHandler(StateHandlerBase):
         depth_model_path: str | None,
         adapter_path: str | None = None,
         lora_strength: float = 1.0,
+        model_selection: ModelSelectionID | None = None,
     ) -> ICLoraState:
         self._install_text_patches_if_needed()
 
         # Phase 2: compute exactly one memory plan for the (standard) IC-LoRA
         # workflow and derive the cache key from it.
-        components = self._resolve_active_components()
+        components = self._resolve_active_components(model_selection)
         memory_plan = self._memory_plan_for_components(components, "standard")
         cache_key = (
-            *self._current_cache_key(None, memory_plan),
+            *self._current_cache_key(model_selection, memory_plan),
             "ic_lora",
             adapter_path or "",
             depth_model_path or "",
@@ -967,7 +968,7 @@ class PipelinesHandler(StateHandlerBase):
 
         with memory_trace.phase("pipeline_load:ic_lora"):
             self._evict_gpu_pipeline_for_swap()
-            checkpoint_path, gemma_root, upsampler_path, _cache_key = self._resolve_checkpoint_paths()
+            checkpoint_path, gemma_root, upsampler_path, _cache_key = self._resolve_checkpoint_paths(model_selection)
 
             with memory_trace.phase("pipeline_create:ic_lora"):
                 pipeline = self._ic_lora_pipeline_class.create(
@@ -1068,12 +1069,17 @@ class PipelinesHandler(StateHandlerBase):
             self._evict_gpu_pipeline_for_swap()
 
             checkpoint_path, gemma_root, _upsampler_path, _cache_key = self._resolve_checkpoint_paths()
+            # GGUF components must skip build_policy — it reads a safetensors
+            # header and crashes ("header too large") on a GGUF checkpoint. The
+            # retake pipeline's __init__ installs the GGUF loader itself when
+            # quantization is None, matching the other wrappers' GGUF path.
+            is_gguf = components is not None and components.transformer_format == "gguf"
             # build_policy needs a single checkpoint path; split-safetensors
             # checkpoints arrive as a tuple of shards — read from the first shard
             # (for non-prequant checkpoints this is equivalent to the old path-less
             # fp8_cast(), and the retake pipeline overrides split+fp8 with its own
-            # kijai guard regardless). Net gating is unchanged.
-            if quantized:
+            # kijai guard regardless). Net gating is unchanged for non-GGUF.
+            if quantized and not is_gguf:
                 from ltx_core.quantization.fp8_cast import build_policy
 
                 cp = checkpoint_path[0] if isinstance(checkpoint_path, tuple) else checkpoint_path

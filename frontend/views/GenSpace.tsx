@@ -653,7 +653,12 @@ function PromptBar({
 
   const modelSelectionWorkflow: ModelSelectionWorkflow | null = (() => {
     if (isRetake || isApiMode) return null
-    if (isIcLora) return icLoraAdapterId === 'hdr' ? 'hdr-ic-lora' : null
+    if (isIcLora) {
+      // HDR uses its own workflow; every other IC-LoRA adapter (ingredients,
+      // in/outpainting, standard_video, union_control) shares 'ic-lora'.
+      if (icLoraAdapterId === 'hdr') return 'hdr-ic-lora'
+      return 'ic-lora'
+    }
     if (mode !== 'video') return null
     if (inputAudio) return null
     return inputImage ? 'image-to-video' : 'text-to-video'
@@ -992,7 +997,7 @@ function PromptBar({
                 </div>
               </>
             )}
-            {modelSelectionWorkflow === 'hdr-ic-lora' && (
+            {(modelSelectionWorkflow === 'hdr-ic-lora' || modelSelectionWorkflow === 'ic-lora') && (
               <>
                 <div className="w-px h-4 bg-zinc-700 mx-0.5" />
                 <ModelSelectionPopover
@@ -1703,7 +1708,7 @@ export function GenSpace() {
         finalMaskBlurPx: icLoraInput.finalMaskBlurPx,
         frameRate: isIngredients ? fpsForIcLora : undefined,
         outputFormat: settings.outputFormat,
-        modelSelection: isHdr ? settings.modelSelection ?? null : null,
+        modelSelection: settings.modelSelection ?? null,
         ...(isIngredients
           ? { width: icWidth, height: icHeight, numFrames: icNumFrames }
           : {}),

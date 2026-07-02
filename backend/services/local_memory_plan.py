@@ -176,10 +176,12 @@ def plan_for_transformer(
       ``>=48`` full resident + NONE; HDR streams unless ``>=56``.
     - ``official_fp8_cast``: ``<15`` block-offload gate; ``15-30`` streaming + CPU;
       ``>=31`` full resident + NONE, except HDR streams below ``40``.
-    - ``kijai_fp8_scaled``: ``<=31`` (non-HDR) / ``<40`` (HDR) block offload;
-      ``>=32`` (non-HDR) / ``>=40`` (HDR) full resident + NONE.
-    - ``gguf``: ``gguf_lazy`` + NONE always; ``<24`` (non-HDR) / ``<40`` (HDR)
-      requires block offload; ``disable_compile`` True for all GGUF.
+    - ``kijai_fp8_scaled``: ``<40`` routes through the patched block-offload
+      builder (NONE; resident count from policy — 31 GiB / 121f resolves to 48
+      resident / 0 swapped, i.e. no blockswap but still the patched builder, NOT
+      upstream ``full_resident`` which OOMs at 31 GiB); ``>=40`` full resident.
+    - ``gguf``: ``gguf_lazy`` + NONE always; ``<24`` requires block offload
+      (both standard and HDR); ``disable_compile`` True for all GGUF.
     """
     from ltx_pipelines.utils.types import OffloadMode  # noqa: PLC0415
 
@@ -224,12 +226,14 @@ def plan_for_transformer(
     # ---- GGUF -----------------------------------------------------------
     if quantization_kind == "gguf":
         # GGUF loads lazily (qparam block decode) with NO streaming offload.
-        needs_block = (vram < 24) or (is_hdr and vram < 40)
-        if needs_block:
+        # Measured: gguf_lazy holds at >=24 GiB for both HDR and non-HDR (the
+        # prior HDR-only vram<40 block-offload trigger is removed); block offload
+        # gates only below 24 GiB. Unknown VRAM is gated above (before this block).
+        if vram < 24:
             return _block_offload_plan(
                 quantization_kind,
                 offload_mode=OffloadMode.NONE,
-                vram_desc=f"{vram}GB, hdr={is_hdr}",
+                vram_desc=f"{vram}GB < 24",
                 available=block_offload_available,
                 extra_labels=labels,
             )
@@ -237,7 +241,7 @@ def plan_for_transformer(
             strategy="gguf_lazy",
             offload_mode=OffloadMode.NONE,
             requires_block_offload=False,
-            reason=f"GGUF lazy resident load at {vram}GB (hdr={is_hdr}).",
+            reason=f"GGUF lazy resident load at {vram}GB.",
             trace_labels=("gguf_lazy", *labels),
             cache_key_parts=("quant", quantization_kind, "strategy", "gguf_lazy"),
             disable_compile=True,
@@ -316,43 +320,32 @@ def plan_for_transformer(
         )
 
     # ---- kijai_fp8_scaled -----------------------------------------------
-    # Kijai block offload must enter our patched DiffusionStage builder:
+    # Kijai FP8 scaled must route through our patched DiffusionStage builder:
     # upstream CPU offload rejects this quantization policy before the patched
-    # block-offload path can run, so these plans use NONE (matches the forced
-    # benchmark path) and rely on the patched builder for the actual offload.
-    if is_hdr:
-        if vram < 40:
-            return _block_offload_plan(
-                quantization_kind,
-                offload_mode=OffloadMode.NONE,
-                vram_desc=f"{vram}GB < 40 (HDR)",
-                available=block_offload_available,
-                extra_labels=labels,
-            )
+    # path can run, and upstream full_resident at 31 GiB OOMs (the stage builds
+    # activations that exceed VRAM even though the FP8 weights themselves fit).
+    # So below 40 GiB these plans use NONE to enter the patched builder; the
+    # resident-block policy (block_offload._resident_policy) then decides how
+    # many of the 48 blocks stay resident vs swap. Normal 31 GiB / 121-frame
+    # T2V/I2V/Ingredients/HDR runs resolve to 48 resident / 0 swapped WITHIN
+    # that patched path — i.e. no blockswap, but still the patched builder, not
+    # upstream full_resident. True full_resident (upstream path) is only
+    # returned at >= 40 GiB where VRAM headroom makes it safe. Unified for HDR
+    # and standard (the prior HDR-only vram<40 split is gone).
+    if vram >= 40:
         return LocalMemoryPlan(
             strategy="full_resident",
             offload_mode=OffloadMode.NONE,
             requires_block_offload=False,
-            reason=f"Kijai FP8 scaled HDR full resident at {vram}GB.",
+            reason=f"Kijai FP8 scaled full resident at {vram}GB (hdr={is_hdr}).",
             trace_labels=("full_resident", *labels),
             cache_key_parts=("quant", quantization_kind, "strategy", "full_resident"),
             disable_compile=False,
         )
-    # non-HDR Kijai
-    if vram <= 31:
-        return _block_offload_plan(
-            quantization_kind,
-            offload_mode=OffloadMode.NONE,
-            vram_desc=f"{vram}GB <= 31",
-            available=block_offload_available,
-            extra_labels=labels,
-        )
-    return LocalMemoryPlan(
-        strategy="full_resident",
+    return _block_offload_plan(
+        quantization_kind,
         offload_mode=OffloadMode.NONE,
-        requires_block_offload=False,
-        reason=f"Kijai FP8 scaled full resident at {vram}GB.",
-        trace_labels=("full_resident", *labels),
-        cache_key_parts=("quant", quantization_kind, "strategy", "full_resident"),
-        disable_compile=False,
+        vram_desc=f"{vram}GB < 40 (patched builder; resident count from policy)",
+        available=block_offload_available,
+        extra_labels=labels,
     )

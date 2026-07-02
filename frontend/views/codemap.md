@@ -37,6 +37,10 @@ Top-level routed screens rendered inside the app shell. Four files:
 - **Ingredients** (`showIcLoraOutputSettings` true): the bar renders free-numeric **FPS** `<input type="number">` (1–120, calls `onFpsChange`), plus **DURATION**, **RESOLUTION** (`settings.videoResolution`), and **ASPECT RATIO** dropdowns resolved via `resolveVideoGenerationOptions({settings, modelSpecs, hasAudio:false})`. On generate, `handleGenerate` derives output geometry locally: a `RES_MAP` (`540p/720p/1080p` → `{width,height}`), swaps width/height for `9:16`, and computes `numFrames = max(9, 1 + 8*floor((duration*fps)/8))`, passing `{width,height,numFrames,frameRate}` only for Ingredients.
 - **V2V LoRAs** (standard_video / in_outpainting): the output-settings block is hidden — these reuse the source driving video's fps/dimensions, so no FPS/duration/resolution controls are shown.
 
+### Base-model picker for IC-LoRA
+
+GenSpace exposes the base-model picker for every IC-LoRA workflow — `modelSelectionWorkflow` is `'hdr-ic-lora'` for HDR and `'ic-lora'` for all other adapters (ingredients, in/outpainting, standard_video, union_control); selecting a base sends `model_selection` on `POST /api/ic-lora/generate` for every IC-LoRA submit. This matches the backend, which now accepts `model_selection` for all available IC-LoRA workflows (only `motion_track_control`/`hdr_scene_embeddings`/`lipdub` are still gated).
+
 ### Result persistence
 
 Both video and image completion are handled in `useEffect`s keyed on `videoPath`/`imagePaths`. `persistedVideoKeyRef` guards against double-persisting the same `videoPath`. Results are copied into project storage via `addVisualAssetToProject` then registered with `addAsset`/`addTakeToAsset`. Retake and IC-LoRA results persist inside the hook's async completion callback (survives GenSpace unmount) and, when launched from the editor, publish `setPendingRetakeUpdate`/`setPendingIcLoraUpdate` so the editor can re-point linked clips to the new take.

@@ -462,16 +462,22 @@ class LTXIcLoraPipeline:
         # so chunking over frames is exact. GPU → CPU per chunk keeps peak low.
         num_frames = blend.shape[0]
         device = blend.device
-        dtype = blend.dtype
+        # ponytail: compositing and avg_pool2d need a floating dtype. blend can
+        # arrive as uint8 (e.g. inpaint stage-2 output), which crashes
+        # F.avg_pool2d ("avg_pool2d not implemented for 'Byte'"). Use blend's
+        # own dtype when it is already floating, else fall back to float32. The
+        # caller (encode_video_output) converts the returned CPU float tensor to
+        # uint8 itself, so staying float here is correct.
+        compute_dtype = blend.dtype if blend.is_floating_point() else torch.float32
         orig = original_frames[:num_frames]
         alpha_raw = raw_mask[:num_frames]
 
         chunks: list[torch.Tensor] = []
         for start in range(0, num_frames, chunk_size):
             end = min(start + chunk_size, num_frames)
-            alpha_chunk = alpha_raw[start:end].to(device=device, dtype=dtype)
+            alpha_chunk = alpha_raw[start:end].to(device=device, dtype=compute_dtype)
             if blur_radius > 0:
-                alpha_chunk = (alpha_chunk > 0.5).to(dtype)
+                alpha_chunk = (alpha_chunk > 0.5).to(compute_dtype)
                 k = 2 * blur_radius + 1
                 alpha_chunk = F.avg_pool2d(
                     alpha_chunk.unsqueeze(1),
@@ -483,8 +489,8 @@ class LTXIcLoraPipeline:
                 alpha_chunk = alpha_chunk.clamp(0.0, 1.0)
             alpha_4d = alpha_chunk.unsqueeze(-1)  # (C, H, W, 1)
             chunk_result = (
-                blend[start:end] * alpha_4d
-                + orig[start:end].to(device=device, dtype=dtype) * (1.0 - alpha_4d)
+                blend[start:end].to(device=device, dtype=compute_dtype) * alpha_4d
+                + orig[start:end].to(device=device, dtype=compute_dtype) * (1.0 - alpha_4d)
             )
             chunks.append(chunk_result.detach().cpu())
 
@@ -995,7 +1001,7 @@ class LTXIcLoraPipeline:
         blend_stage2 = blend_stage2[:num_actual_frames]
         chunks = video_chunks_number(num_actual_frames, tiling_config)
         encode_video_output(
-            video=(blend_stage2.clamp(0, 1) * 255).to(torch.uint8),
+            video=blend_stage2.clamp(0, 1),  # float [0,1]; upstream color-convert crashes on uint8 (avg_pool2d on Byte)
             audio=decoded_audio,
             fps=int(frame_rate),
             output_path=output_path,

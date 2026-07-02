@@ -343,6 +343,7 @@ class IcLoraHandler(StateHandlerBase):
                 None,  # no depth
                 adapter_path=adapter_path,
                 lora_strength=req.lora_strength,
+                model_selection=req.model_selection,
             )
             t_load_end = time.perf_counter()
             logger.info("[ic-lora] Pipeline load: %.2fs", t_load_end - t_load_start)
@@ -351,7 +352,7 @@ class IcLoraHandler(StateHandlerBase):
             self._generation.update_progress("loading_model", 5, 0, 1)
 
             s = self.state.app_settings
-            use_api = not self._text.should_use_local_encoding()
+            use_api = not self._text.should_use_local_encoding(req.model_selection)
             encoding_method = "api" if use_api else "local"
             # Ingredients is an image-conditioned workflow (images are required),
             # so consult the I2V enhancer setting — never the T2V setting.
@@ -626,13 +627,18 @@ class IcLoraHandler(StateHandlerBase):
         if workflow in _UNAVAILABLE_WORKFLOWS:
             raise HTTPError(400, _UNAVAILABLE_MESSAGES[workflow])
 
-        # Live model selection is HDR IC-LoRA only. Reject any non-null
-        # ``model_selection`` for non-HDR workflows so generic IC-LoRA behavior
-        # does not silently change (plan §"Product/API contract").
-        if req.model_selection is not None and workflow != "hdr":
+        # Live model selection is accepted for all available IC-LoRA workflows
+        # (hdr, ingredients, in_outpainting, standard_video, union_control).
+        # Unavailable adapters (motion_track_control / hdr_scene_embeddings /
+        # lipdub) are already rejected above; this gate is the defensive backstop
+        # for an unknown/missing adapter (workflow is None) carrying a
+        # model_selection (plan §"Product/API contract").
+        if req.model_selection is not None and workflow not in (
+            "hdr", "ingredients", "in_outpainting", "standard_video", "union_control",
+        ):
             raise HTTPError(
                 400,
-                "model_selection is supported only for HDR IC-LoRA",
+                "model_selection is supported only for available IC-LoRA workflows",
             )
 
         # ponytail: dispatch ingredients before any video path validation
@@ -736,6 +742,7 @@ class IcLoraHandler(StateHandlerBase):
                 str(depth_model_path) if depth_model_path else None,
                 adapter_path=resolved_adapter_path,
                 lora_strength=req.lora_strength,
+                model_selection=req.model_selection,
             )
             t_load_end = time.perf_counter()
             logger.info("[ic-lora] Pipeline load: %.2fs", t_load_end - t_load_start)
@@ -744,7 +751,7 @@ class IcLoraHandler(StateHandlerBase):
             self._generation.update_progress("loading_model", 5, 0, 1)
 
             s = self.state.app_settings
-            use_api = not self._text.should_use_local_encoding()
+            use_api = not self._text.should_use_local_encoding(req.model_selection)
             encoding_method = "api" if use_api else "local"
             t_text_start = time.perf_counter()
             self._text.prepare_text_encoding(req.prompt, enhance_prompt=use_api and s.prompt_enhancer_enabled_t2v)
@@ -885,7 +892,10 @@ class IcLoraHandler(StateHandlerBase):
                 else:
                     input_colorspace = detect_colorspace(str(video_path))
             else:
-                input_colorspace = None
+                # Normal video file: detect tagged CS for output-CS preservation
+                # (ProRes/EXR). Model-domain transfer happens in the service
+                # pipeline via iter_video_frames_to_model_domain.
+                input_colorspace = detect_colorspace(str(video_path))
             output_path = make_primary_output_path(
                 str(self.outputs_dir), "ic_lora", output_format, uuid.uuid4().hex[:8]
             )

@@ -192,7 +192,10 @@ class RetakeHandler(StateHandlerBase):
             dir_spec = resolve_sequence_from_dir(str(video_file))
             input_colorspace = detect_colorspace(dir_spec.files[0]) if dir_spec is not None else None
         else:
-            input_colorspace = None
+            # Normal video file: detect tagged CS for output-CS preservation
+            # (ProRes/EXR). Model-domain transfer happens in the retake pipeline
+            # via iter_video_frames_to_model_domain.
+            input_colorspace = detect_colorspace(str(video_file))
         regenerate_video, regenerate_audio = self._resolve_retake_mode(mode)
 
         try:
@@ -273,16 +276,18 @@ class RetakeHandler(StateHandlerBase):
         # cannot open an EXR/PNG-seq frame). Transparent dir fallback (Fix D):
         # a system-generated EXR directory uses sequence_metadata_from_dir.
         # Otherwise av.open the container.
+        # ponytail: this validates the source is readable/openable (each helper
+        # raises on an unreadable file). Spatial dimensions are NOT rejected
+        # here — the retake pipeline aligns width/height up to a multiple of 64
+        # internally before generation (matches other LTX paths), so normal
+        # inputs like 1280x720 are accepted.
         if is_sequence_file(video_path):
-            width, height, _count, _fps = sequence_metadata(video_path)
+            sequence_metadata(video_path)
         elif is_sequence_dir(video_path):
-            width, height, _count, _fps = sequence_metadata_from_dir(video_path)
+            sequence_metadata_from_dir(video_path)
         else:
             from ltx_pipelines.utils.media_io import get_videostream_metadata
 
-            meta = get_videostream_metadata(video_path)
-            width, height = meta.width, meta.height
-        if width % 32 != 0 or height % 32 != 0:
-            raise HTTPError(400, f"Video width and height must be multiples of 32. Got {width}x{height}.")
+            get_videostream_metadata(video_path)
         # ponytail: frame count 8n+1 requirement is enforced in pipeline._run by snapping output_shape.frames down.
         # Handler accepts any frame count; pipeline trims to compatible prefix.

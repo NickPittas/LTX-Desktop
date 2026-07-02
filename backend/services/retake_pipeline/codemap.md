@@ -2,7 +2,7 @@
 
 ## Responsibility
 
-Video retake / V2V regeneration: re-denoises a sub-region (or all) of an existing video's video and audio modalities, driven by a temporal region mask (`TemporalRegionMask` over `[start_time, end_time]`). Forks orchestration from `ltx_pipelines.retake` with three intentional divergences (documented in the module docstring): `@torch.no_grad()` instead of `@torch.inference_mode()` (custom autograd functions in the checkpoint), tiled source-video encoding via `video_latent_from_file(..., tiling_config)`, and tiled video decoding via `VideoDecoder(..., tiling_config)`. Exposes `RetakePipeline` Protocol and `LTXRetakePipeline` concrete wrapper.
+Video retake / V2V regeneration: re-denoises a sub-region (or all) of an existing video's video and audio modalities, driven by a temporal region mask (`TemporalRegionMask` over `[start_time, end_time]`). Forks orchestration from `ltx_pipelines.retake` with three intentional divergences (documented in the module docstring): `@torch.no_grad()` instead of `@torch.inference_mode()` (custom autograd functions in the checkpoint), tiled source-video encoding via a local helper that decodes through `iter_video_frames_to_model_domain` (Rec.709 model-domain transfer) then `tiled_encode`, and tiled video decoding via `VideoDecoder(..., tiling_config)`. Exposes `RetakePipeline` Protocol and `LTXRetakePipeline` concrete wrapper.
 
 Files:
 - `retake_pipeline.py` — `RetakePipeline` Protocol (`create` with `loras`, `quantization`; `generate`).
@@ -15,7 +15,7 @@ Files:
 - **`loras: list[LoraPathStrengthAndSDOps]` and `quantization` are constructor args** (not generate args) — passed straight into `DiffusionStage(..., loras=tuple(loras), quantization=stage_quantization)`. Caller (handler) builds the LoRA entries with per-entry strengths before construction.
 - **Format/quantization branching** in `__init__`: `is_gguf` → `stage_quantization=None`; `is_split and quantization is not None` → `kijai_fp8_quantization_policy()`; else `stage_quantization = quantization` (passed through). GGUF prompt-encoder patch installed when `components.gemma_root is not None`. GGUF loader + component paths, or Kijai transformer config patch + component paths, installed per branch (note: `install_gguf_loader(self)` / `install_gguf_component_paths(self, ...)` — patch targets the wrapper instance itself, since the wrapper owns the blocks). Split 22B defaults `streaming_prefetch_count=2`.
 - **Two tiling configs**: `tiling = TilingConfig.default()` (decode) and a tighter `encoding_tiling` (`SpatialTilingConfig(tile_size_in_pixels=256, tile_overlap_in_pixels=64)`, `TemporalTilingConfig(tile_size_in_frames=24, tile_overlap_in_frames=16)`) for source-video VAE encoding to cap encoder VRAM.
-- **Source frame snapping**: `output_shape.frames` snapped down to nearest `8n+1` via `SpatioTemporalScaleFactors.default().time` when `(frames-1) % time != 0`.
+- **Source shape alignment**: `output_shape.width`/`height` aligned UP to a multiple of `64` (LTX VAE requirement; accepts any source size, e.g. 1280x720), and `output_shape.frames` snapped down to nearest `8n+1` via `SpatioTemporalScaleFactors.default().time` when `(frames-1) % time != 0`.
 - **Dual denoiser modes**: `distilled=True` → `DISTILLED_SIGMA_VALUES` + `SimpleDenoiser`; `distilled=False` → `LTX2Scheduler().execute(steps=num_inference_steps)` + `GuidedDenoiser` (requires `video_guider_params` and `audio_guider_params`, encodes both `[prompt]` and `[negative_prompt]`).
 - **`TemporalRegionMask(start_time, end_time, fps=output_shape.fps)`** conditioning on each modality, gated by `regenerate_video` / `regenerate_audio` flags and the presence of `initial_audio_latent`. `frozen=not regenerate_*`.
 - **Decode ordering**: audio decoded eagerly (`self.audio_decoder(audio_state.latent)`), video decoded lazily (`self.video_decoder(video_state.latent, tiling, generator)` returns `Iterator[torch.Tensor]`).
@@ -30,8 +30,8 @@ Files:
 1. `meta = get_videostream_metadata(video_path)` → `fps, num_frames = meta.fps, meta.frames`.
 2. `video_iter, audio = self._run(...)` (lines 164–319):
    - Validates `start_time < end_time`; resolves `effective_seed` (random if `seed < 0`).
-   - `get_videostream_metadata(video_path)` → `output_shape`; snaps frames to `8n+1`.
-   - **Source video encode (tiled)**: `self.image_conditioner(lambda enc: video_latent_from_file(video_encoder=enc, file_path=video_path, output_shape=output_shape, dtype=dtype, device=self.device, tiling_config=encoding_tiling))` → `initial_video_latent`.
+   - `get_videostream_metadata(video_path)` → `output_shape`; aligns width/height up to a multiple of `64` and snaps frames to `8n+1`.
+   - **Source video encode (tiled + model-domain transfer)**: `self.image_conditioner(lambda enc: _encode_source_video_latent_model_domain(video_encoder=enc, file_path=video_path, output_shape=output_shape, dtype=dtype, device=self.device, tiling_config=encoding_tiling))` → `initial_video_latent`. The local helper decodes via `services.exr_input.iter_video_frames_to_model_domain` (tagged non-Rec.709 → Rec.709) instead of the vendored `video_latent_from_file`.
    - **Source audio encode**: `self.audio_conditioner(lambda enc: audio_latent_from_file(audio_encoder=enc, file_path=video_path, output_shape=output_shape, dtype=dtype, device=self.device))` → `initial_audio_latent`.
    - **Text encode**: `self.prompt_encoder([prompt] if distilled else [prompt, negative_prompt], enhance_first_prompt=enhance_prompt, enhance_prompt_seed=effective_seed, streaming_prefetch_count=streaming_prefetch_count)`.
    - Build `video_modality_spec` / `audio_modality_spec` with `TemporalRegionMask` conditionings + `initial_latent` + `frozen`.

@@ -975,10 +975,11 @@ class IcLoraGenerateRequest(BaseModel):
     negative_prompt: str = ""
     images: list[IcLoraImageInput] = Field(default_factory=_default_ic_lora_images)
     adapter_id: AdapterID | None = None
-    # Live model selection for HDR IC-LoRA only (plan §"Product/API contract").
-    # Non-HDR IC-LoRA workflows reject any non-null value with HTTP 400 so the
-    # generic IC-LoRA behavior does not silently change. ``None`` preserves the
-    # legacy active-profile/downloaded-model routing.
+    # Live model selection for all available IC-LoRA workflows (hdr, ingredients,
+    # in_outpainting, standard_video, union_control) — plan §"Product/API
+    # contract". Unavailable workflows (motion_track_control /
+    # hdr_scene_embeddings / lipdub) are rejected before this field is honored.
+    # ``None`` preserves the legacy active-profile/downloaded-model routing.
     model_selection: ModelSelectionID | None = None
     mask_path: str | None = None
     mask_grow_px: int = Field(default=30, ge=0, le=128, description="Mask dilation radius in pixels. Controls LTXVDilateVideoMask radii. 0=no dilation, default=30 matches official full-res (stage2) radius")

@@ -70,7 +70,7 @@ Lines 830–836 — single encode call:
 
 ```python
 encode_video_output(
-    video=(blend_stage2.clamp(0, 1) * 255).to(torch.uint8),   # (F,H,W,3) uint8 CPU tensor
+    video=blend_stage2.clamp(0, 1),                              # (F,H,W,3) float32 CPU tensor in [0,1]
     audio=decoded_audio,                                       # Audio from audio_decoder
     fps=int(frame_rate),
     output_path=output_path,
@@ -78,11 +78,11 @@ encode_video_output(
 )
 ```
 
-Note: inpaint passes a single concrete uint8 tensor (not an Iterator) and `num_actual_frames`-derived chunks (cropped back from the padded count).
+Note: inpaint passes a single concrete float32 [0,1] tensor (not an Iterator — passing uint8 crashed upstream color conversion via `avg_pool2d` on Byte) and `num_actual_frames`-derived chunks (cropped back from the padded count).
 
 ### Output path hardcoding (c)
 
-`output_path` is caller-supplied `str` for both `generate` and `generate_inpaint`; the wrapper does not rewrite the extension. Callers (backend handlers) currently pass `.mp4` paths and the downstream `ltx_pipelines.utils.media_io.encode_video` hardcodes H.264 / yuv420p. To add MOV ProRes / EXR as primary output, the routing points are the **two** `encode_video_output(...)` call sites: line 436 (`generate`) and lines 830–836 (`generate_inpaint`). The inpaint call passes a uint8 CPU tensor, so an EXR path must accept/convert uint8 → float16/float32 frames and explicitly drop the audio mux (`audio=None`).
+`output_path` is caller-supplied `str` for both `generate` and `generate_inpaint`; the wrapper does not rewrite the extension. Callers (backend handlers) currently pass `.mp4` paths and the downstream `ltx_pipelines.utils.media_io.encode_video` hardcodes H.264 / yuv420p. To add MOV ProRes / EXR as primary output, the routing points are the **two** `encode_video_output(...)` call sites: line 436 (`generate`) and lines 830–836 (`generate_inpaint`). The inpaint call passes a float32 [0,1] CPU tensor, so an EXR path is a natural fit (no uint8→float conversion needed); it must still explicitly drop the audio mux (`audio=None`).
 
 ### T2V no-video path
 
