@@ -17,6 +17,7 @@ from tests.fakes.fake_gpu_info import FakeGpuInfo
 
 if TYPE_CHECKING:
     from ltx_pipelines.utils.types import OffloadMode
+    from services.local_memory_plan import LocalMemoryPlan
 
 
 @dataclass
@@ -467,10 +468,13 @@ class _FakeVideoPipelineBase:
         self.last_upsampler_path: str | None = None
         self.last_transformer_format: str | None = None
         self.last_offload_mode: OffloadMode | None = None
-        # Phase 3D: dev-vs-distilled routing metadata captured from create().
+        # Phase 2D: dev-vs-distilled routing metadata captured from create().
         self.last_components: ResolvedLtxComponents | None = None
         self.last_base_family: str | None = None
         self.last_distilled_lora_path: str | None = None
+        # Phase 2: memory plan threaded through create() (None while the handler
+        # still passes only offload_mode; the next handler slice passes it).
+        self.last_memory_plan: LocalMemoryPlan | None = None
 
     def _record_generate(self, payload: dict[str, Any]) -> None:
         self.generate_calls.append(payload)
@@ -521,6 +525,7 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
         *,
         transformer_format: str = "safetensors",
         distilled_lora_path: str | None = None,
+        memory_plan: LocalMemoryPlan | None = None,
     ) -> "FakeFastVideoPipeline":
         pipeline = FakeFastVideoPipeline._singleton
         if pipeline is None:
@@ -532,17 +537,9 @@ class FakeFastVideoPipeline(_FakeVideoPipelineBase):
         pipeline.last_transformer_format = transformer_format
         pipeline.last_distilled_lora_path = distilled_lora_path
         pipeline.last_base_family = components.base_family if components is not None else "distilled"
-        # ponytail: match real __init__ guard — split safetensors streams from CPU.
-        from ltx_pipelines.utils.types import OffloadMode
-
-        _is_split = (
-            transformer_format == "safetensors"
-            and components is not None
-            and components.video_vae_path is not None
-        )
-        if _is_split and offload_mode == OffloadMode.NONE:
-            offload_mode = OffloadMode.CPU
-        pipeline.last_offload_mode = offload_mode
+        # Phase 2: trust the memory plan when provided; no internal coercion.
+        pipeline.last_memory_plan = memory_plan
+        pipeline.last_offload_mode = memory_plan.offload_mode if memory_plan is not None else offload_mode
         return pipeline
 
     def generate(
@@ -641,6 +638,8 @@ class FakeIcLoraPipeline:
         offload_mode: OffloadMode,
         components: ResolvedLtxComponents | None = None,
         lora_strength: float = 1.0,
+        *,
+        memory_plan: LocalMemoryPlan | None = None,
     ) -> "FakeIcLoraPipeline":
         pipeline = FakeIcLoraPipeline._singleton
         if pipeline is None:
@@ -650,17 +649,9 @@ class FakeIcLoraPipeline:
         pipeline.last_lora_paths = lora_paths
         pipeline.last_lora_path = lora_paths[-1] if lora_paths else None
         pipeline.last_lora_strength = lora_strength
-        # ponytail: match real __init__ guard — split safetensors streams from CPU.
-        from ltx_pipelines.utils.types import OffloadMode
-
-        _is_split = (
-            components is not None
-            and components.transformer_format == "safetensors"
-            and components.video_vae_path is not None
-        )
-        if _is_split and offload_mode == OffloadMode.NONE:
-            offload_mode = OffloadMode.CPU
-        pipeline.last_offload_mode = offload_mode
+        # Phase 2: trust the memory plan when provided; no internal coercion.
+        pipeline.last_memory_plan = memory_plan
+        pipeline.last_offload_mode = memory_plan.offload_mode if memory_plan is not None else offload_mode
         return pipeline
 
     def __init__(self) -> None:
@@ -672,6 +663,7 @@ class FakeIcLoraPipeline:
         self.last_lora_path: str | None = None
         self.last_lora_strength: float | None = None
         self.last_offload_mode: OffloadMode | None = None
+        self.last_memory_plan: LocalMemoryPlan | None = None
 
     def generate(self, **kwargs: Any) -> None:
         self.generate_calls.append(kwargs)
@@ -726,8 +718,9 @@ class FakeHdrIcLoraPipeline:
         offload_mode: Any = None,
         *,
         gemma_root: str | None = None,
+        memory_plan: LocalMemoryPlan | None = None,
     ) -> "FakeHdrIcLoraPipeline":
-        del upsampler_path, device, gemma_root
+        del upsampler_path, device
         pipeline = FakeHdrIcLoraPipeline._singleton
         if pipeline is None:
             raise RuntimeError("FakeHdrIcLoraPipeline singleton is not bound")
@@ -738,7 +731,10 @@ class FakeHdrIcLoraPipeline:
         pipeline.last_distilled_lora_path = distilled_lora_path
         pipeline.last_hdr_lora_path = hdr_lora_path
         pipeline.last_scene_embeddings_path = scene_embeddings_path
-        pipeline.last_offload_mode = offload_mode
+        pipeline.last_gemma_root = gemma_root
+        # Phase 2: trust the memory plan when provided; no internal coercion.
+        pipeline.last_memory_plan = memory_plan
+        pipeline.last_offload_mode = memory_plan.offload_mode if memory_plan is not None else offload_mode
         return pipeline
 
     def __init__(self) -> None:
@@ -751,7 +747,9 @@ class FakeHdrIcLoraPipeline:
         self.last_distilled_lora_path: str | None = None
         self.last_hdr_lora_path: str | None = None
         self.last_scene_embeddings_path: str | None = None
+        self.last_gemma_root: str | None = None
         self.last_offload_mode: Any | None = None
+        self.last_memory_plan: LocalMemoryPlan | None = None
 
     def generate(self, **kwargs: Any) -> None:
         self.generate_calls.append(kwargs)
@@ -842,23 +840,17 @@ class FakeA2VPipeline:
         device: str | object,
         offload_mode: OffloadMode,
         components: ResolvedLtxComponents | None = None,
+        *,
+        memory_plan: LocalMemoryPlan | None = None,
     ) -> "FakeA2VPipeline":
         pipeline = FakeA2VPipeline._singleton
         if pipeline is None:
             raise RuntimeError("FakeA2VPipeline singleton is not bound")
         pipeline.last_checkpoint_path = checkpoint_path
         pipeline.last_components = components
-        # ponytail: match real __init__ guard — split safetensors streams from CPU.
-        from ltx_pipelines.utils.types import OffloadMode
-
-        _is_split = (
-            components is not None
-            and components.transformer_format == "safetensors"
-            and components.video_vae_path is not None
-        )
-        if _is_split and offload_mode == OffloadMode.NONE:
-            offload_mode = OffloadMode.CPU
-        pipeline.last_offload_mode = offload_mode
+        # Phase 2: trust the memory plan when provided; no internal coercion.
+        pipeline.last_memory_plan = memory_plan
+        pipeline.last_offload_mode = memory_plan.offload_mode if memory_plan is not None else offload_mode
         return pipeline
 
     def __init__(self) -> None:
@@ -867,6 +859,7 @@ class FakeA2VPipeline:
         self.last_checkpoint_path: CheckpointPath | None = None
         self.last_components: ResolvedLtxComponents | None = None
         self.last_offload_mode: OffloadMode | None = None
+        self.last_memory_plan: LocalMemoryPlan | None = None
 
     def generate(self, **kwargs: Any) -> None:
         self.generate_calls.append(kwargs)
@@ -895,23 +888,16 @@ class FakeRetakePipeline:
         *,
         loras: list[object] | None = None,
         quantization: object | None = None,
+        memory_plan: LocalMemoryPlan | None = None,
     ) -> "FakeRetakePipeline":
         pipeline = FakeRetakePipeline._singleton
         if pipeline is None:
             raise RuntimeError("FakeRetakePipeline singleton is not bound")
         pipeline.last_checkpoint_path = checkpoint_path
         pipeline.last_components = components
-        # ponytail: match real __init__ guard — split safetensors streams from CPU.
-        from ltx_pipelines.utils.types import OffloadMode
-
-        _is_split = (
-            components is not None
-            and components.transformer_format == "safetensors"
-            and components.video_vae_path is not None
-        )
-        if _is_split and offload_mode == OffloadMode.NONE:
-            offload_mode = OffloadMode.CPU
-        pipeline.last_offload_mode = offload_mode
+        # Phase 2: trust the memory plan when provided; no internal coercion.
+        pipeline.last_memory_plan = memory_plan
+        pipeline.last_offload_mode = memory_plan.offload_mode if memory_plan is not None else offload_mode
         return pipeline
 
     def __init__(self) -> None:
@@ -920,6 +906,7 @@ class FakeRetakePipeline:
         self.last_checkpoint_path: CheckpointPath | None = None
         self.last_components: ResolvedLtxComponents | None = None
         self.last_offload_mode: OffloadMode | None = None
+        self.last_memory_plan: LocalMemoryPlan | None = None
 
     def generate(self, **kwargs: Any) -> None:
         self.generate_calls.append(kwargs)

@@ -24,14 +24,24 @@ Usage:
 from __future__ import annotations
 
 import itertools
+import logging
+from typing import Any
 
 import torch
 from torch import nn
 
-from ltx_core.layer_streaming import _LayerStore
+logger = logging.getLogger(__name__)
+
+try:
+    from ltx_core.layer_streaming import _LayerStore
+except (ModuleNotFoundError, ImportError):
+    logger.info(
+        "ltx_core.layer_streaming is not available; pinned_pool_fix will no-op."
+    )
+    _LayerStore = None  # type: ignore[assignment]
 
 
-def _patched_init(self: _LayerStore, layers: nn.ModuleList, target_device: torch.device) -> None:
+def _patched_init(self: Any, layers: nn.ModuleList, target_device: torch.device) -> None:
     self.target_device = target_device
     self.num_layers = len(layers)
     self._on_gpu: set[int] = set()
@@ -52,7 +62,7 @@ def _patched_init(self: _LayerStore, layers: nn.ModuleList, target_device: torch
     self._pinned_in_flight: dict[int, list[torch.Tensor]] = {}
 
 
-def _patched_move_to_gpu(self: _LayerStore, idx: int, layer: nn.Module, *, non_blocking: bool = False) -> None:
+def _patched_move_to_gpu(self: Any, idx: int, layer: nn.Module, *, non_blocking: bool = False) -> None:
     """Pin layer *idx* on demand, then transfer to GPU."""
     self._check_idx(idx)
     if idx in self._on_gpu:
@@ -69,7 +79,7 @@ def _patched_move_to_gpu(self: _LayerStore, idx: int, layer: nn.Module, *, non_b
     self._on_gpu.add(idx)
 
 
-def _patched_evict_to_cpu(self: _LayerStore, idx: int, layer: nn.Module) -> None:
+def _patched_evict_to_cpu(self: Any, idx: int, layer: nn.Module) -> None:
     """Restore source data, freeing the GPU and pinned copies."""
     self._check_idx(idx)
     if idx not in self._on_gpu:
@@ -82,7 +92,7 @@ def _patched_evict_to_cpu(self: _LayerStore, idx: int, layer: nn.Module) -> None
     self._on_gpu.discard(idx)
 
 
-def _patched_cleanup(self: _LayerStore) -> None:
+def _patched_cleanup(self: Any) -> None:
     """Release all source data and in-flight pinned references."""
     for source_dict in self._source_data:
         source_dict.clear()
@@ -91,12 +101,13 @@ def _patched_cleanup(self: _LayerStore) -> None:
 
 
 # Apply patches
-assert hasattr(_LayerStore, "__init__"), "_LayerStore.__init__ not found — patch needs updating."
-assert hasattr(_LayerStore, "move_to_gpu"), "_LayerStore.move_to_gpu not found — patch needs updating."
-assert hasattr(_LayerStore, "evict_to_cpu"), "_LayerStore.evict_to_cpu not found — patch needs updating."
-assert hasattr(_LayerStore, "cleanup"), "_LayerStore.cleanup not found — patch needs updating."
+if _LayerStore is not None:
+    assert hasattr(_LayerStore, "__init__"), "_LayerStore.__init__ not found — patch needs updating."
+    assert hasattr(_LayerStore, "move_to_gpu"), "_LayerStore.move_to_gpu not found — patch needs updating."
+    assert hasattr(_LayerStore, "evict_to_cpu"), "_LayerStore.evict_to_cpu not found — patch needs updating."
+    assert hasattr(_LayerStore, "cleanup"), "_LayerStore.cleanup not found — patch needs updating."
 
-_LayerStore.__init__ = _patched_init  # type: ignore[assignment]
-_LayerStore.move_to_gpu = _patched_move_to_gpu  # type: ignore[assignment]
-_LayerStore.evict_to_cpu = _patched_evict_to_cpu  # type: ignore[assignment]
-_LayerStore.cleanup = _patched_cleanup  # type: ignore[assignment]
+    _LayerStore.__init__ = _patched_init  # type: ignore[assignment]
+    _LayerStore.move_to_gpu = _patched_move_to_gpu  # type: ignore[assignment]
+    _LayerStore.evict_to_cpu = _patched_evict_to_cpu  # type: ignore[assignment]
+    _LayerStore.cleanup = _patched_cleanup  # type: ignore[assignment]

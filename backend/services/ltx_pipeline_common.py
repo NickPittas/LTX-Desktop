@@ -9,6 +9,7 @@ import torch
 
 from api_types import ImageConditioningInput, OutputFormat
 from services.exr_input import resolve_image_input_path
+from services import memory_trace
 from services.services_utils import AudioOrNone, TilingConfigType, device_supports_fp8
 
 if TYPE_CHECKING:
@@ -170,19 +171,20 @@ def encode_video_output(
     """
     if encoder is None:
         encoder = _get_default_encoder()
-    encoder.encode(
-        video=video,
-        audio=audio,
-        fps=fps,
-        primary_path=output_path,
-        output_format=output_format,
-        proxy_path=proxy_path,
-        video_chunks_number=video_chunks_number_value,
-        on_progress=on_progress,
-        total_frames=total_frames,
-        input_colorspace=input_colorspace,
-        hdr_proxy_policy=hdr_proxy_policy,
-    )
+    with memory_trace.phase("encode_video_output"):
+        encoder.encode(
+            video=video,
+            audio=audio,
+            fps=fps,
+            primary_path=output_path,
+            output_format=output_format,
+            proxy_path=proxy_path,
+            video_chunks_number=video_chunks_number_value,
+            on_progress=on_progress,
+            total_frames=total_frames,
+            input_colorspace=input_colorspace,
+            hdr_proxy_policy=hdr_proxy_policy,
+        )
 
 
 _default_encoder_instance: MediaEncoder | None = None

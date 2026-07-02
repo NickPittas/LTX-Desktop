@@ -47,6 +47,8 @@ import services.patches.pinned_pool_fix as _pinned_pool_fix  # pyright: ignore[r
 del _pinned_pool_fix
 import services.patches.sequence_decode_patch as _sequence_decode_patch  # pyright: ignore[reportUnusedImport]  # Image-sequence inputs via decode_video_by_frame
 del _sequence_decode_patch
+import services.patches.block_offload_patch as _block_offload_patch  # pyright: ignore[reportUnusedImport]  # Phase 3B: DiffusionStage block-offload build path
+del _block_offload_patch
 
 from state.app_settings import AppSettings
 

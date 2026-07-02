@@ -124,9 +124,12 @@ def test_install_gguf_loader_replaces_model_loader_and_sd_ops() -> None:
     # loader + sd_ops both replaced with GGUF-native versions.
     assert isinstance(replaced.model_loader, GgufStateDictLoader)
     assert isinstance(replaced.model_sd_ops, GgufNativeSDOps)
-    # original builder fields preserved through dataclasses.replace.
+    # original builder fields preserved through _replace_builder (non-dataclass
+    # clone via with_* + copy.copy; upstream SingleGPUModelBuilder is not a dataclass).
     assert replaced.model_path == "/fake/transformer.gguf"
-    assert replaced.model_class_configurator is LTXModelConfigurator
+    # configurator is a Final private attr upstream (no public property); shallow
+    # copy in _replace_builder must preserve it.
+    assert replaced._model_class_configurator is LTXModelConfigurator
     assert replaced.loras == ()
     assert replaced.registry is builder.registry
     assert replaced.lora_load_device == builder.lora_load_device
@@ -170,6 +173,46 @@ def test_install_gguf_loader_is_idempotent() -> None:
     install_gguf_loader(pipe)
 
     assert pipe.stage._transformer_builder is after_first
+
+
+def test_install_gguf_loader_forces_none_offload_and_disables_streaming_builder() -> None:
+    """The transformer GGUF loader keeps raw bytes on CPU (peak mitigation) and,
+    because GGUF cannot stream, forces stage _offload_mode=NONE and clears
+    _streaming_builder — even when the pipeline was constructed with CPU offload."""
+    from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder
+    from ltx_core.model.transformer import LTXV_MODEL_COMFY_RENAMING_MAP, LTXModelConfigurator
+    from ltx_pipelines.utils.types import OffloadMode
+
+    builder = SingleGPUModelBuilder(
+        model_path="/fake/t.gguf",
+        model_class_configurator=LTXModelConfigurator,
+        model_sd_ops=LTXV_MODEL_COMFY_RENAMING_MAP,
+    )
+    streaming = SingleGPUModelBuilder(
+        model_path="/fake/t.gguf",
+        model_class_configurator=LTXModelConfigurator,
+        model_sd_ops=LTXV_MODEL_COMFY_RENAMING_MAP,
+    )
+    # Pipeline constructed with CPU offload + a streaming builder before the
+    # GGUF loader helper runs.
+    pipe = SimpleNamespace(
+        stage=SimpleNamespace(
+            _transformer_builder=builder,
+            _streaming_builder=streaming,
+            _offload_mode=OffloadMode.CPU,
+        )
+    )
+
+    install_gguf_loader(pipe)
+
+    replaced = pipe.stage._transformer_builder
+    assert isinstance(replaced.model_loader, GgufStateDictLoader)
+    # Explicit raw-on-CPU mitigation for the transformer full-load loader.
+    assert replaced.model_loader._keep_raw_on_cpu is True  # type: ignore[attr-defined]
+    # GGUF cannot stream: offload forced to NONE and streaming builder disabled,
+    # so upstream cannot pick the safetensors-only streaming path at runtime.
+    assert pipe.stage._offload_mode == OffloadMode.NONE  # type: ignore[attr-defined]
+    assert pipe.stage._streaming_builder is None  # type: ignore[attr-defined]
 
 
 def test_install_gguf_loader_raises_on_wrong_pipeline_shape() -> None:
@@ -1339,6 +1382,48 @@ def test_patched_init_embeddings_builder_uses_gguf_ops_for_gguf_path(
     )
 
 
+def test_patched_init_accepts_offload_mode_and_forces_none_for_gguf(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """patched_init accepts upstream offload_mode/text_encoder_builder kwargs and
+    does not leave the GGUF path in CPU offload with no streaming builder."""
+    from ltx_pipelines.utils import blocks
+    from ltx_pipelines.utils.types import OffloadMode
+    from services.patches.gguf_loader_fix import install_gguf_prompt_encoder_patch
+
+    gguf_path = tmp_path / "gemma-3-12b-it.gguf"
+    gguf_path.write_text("dummy")
+
+    monkeypatch.setattr(
+        "services.patches.gguf_loader_fix._module_ops_from_gemma_root_slow_processor",
+        lambda root: [],
+    )
+
+    install_gguf_prompt_encoder_patch()
+
+    class _FakeEncoder3:
+        pass
+
+    encoder = _FakeEncoder3()
+    # Caller requests CPU offload; GGUF path must force NONE (no streaming builder).
+    blocks.PromptEncoder.__init__(
+        encoder,
+        checkpoint_path=(str(tmp_path / "transformer.gguf"), str(tmp_path / "tp.safetensors")),
+        gemma_root=str(gguf_path),
+        dtype=torch.bfloat16,
+        device=torch.device("cpu"),
+        offload_mode=OffloadMode.CPU,
+        text_encoder_builder=None,
+    )
+
+    # Upstream attribute surface is populated...
+    assert encoder._offload_mode == OffloadMode.NONE  # type: ignore[attr-defined]
+    assert encoder._streaming_text_encoder_builder is None  # type: ignore[attr-defined]
+    assert encoder._gemma_root == str(gguf_path)  # type: ignore[attr-defined]
+    assert encoder._dtype == torch.bfloat16  # type: ignore[attr-defined]
+
+
 # ---------------------------------------------------------------------------
 # Runtime LoRA on GgufLinear
 # ---------------------------------------------------------------------------
@@ -1698,6 +1783,49 @@ class TestInstallKijaiTransformerConfigPatch:
         meta_2 = pipe.stage_2._transformer_builder.model_config()
         assert meta_2["transformer"]["caption_proj_before_connector"] is True
         assert meta_2["transformer"]["caption_channels"] == 3840
+
+    def test_patches_streaming_builder_when_present(
+        self,
+        tmp_path: Path,
+        _v1_config: dict[str, object],
+        _v2_config: dict[str, object],
+    ) -> None:
+        """Split safetensors: _streaming_builder is repointed to the V2 config
+        loader too, so CPU-offloaded builds stream with the right config."""
+        transformer = tmp_path / "transformer.safetensors"
+        text_proj = tmp_path / "text_projection.safetensors"
+        _make_safetensors(transformer, _v1_config)
+        _make_safetensors(text_proj, _v2_config)
+
+        checkpoint_path = (str(transformer), str(text_proj))
+        from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder
+        from ltx_core.model.transformer import LTXV_MODEL_COMFY_RENAMING_MAP, LTXModelConfigurator
+
+        builder = SingleGPUModelBuilder(
+            model_path=checkpoint_path,
+            model_class_configurator=LTXModelConfigurator,
+            model_sd_ops=LTXV_MODEL_COMFY_RENAMING_MAP,
+        )
+        streaming = SingleGPUModelBuilder(
+            model_path=checkpoint_path,
+            model_class_configurator=LTXModelConfigurator,
+            model_sd_ops=LTXV_MODEL_COMFY_RENAMING_MAP,
+        )
+        pipe = SimpleNamespace(
+            stage=SimpleNamespace(_transformer_builder=builder, _streaming_builder=streaming),
+        )
+
+        from services.patches.gguf_loader_fix import install_kijai_transformer_config_patch
+
+        install_kijai_transformer_config_patch(pipe, checkpoint_path)
+
+        # Both builders now read V2 config (caption_channels present).
+        meta = pipe.stage._transformer_builder.model_config()
+        smeta = pipe.stage._streaming_builder.model_config()  # type: ignore[attr-defined]
+        assert meta["transformer"]["caption_channels"] == 3840
+        assert smeta["transformer"]["caption_channels"] == 3840
+        # The streaming builder was actually replaced (not left as the original).
+        assert pipe.stage._streaming_builder is not streaming  # type: ignore[attr-defined]
 
     def test_no_v2_config_skips_gracefully(
         self,

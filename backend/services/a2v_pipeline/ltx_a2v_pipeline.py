@@ -8,12 +8,14 @@ from typing import TYPE_CHECKING
 import torch
 
 from api_types import ImageConditioningInput, OutputFormat
+from services.block_offload import attach_memory_plan_to_stages
 from services.ltx_components import CheckpointPath, ResolvedLtxComponents
 from services.ltx_pipeline_common import default_tiling_config, encode_video_output, video_chunks_number
 from services.services_utils import AudioOrNone, TilingConfigType, device_supports_fp8
 
 if TYPE_CHECKING:
     from ltx_pipelines.utils.types import OffloadMode
+    from services.local_memory_plan import LocalMemoryPlan
     from services.media_encoder.media_encoder import MediaEncoder
     from services.color_management import ColorSpace
 
@@ -27,6 +29,8 @@ class LTXa2vPipeline:
         device: torch.device,
         offload_mode: OffloadMode,
         components: ResolvedLtxComponents | None = None,
+        *,
+        memory_plan: LocalMemoryPlan | None = None,
     ) -> "LTXa2vPipeline":
         return LTXa2vPipeline(
             checkpoint_path=checkpoint_path,
@@ -35,6 +39,7 @@ class LTXa2vPipeline:
             device=device,
             offload_mode=offload_mode,
             components=components,
+            memory_plan=memory_plan,
         )
 
     def __init__(
@@ -45,6 +50,8 @@ class LTXa2vPipeline:
         device: torch.device,
         offload_mode: OffloadMode,
         components: ResolvedLtxComponents | None = None,
+        *,
+        memory_plan: LocalMemoryPlan | None = None,
     ) -> None:
         self._components = components
         from services.a2v_pipeline.distilled_a2v_pipeline import DistilledA2VPipeline
@@ -72,12 +79,11 @@ class LTXa2vPipeline:
 
             quantization = build_policy(checkpoint_path) if device_supports_fp8(device) else None  # type: ignore[arg-type]  # non-split branch → str checkpoint
 
-        # ponytail: split safetensors 22B does not fit full residency on 32GB;
-        # stream from CPU unless an explicit non-NONE offload mode is set.
-        from ltx_pipelines.utils.types import OffloadMode
-
-        if is_split and offload_mode == OffloadMode.NONE:
-            offload_mode = OffloadMode.CPU
+        # Phase 2: trust the memory plan's offload decision when provided; no
+        # internal split/GGUF coercion. Transitional handler path
+        # (memory_plan=None) uses the caller's offload_mode as-is.
+        if memory_plan is not None:
+            offload_mode = memory_plan.offload_mode
         self._offload_mode = offload_mode
         self.pipeline = DistilledA2VPipeline(
             distilled_checkpoint_path=checkpoint_path,  # type: ignore[arg-type]  # ponytail: ltx_pipelines accepts tuple per M5 spec
@@ -87,6 +93,11 @@ class LTXa2vPipeline:
             quantization=quantization,
             offload_mode=self._offload_mode,
         )
+        # Phase 3B: stamp the memory plan onto the upstream pipeline's
+        # DiffusionStage so the block-offload build patch can read it when the
+        # transformer is built lazily at generation time.
+        if memory_plan is not None:
+            attach_memory_plan_to_stages(self.pipeline, memory_plan)
 
         if is_gguf:
             from services.patches.gguf_loader_fix import install_gguf_component_paths, install_gguf_loader

@@ -134,11 +134,16 @@ class ICLoraState:
     adapter_path: str | None = None
     pose_resources: PoseResources | None = None
     conditioning_cache: ConditioningCache = field(default_factory=ConditioningCache)
+    # Phase 2: memory-plan cache key (populated by the handler slice; defaults
+    # to empty so existing handler construction calls keep typechecking).
+    cache_key: tuple[str, ...] = ()
 
 
 @dataclass
 class A2VPipelineState:
     pipeline: A2VPipeline
+    # Phase 2: memory-plan cache key (populated by the handler slice).
+    cache_key: tuple[str, ...] = ()
 
 
 @dataclass
@@ -146,6 +151,8 @@ class RetakePipelineState:
     pipeline: RetakePipeline
     distilled: bool
     quantized: bool
+    # Phase 2: memory-plan cache key (populated by the handler slice).
+    cache_key: tuple[str, ...] = ()
 
 
 @dataclass

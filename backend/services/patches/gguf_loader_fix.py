@@ -14,6 +14,8 @@ paths that share the same builder tuple (each builder filters keys via
 
 from __future__ import annotations
 
+import copy
+import dataclasses
 import functools
 import gc
 import inspect
@@ -21,24 +23,34 @@ import json
 import logging
 import os
 import re
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 
+from ltx_core.loader.fuse_loras import FuseRule
 from ltx_core.loader.module_ops import ModuleOps
 from ltx_core.loader.primitives import StateDict
 from ltx_core.loader.sd_ops import KeyValueOperationResult, SDOps
 from ltx_core.model.transformer.model import LTXModel
+from ltx_core.model.video_vae import VideoDecoder, VideoEncoder
 from ltx_core.quantization import QuantizationPolicy
 from collections.abc import Callable
 
 from ltx_core.text_encoders.gemma.embeddings_processor import EmbeddingsProcessor
 from ltx_core.text_encoders.gemma.encoders.base_encoder import GemmaTextEncoder
 
+from services import memory_trace
+
 logger = logging.getLogger(__name__)
+
+# ponytail: high-water GGUF forward trace — emit a single write_event every Nth
+# QParam forward so tracing does not spam across hundreds of Gemma/LTX linears.
+# No-op when tracing is disabled (memory_trace.write_event is a no-op then).
+# Mutated via the dict (no `global`) so pyright stays happy.
+_GGUF_QPARAM_FORWARD_STATE: dict[str, int] = {"count": 0}
+_GGUF_QPARAM_FORWARD_TRACE_EVERY: int = 256
 
 # Metadata keys searched, in priority order, for the embedded JSON config.
 _CONFIG_KEYS = ("config", "ltx.config", "general.config", "ltx_config")
@@ -224,6 +236,15 @@ class GgufLinear(torch.nn.Linear):
         # clearing that prevented CUDA allocator fragmentation during ~432
         # dequant cycles in Gemma encode (at higher per-forward cost).
         had_qparam = isinstance(self.weight, QParam) or isinstance(self.bias, QParam)
+        if had_qparam:
+            _GGUF_QPARAM_FORWARD_STATE["count"] += 1
+            if _GGUF_QPARAM_FORWARD_STATE["count"] % _GGUF_QPARAM_FORWARD_TRACE_EVERY == 1:
+                memory_trace.write_event(
+                    "gguf_forward",
+                    "GgufLinear.forward",
+                    has_qparam=True,
+                    input_shape=tuple(input.shape),
+                )
         if isinstance(self.weight, QParam):
             del weight
         if isinstance(self.bias, QParam):
@@ -759,7 +780,19 @@ class KijaiFp8ScaledLinear(torch.nn.Linear):
         bias = self.bias
         if isinstance(bias, torch.Tensor) and bias.is_floating_point():
             bias = bias.to(device=input.device, dtype=input.dtype)
-        return torch.nn.functional.linear(input, weight, bias)
+        result = torch.nn.functional.linear(input, weight, bias)
+
+        # Runtime LoRA delta (IC-LoRA / multi-LoRA), applied on top of the FP8
+        # base output to preserve the scaled-FP8 base weights: build-time fuse
+        # would dequant + promote LoRA-touched layers to BF16 resident tensors.
+        # Pairs are attached CPU-side post-build (see _patch_kijai_lora_build);
+        # mirrors GgufLinear.forward.
+        compute_dtype = input.dtype if input.is_floating_point() else torch.float32
+        for lora_A, lora_B, strength in getattr(self, "lora_pairs", ()):
+            a = lora_A.to(device=input.device, dtype=compute_dtype)
+            b = lora_B.to(device=input.device, dtype=compute_dtype)
+            result = result + torch.nn.functional.linear(torch.nn.functional.linear(input, a), b) * strength
+        return result
 
 
 def _amend_forward_with_kijai_fp8_scaled(model: torch.nn.Module) -> torch.nn.Module:
@@ -776,8 +809,81 @@ KIJAI_FP8_SCALED_LINEAR_OP = ModuleOps(
 )
 
 
+#: VAE counterpart of ``KIJAI_FP8_SCALED_LINEAR_OP``. The transformer op's matcher
+#: gates on ``LTXModel``, so it never runs for sidecar VAE builders (whose root
+#: model is a ``VideoEncoder``/``VideoDecoder``); without this op those VAE
+#: linears upcast to BF16 and OOM on low VRAM. Reuses the same generic mutator
+#: (swap every ``nn.Linear`` to ``KijaiFp8ScaledLinear``); non-FP8 linears behave
+#: unchanged and FP8-scaled linears honor ``weight_scale``.
+KIJAI_VAE_FP8_SCALED_LINEAR_OP = ModuleOps(
+    name="kijai_vae_fp8_scaled_linear",
+    matcher=lambda model: isinstance(model, (VideoEncoder, VideoDecoder)),
+    mutator=_amend_forward_with_kijai_fp8_scaled,
+)
+
+
+def _kijai_fp8_scaled_fuse(
+    key: str,
+    weight: torch.Tensor,
+    deltas: torch.Tensor,
+    model_sd: StateDict,
+) -> dict[str, torch.Tensor]:
+    """Fuse LoRA deltas into a Kijai scaled-FP8 weight.
+
+    Kijai stores raw FP8 ``*.weight`` plus a per-tensor ``*.weight_scale``; the
+    real value is ``weight * scale``. The default bf16 fuse rule adds the BF16
+    LoRA delta to the *raw unscaled* FP8 weight, corrupting it. Instead:
+
+    - When a companion ``<key>_scale`` is present in ``model_sd.sd``, dequantize
+      (``weight * scale``) in fp32, add the BF16 deltas, and return a BF16 fused
+      weight for ``key`` plus a neutralized (all-ones) scale. Correctness over
+      FP8 memory for LoRA-touched layers; untouched layers stay scaled FP8.
+    - Otherwise fall back to a plain BF16 add on the raw upcast weight.
+
+    Returning the scale key in the dict overwrites the stale companion in the
+    destination state dict — ``fuse_lora_weights`` yields every returned key into
+    the destination. ``KijaiFp8ScaledLinear.forward`` skips scaling for non-FP8
+    weights regardless, but the all-ones scale keeps the state dict
+    self-consistent (a no-op if any residual scaling is ever applied).
+    """
+    scale_key = key + "_scale"
+    raw_scale = model_sd.sd.get(scale_key)
+    if isinstance(raw_scale, torch.Tensor):
+        # Dequantize in fp32 for scale-multiply precision, add BF16 deltas, cast
+        # the fused result to BF16 (correctness over FP8 memory).
+        dequant = weight.to(dtype=torch.float32) * raw_scale.to(dtype=torch.float32)
+        fused = (dequant + deltas.to(dtype=torch.float32)).to(dtype=torch.bfloat16)
+        return {
+            key: fused,
+            scale_key: torch.ones_like(raw_scale),
+        }
+    # No companion scale: safe BF16 add on the raw (upcast) weight.
+    fused = weight.to(dtype=torch.bfloat16) + deltas.to(dtype=torch.bfloat16)
+    return {key: fused}
+
+
+#: Fuse rule for Kijai scaled-FP8 weights (raw FP8 weight + ``*.weight_scale``).
+#: Dequantizes via the scale before adding BF16 LoRA deltas and returns a BF16
+#: fused weight, neutralizing the companion scale so the already-dequantized
+#: weight is never double-scaled.
+kijai_fp8_scaled_fuse_rule = FuseRule(
+    aggregation_dtype=torch.bfloat16,
+    fuse_fn=_kijai_fp8_scaled_fuse,
+)
+
+
 def kijai_fp8_quantization_policy() -> QuantizationPolicy:
-    return QuantizationPolicy(sd_ops=SDOps(name="identity"), module_ops=(KIJAI_FP8_SCALED_LINEAR_OP,))
+    # Ensure the runtime-LoRA build patch is installed: Kijai LoRAs must be
+    # attached post-build (runtime) so build-time fuse does not promote
+    # LoRA-touched scaled-FP8 layers into BF16 resident tensors. The patch is
+    # idempotent and inert for builds without LoRAs. The fuse_rule below stays
+    # as a build-time fallback for any path that bypasses the patch.
+    _patch_kijai_lora_build()
+    return QuantizationPolicy(
+        sd_ops=SDOps(name="identity"),
+        module_ops=(KIJAI_FP8_SCALED_LINEAR_OP,),
+        fuse_rule=kijai_fp8_scaled_fuse_rule,
+    )
 
 
 class GgufStateDictLoader:
@@ -796,12 +902,16 @@ class GgufStateDictLoader:
         lazy_quantized: bool = True,
         lazy_quantized_filter: Callable[[str], bool] | None = None,
         allow_safetensors_only: bool = False,
+        keep_raw_on_cpu: bool = False,
     ) -> None:
         self._require_transformer_config = require_transformer_config
         self._include_safetensors = include_safetensors
         self._lazy_quantized = lazy_quantized
         self._lazy_quantized_filter = lazy_quantized_filter
         self._allow_safetensors_only = allow_safetensors_only
+        # Explicit raw-on-CPU knob (full-load memory mitigation) in addition to
+        # the legacy LTX_GGUF_KEEP_RAW_ON_CPU=1 env var.
+        self._keep_raw_on_cpu = keep_raw_on_cpu
 
     def metadata(self, path: str) -> dict[str, object]:
         if not str(path).lower().endswith(".gguf"):
@@ -870,8 +980,10 @@ class GgufStateDictLoader:
 
         # ponytail: Comfy-like behavior — quantized raw bytes can live on
         # active/offload device; dequantized weight remains temporary per forward.
-        # Set LTX_GGUF_KEEP_RAW_ON_CPU=1 to force CPU residency unconditionally.
-        if device is not None and os.environ.get("LTX_GGUF_KEEP_RAW_ON_CPU") != "1":
+        # Force CPU residency when the loader was built with keep_raw_on_cpu=True
+        # (transformer full-load mitigation) OR legacy LTX_GGUF_KEEP_RAW_ON_CPU=1.
+        keep_on_cpu = self._keep_raw_on_cpu or os.environ.get("LTX_GGUF_KEEP_RAW_ON_CPU") == "1"
+        if device is not None and not keep_on_cpu:
             target_device = torch.device(device)
         else:
             target_device = torch.device("cpu")
@@ -1080,6 +1192,7 @@ def install_gguf_prompt_encoder_patch() -> None:
         GemmaTextEncoderConfigurator,
     )
     from ltx_pipelines.utils import blocks
+    from ltx_pipelines.utils.types import OffloadMode
 
     if getattr(blocks.PromptEncoder.__init__, "_ltx_desktop_gguf_patch", False):
         return
@@ -1095,20 +1208,37 @@ def install_gguf_prompt_encoder_patch() -> None:
         dtype: torch.dtype,
         device: torch.device,
         registry: object | None = None,
+        offload_mode: OffloadMode = OffloadMode.NONE,
+        text_encoder_builder: object | None = None,
     ) -> None:
         # ponytail: empty/None gemma_root = API mode, delegate to original instead of _find_gemma_gguf raising.
         if not gemma_root:
-            original_init(self, checkpoint_path, gemma_root, dtype, device, registry)
+            original_init(
+                self, checkpoint_path, gemma_root, dtype, device, registry, offload_mode, text_encoder_builder
+            )
             return
         gguf_path = _find_gemma_gguf(gemma_root)
         if gguf_path is None:
             logger.info("PromptEncoder GGUF patch fallback gemma_root=%s checkpoint=%s", gemma_root, checkpoint_path)
-            original_init(self, checkpoint_path, gemma_root, dtype, device, registry)
+            original_init(
+                self, checkpoint_path, gemma_root, dtype, device, registry, offload_mode, text_encoder_builder
+            )
             return
 
         logger.info("PromptEncoder GGUF init gemma=%s checkpoint=%s", gguf_path, checkpoint_path)
+        # Mirror upstream PromptEncoder.__init__ attribute names so callers that
+        # read _gemma_root/_checkpoint_path/_offload_mode/_streaming_text_encoder_builder
+        # see the same surface as the safetensors path.
+        self._gemma_root = gemma_root
+        self._checkpoint_path = checkpoint_path
         self._dtype = dtype
         self._device = device
+        # ponytail: GGUF has no real StreamingModelBuilder (upstream scans
+        # safetensors and cannot stream lazy QParam blocks), so the GGUF prompt
+        # encoder always runs full-load: force NONE to honor the upstream
+        # invariant that streaming builder is None ⟹ offload NONE.
+        self._offload_mode = OffloadMode.NONE
+        self._streaming_text_encoder_builder = None
         module_ops = _module_ops_from_gemma_root_slow_processor(_resolve_gemma_tokenizer_root(gemma_root))
         registry_obj = registry or DummyRegistry()
         self._text_encoder_builder = Builder(
@@ -1183,9 +1313,13 @@ def _install_gemma_encode_patch() -> None:
     @torch.inference_mode()
     def patched_encode(
         self: GemmaTextEncoder,
-        text: str,
+        text: str | list[str] | tuple[str, ...],
         padding_side: str = "left",  # noqa: ARG001
-    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+    ) -> list[tuple[tuple[torch.Tensor, ...], torch.Tensor]]:
+        # ponytail: upstream PromptEncoder.__call__ passes a list (e.g. [prompt]);
+        # this patch builds a single batch row, so collapse to the first prompt.
+        if isinstance(text, (list, tuple)):
+            text = text[0] if text else ""
         token_pairs = self.tokenizer.tokenize_with_weights(text)["gemma"]
         language_model = self.model.model.language_model
         device = language_model.embed_tokens.weight.device
@@ -1202,7 +1336,10 @@ def _install_gemma_encode_patch() -> None:
         outputs = self.model.model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
         hidden_states = outputs.hidden_states
         del outputs
-        return hidden_states, attention_mask
+        # Upstream PromptEncoder.__call__ iterates the encode() result and
+        # unpacks each element as (hidden_states, mask): ``[proc.process_hidden_states(hs, mask) for hs, mask in raw_outputs]``.
+        # Return a list of one (hs, mask) pair for the single collapsed prompt.
+        return [(hidden_states, attention_mask)]
 
     patched_encode._ltx_desktop_gguf_patch = True  # type: ignore[attr-defined]
     GemmaTextEncoder.encode = patched_encode  # type: ignore[method-assign]
@@ -1257,7 +1394,7 @@ def _attach_mmproj_to_prompt_encoder(pipeline: object, mmproj_path: str) -> None
     if any(getattr(op, "name", None) == mmproj_op.name for op in existing_ops):
         return
     try:
-        prompt_encoder._text_encoder_builder = replace(  # type: ignore[attr-defined]
+        prompt_encoder._text_encoder_builder = _replace_builder(  # type: ignore[attr-defined]
             builder, module_ops=(*existing_ops, mmproj_op)
         )
     except (TypeError, ValueError) as exc:
@@ -1322,11 +1459,29 @@ def install_gguf_component_paths(
         raise RuntimeError("Profile missing audio VAE safetensors path")
 
     if image_conditioner is not None and video_vae is not None:
-        _replace_builder_model_path(image_conditioner, "_encoder_builder", video_vae, model_sd_ops=KIJAI_VIDEO_VAE_ENCODER_KEYS_FILTER)
+        _replace_builder_model_path(
+            image_conditioner,
+            "_encoder_builder",
+            video_vae,
+            model_sd_ops=KIJAI_VIDEO_VAE_ENCODER_KEYS_FILTER,
+            module_ops=(KIJAI_VAE_FP8_SCALED_LINEAR_OP,),
+        )
     if upsampler is not None and video_vae is not None:
-        _replace_builder_model_path(upsampler, "_encoder_builder", video_vae, model_sd_ops=KIJAI_VIDEO_VAE_ENCODER_KEYS_FILTER)
+        _replace_builder_model_path(
+            upsampler,
+            "_encoder_builder",
+            video_vae,
+            model_sd_ops=KIJAI_VIDEO_VAE_ENCODER_KEYS_FILTER,
+            module_ops=(KIJAI_VAE_FP8_SCALED_LINEAR_OP,),
+        )
     if video_decoder is not None and video_vae is not None:
-        _replace_builder_model_path(video_decoder, "_decoder_builder", video_vae, model_sd_ops=KIJAI_VIDEO_VAE_DECODER_KEYS_FILTER)
+        _replace_builder_model_path(
+            video_decoder,
+            "_decoder_builder",
+            video_vae,
+            model_sd_ops=KIJAI_VIDEO_VAE_DECODER_KEYS_FILTER,
+            module_ops=(KIJAI_VAE_FP8_SCALED_LINEAR_OP,),
+        )
     if audio_conditioner is not None and audio_vae is not None:
         _replace_builder_model_path(audio_conditioner, "_encoder_builder", audio_vae)
     if audio_decoder is not None and audio_vae is not None:
@@ -1407,7 +1562,7 @@ def _patch_gguf_lora_build() -> None:
         is_gguf = isinstance(getattr(self, "model_loader", None), GgufStateDictLoader)
         if is_gguf and loras and any(l.strength for l in loras):
             lora_data = _preload_gguf_loras(self)
-            model = original(replace(self, loras=()), *args, **kwargs)
+            model = original(_replace_builder(self, loras=()), *args, **kwargs)
             _attach_gguf_loras_to_model(model, lora_data)
             return model
         return original(self, *args, **kwargs)
@@ -1416,13 +1571,103 @@ def _patch_gguf_lora_build() -> None:
     _GGUF_BUILD_PATCHED = True
 
 
+# ── Kijai FP8 runtime LoRA helpers ────────────────────────────────────────
+#
+# Kijai scaled-FP8 LoRAs are attached at runtime (post-build) to preserve the
+# FP8 base weights. Build-time fuse (kijai_fp8_scaled_fuse_rule, kept below as a
+# fallback) would dequant + promote LoRA-touched layers to BF16 resident
+# tensors, defeating scaled-FP8 residency. Mirrors the GGUF runtime LoRA path.
+
+
+def _attach_kijai_loras_to_model(
+    model: torch.nn.Module,
+    lora_data: tuple[tuple[dict[str, torch.Tensor], float], ...],
+) -> None:
+    """Attach LoRA A/B weights to KijaiFp8ScaledLinear modules by matching names.
+
+    Sets ``module.lora_pairs`` to CPU-stored ``(A, B, strength)`` tuples; the FP8
+    base weights are preserved and the LoRA delta is applied at forward time.
+    """
+    name_to_module: dict[str, torch.nn.Module] = {
+        name: mod for name, mod in model.named_modules() if isinstance(mod, KijaiFp8ScaledLinear)
+    }
+    module_pairs: dict[str, list[tuple[torch.Tensor, torch.Tensor, float]]] = {}
+    for lora_sd, strength in lora_data:
+        for key in lora_sd:
+            if key.endswith(".lora_A.weight"):
+                base = key[: -len(".lora_A.weight")]
+                b_key = f"{base}.lora_B.weight"
+                if base in name_to_module and b_key in lora_sd:
+                    module_pairs.setdefault(base, []).append(
+                        (lora_sd[key].contiguous().cpu(), lora_sd[b_key].contiguous().cpu(), strength)
+                    )
+    for base, pairs in module_pairs.items():
+        name_to_module[base].lora_pairs = tuple(pairs)
+
+
+# ── Runtime LoRA globals (Kijai) ──────────────────────────────────────────
+_KIJAI_BUILD_PATCHED: bool = False
+
+
+def _patch_kijai_lora_build() -> None:
+    """Patch SingleGPUModelBuilder.build to attach runtime LoRAs post-load for
+    Kijai scaled-FP8 builders.
+
+    One-shot (idempotent via module-level flag). Kijai builders with LoRAs
+    preload the adapters, clear them so upstream build does NOT build-time-fuse
+    LoRA deltas into BF16 resident tensors (which would defeat scaled-FP8
+    residency), then attach runtime LoRA pairs to KijaiFp8ScaledLinear modules
+    after the build.
+
+    Composes with an already-installed :func:`_patch_gguf_lora_build`: each patch
+    captures the *current* ``SingleGPUModelBuilder.build`` as its ``original`` and
+    only acts on its own builder/loader type (Kijai via the module-op name, GGUF
+    via the loader type), delegating otherwise. Install order does not matter —
+    whichever is installed second wraps the first and both short-circuit cleanly
+    for non-matching builders. The LoRA preload itself is builder-generic
+    (reads ``builder.loras`` / ``load_sd`` / ``registry`` / ``lora_load_device``),
+    so the GGUF preloader is reused directly.
+    """
+    global _KIJAI_BUILD_PATCHED  # noqa: PLW0602
+    if _KIJAI_BUILD_PATCHED:
+        return
+    from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder
+
+    original = SingleGPUModelBuilder.build
+
+    @functools.wraps(original)
+    def _patched(self: object, *args: object, **kwargs: object) -> object:
+        loras = getattr(self, "loras", ())
+        is_kijai = any(
+            op.name == KIJAI_FP8_SCALED_LINEAR_OP.name
+            for op in getattr(self, "module_ops", ())
+        )
+        if is_kijai and loras and any(l.strength for l in loras):
+            lora_data = _preload_gguf_loras(self)
+            model = original(_replace_builder(self, loras=()), *args, **kwargs)
+            _attach_kijai_loras_to_model(model, lora_data)
+            return model
+        return original(self, *args, **kwargs)
+
+    SingleGPUModelBuilder.build = _patched
+    _KIJAI_BUILD_PATCHED = True
+
+
 def install_gguf_loader(pipeline: object) -> None:
     """Install GGUF-native loader, sd_ops, and the lazy dequant module op on all present stages.
 
     Patches every stage that exists (``stage``, ``stage_1``, ``stage_2``) — supports
     T2V, A2V, IC-LoRA, and retake without wrapper changes. Idempotent per stage;
     raises ``RuntimeError`` only if none of the expected stages carry a ``_transformer_builder``.
+
+    GGUF cannot use upstream layer streaming, so every recognized stage is forced
+    to ``OffloadMode.NONE`` with its ``_streaming_builder`` cleared — even when the
+    GGUF loader is already installed and even if the pipeline was constructed with
+    CPU/DISK offload (otherwise upstream picks ``_streaming_builder`` at runtime
+    and fails on the safetensors-only streaming path).
     """
+    from ltx_pipelines.utils.types import OffloadMode
+
     stage_names = ("stage", "stage_1", "stage_2")
     found = False
     for name in stage_names:
@@ -1433,6 +1678,14 @@ def install_gguf_loader(pipeline: object) -> None:
         if builder is None:
             continue
         found = True
+        # GGUF stage must full-load via _transformer_builder: StreamingModelBuilder
+        # scans safetensors and cannot stream lazy QParam blocks. Applied to every
+        # recognized stage (including the idempotent already-installed branch) so a
+        # GGUF pipeline built with CPU/DISK offload cannot fall back to streaming.
+        if getattr(stage, "_offload_mode", None) != OffloadMode.NONE:
+            stage._offload_mode = OffloadMode.NONE  # type: ignore[attr-defined]
+        if getattr(stage, "_streaming_builder", None) is not None:
+            stage._streaming_builder = None  # type: ignore[attr-defined]
         has_gguf_op = any(op.name == GGUF_DEQUANT_LINEAR_OP.name for op in builder.module_ops)
         already_installed = (
             isinstance(builder.model_loader, GgufStateDictLoader)
@@ -1444,9 +1697,12 @@ def install_gguf_loader(pipeline: object) -> None:
         # Preserve any existing module ops, dropping a stale GGUF op (no duplicates).
         module_ops = tuple(op for op in builder.module_ops if op.name != GGUF_DEQUANT_LINEAR_OP.name)
         module_ops = (*module_ops, GGUF_DEQUANT_LINEAR_OP)
-        replaced = replace(
+        # keep_raw_on_cpu=True: GGUF transformer is full-load only (no streaming),
+        # so keep the quantized raw bytes off the active device to cap peak VRAM;
+        # dequant stays per-forward inside GgufLinear.
+        replaced = _replace_builder(
             builder,
-            model_loader=GgufStateDictLoader(allow_safetensors_only=True),
+            model_loader=GgufStateDictLoader(allow_safetensors_only=True, keep_raw_on_cpu=True),
             model_sd_ops=GgufNativeSDOps(),
             module_ops=module_ops,
         )
@@ -1455,6 +1711,9 @@ def install_gguf_loader(pipeline: object) -> None:
             _patch_gguf_lora_build()
 
         stage._transformer_builder = replaced  # type: ignore[arg-type]
+        # _streaming_builder is cleared above (and _offload_mode forced to NONE):
+        # upstream StreamingModelBuilder scans safetensors shards and cannot stream
+        # lazy GGUF QParam blocks, so a GGUF stage must full-load via _transformer_builder.
     if not found:
         raise RuntimeError(
             "install_gguf_loader: pipeline has no stage/stage_1/stage_2 "
@@ -1469,14 +1728,97 @@ def _is_gguf_path(path: object) -> bool:
     return str(path).lower().endswith(".gguf")
 
 
-def _replace_builder_model_path(owner: object, attr: str, path: str, *, model_sd_ops: object | None = None) -> None:
+#: Upstream SingleGPUModelBuilder public with_* copy-methods by field name.
+_BUILDER_WITH_METHODS = {
+    "model_sd_ops": "with_sd_ops",
+    "module_ops": "with_module_ops",
+    "loras": "with_loras",
+    "registry": "with_registry",
+    "lora_load_device": "with_lora_load_device",
+    "fuse_rule": "with_fuse_rule",
+}
+
+#: Fields with no public with_*; backed by private attrs upstream.
+_BUILDER_PRIVATE_ATTRS = {
+    "model_path": "_model_path",
+    "model_loader": "_model_loader",
+}
+
+
+def _replace_builder(builder: Any, **changes: Any) -> Any:
+    """Clone a model builder with updated fields without assuming it is a dataclass.
+
+    Upstream ``SingleGPUModelBuilder`` is immutable-ish: it exposes ``with_*``
+    copy-methods for most fields and read-only properties backed by private
+    attrs for ``model_path``/``model_loader`` (no public setter). Calling
+    ``dataclasses.replace`` on it raises
+    ``TypeError: replace() should be called on dataclass instances``.
+
+    Strategy:
+    1. If it is a dataclass instance, delegate to ``dataclasses.replace``.
+    2. Otherwise apply ``with_*`` for known public fields, then shallow-copy and
+       set the private backing attrs for ``model_path``/``model_loader``.
+    3. Raise ``RuntimeError`` for any field that has neither a public
+       ``with_*`` method nor a known private attr.
+    """
+    if dataclasses.is_dataclass(builder):
+        return dataclasses.replace(builder, **changes)
+
+    clone: Any = builder
+    remaining = dict(changes)
+
+    for field, method_name in _BUILDER_WITH_METHODS.items():
+        if field in remaining:
+            method = getattr(clone, method_name, None)
+            if not callable(method):
+                raise RuntimeError(
+                    f"_replace_builder: builder {type(builder).__name__} has no "
+                    f"callable {method_name}() to set {field!r}"
+                )
+            clone = method(remaining.pop(field))
+
+    if remaining:
+        # ponytail: model_path/model_loader have no public with_* upstream;
+        # mirror upstream's copy.copy + private-attr pattern (see with_sd_ops).
+        clone = copy.copy(clone)
+        for field, value in remaining.items():
+            private_attr = _BUILDER_PRIVATE_ATTRS.get(field)
+            if private_attr is None or not hasattr(clone, private_attr):
+                raise RuntimeError(
+                    f"_replace_builder: builder {type(builder).__name__} has no "
+                    f"public with_* method or known private attr to set {field!r}"
+                )
+            setattr(clone, private_attr, value)
+
+    return clone
+
+
+def _replace_builder_model_path(
+    owner: object,
+    attr: str,
+    path: str,
+    *,
+    model_sd_ops: object | None = None,
+    module_ops: tuple[ModuleOps, ...] | None = None,
+) -> None:
+    """Repoint a component builder's model_path (and optionally sd_ops/module_ops).
+
+    When ``module_ops`` is given, existing builder module ops are preserved and
+    the provided ops are appended, dropping any stale op of the same name first
+    (mirrors the dedup in ``install_gguf_loader``).
+    """
     builder = getattr(owner, attr, None)
     if builder is None:
         raise RuntimeError(f"Component path patch failed: missing {owner}.{attr}")
+    changes: dict[str, object] = {"model_path": path}
     if model_sd_ops is not None:
-        setattr(owner, attr, replace(builder, model_path=path, model_sd_ops=model_sd_ops))
-    else:
-        setattr(owner, attr, replace(builder, model_path=path))
+        changes["model_sd_ops"] = model_sd_ops
+    if module_ops:
+        existing = tuple(getattr(builder, "module_ops", ()))
+        new_names = {op.name for op in module_ops}
+        preserved = tuple(op for op in existing if op.name not in new_names)
+        changes["module_ops"] = (*preserved, *module_ops)
+    setattr(owner, attr, _replace_builder(builder, **changes))
 
 
 def _pick_component_path(paths: list[str], needles: tuple[str, ...], suffix: str) -> str | None:
@@ -1632,6 +1974,10 @@ def install_kijai_transformer_config_patch(
     the first shard (transformer.safetensors) which has a minimal 6-key config.
     This causes ``KeyError: 'caption_channels'`` in ``_build_caption_projections``.
 
+    Patches both ``_transformer_builder`` and ``_streaming_builder`` (when
+    present) on each stage so CPU-offloaded split-safetensors builds stream with
+    the correct V2 config too. Shared by fast video / IC-LoRA / A2V / retake / HDR.
+
     Idempotent for safetensors-only tuples. Skips GGUF paths and single-string
     (official monolith) checkpoint paths entirely.
     """
@@ -1646,8 +1992,6 @@ def install_kijai_transformer_config_patch(
     v2_config = _find_v2_embeddings_config(paths)
     if v2_config is None:
         return  # no V2 config found in any shard
-
-    from dataclasses import replace
 
     from ltx_core.loader.sft_loader import SafetensorsModelStateDictLoader
 
@@ -1668,7 +2012,12 @@ def install_kijai_transformer_config_patch(
         if builder is None:
             continue
         found = True
-        stage._transformer_builder = replace(builder, model_loader=loader)  # type: ignore[arg-type]
+        stage._transformer_builder = _replace_builder(builder, model_loader=loader)  # type: ignore[arg-type]
+        # Also point the streaming builder (CPU-offload path) at the V2 config so
+        # split-safetensors streaming builds read caption_channels etc. correctly.
+        streaming_builder = getattr(stage, "_streaming_builder", None)
+        if streaming_builder is not None:
+            stage._streaming_builder = _replace_builder(streaming_builder, model_loader=loader)  # type: ignore[arg-type]
     if not found:
         import logging
 

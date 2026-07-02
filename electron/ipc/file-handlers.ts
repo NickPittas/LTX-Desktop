@@ -1,5 +1,6 @@
 import { dialog } from 'electron'
 import { randomUUID } from 'crypto'
+import os from 'os'
 import path from 'path'
 import fs from 'fs'
 import { getAllowedRoots } from '../config'
@@ -284,6 +285,61 @@ async function transcodeVideoInPlace(videoPath: string, onProgress?: (pct: numbe
   // Replace original with transcoded copy
   fs.unlinkSync(videoPath)
   fs.renameSync(tmpPath, videoPath)
+}
+
+/**
+ * Transcode a user-selected source video to a browser-playable H.264/AAC MP4
+ * for preview ONLY. Unlike `transcodeVideoInPlace`, the source is NEVER
+ * mutated: nothing is deleted/renamed/overwritten. The preview MP4 is written
+ * to a unique file under the OS temp dir and its path is returned. Progress
+ * (0..1) is derived from the input's probed duration and forwarded to
+ * `onProgress` so the caller can blend it into `asset:importProgress`.
+ */
+async function transcodeVideoForPreviewImpl(
+  srcPath: string,
+  onProgress?: (pct: number) => void,
+): Promise<string> {
+  const ffmpegPath = findFfmpegPath()
+  if (!ffmpegPath) {
+    throw new Error('ffmpeg not found for preview transcoding')
+  }
+
+  const outDir = path.join(os.tmpdir(), 'ltx-preview')
+  fs.mkdirSync(outDir, { recursive: true })
+  const previewPath = path.join(
+    outDir,
+    `preview_${Date.now()}_${randomUUID()}.mp4`,
+  )
+
+  const args = [
+    '-y',
+    '-i', srcPath,
+    '-map', '0:v:0',
+    '-map', '0:a?',
+    '-c:v', 'libx264',
+    '-pix_fmt', 'yuv420p',
+    '-preset', 'veryfast',
+    '-crf', '18',
+    '-c:a', 'aac',
+    '-b:a', '192k',
+    '-movflags', '+faststart',
+    previewPath,
+  ]
+
+  // Probe input duration so `out_time_us` can be converted into a 0..1 fraction.
+  const durationSec = getMediaDurationSeconds(srcPath)
+  const durationUs = durationSec != null && durationSec > 0
+    ? Math.round(durationSec * 1_000_000)
+    : undefined
+
+  // Isolated: preview transcodes must NOT be killable by the global export-cancel
+  // and must NOT touch the source file.
+  const result = await runFfmpeg(ffmpegPath, args, { onProgress, isolated: true, durationUs })
+  if (!result.success) {
+    try { fs.existsSync(previewPath) && fs.unlinkSync(previewPath) } catch { /* best-effort cleanup */ }
+    throw new Error(`Preview transcoding failed for ${srcPath}: ${result.error}`)
+  }
+  return previewPath
 }
 
 // The copied project asset doubles as playback proxy for the legacy MP4 path
@@ -576,6 +632,39 @@ export function registerFileHandlers(): void {
       }
     } catch (error) {
       logger.error(`Error creating dimensions for project asset: ${error}`)
+      return { success: false, error: String(error) }
+    }
+  })
+
+  handle('transcodeVideoForPreview', async ({ srcPath, jobId }) => {
+    const id = jobId && jobId.length > 0 ? jobId : randomUUID()
+
+    const emit = (e: { percent?: number; label: string; done?: boolean }): void => {
+      getMainWindow()?.webContents.send('asset:importProgress', {
+        jobId: id,
+        percent: e.percent ?? 0,
+        label: e.label,
+        done: e.done,
+      })
+    }
+
+    try {
+      const resolvedSrc = resolveLocalSourcePath(srcPath)
+      if (fs.statSync(resolvedSrc).isDirectory()) {
+        throw new Error('Preview transcoding is only supported for video files, not directories')
+      }
+
+      emit({ percent: 0, label: 'Transcoding preview…' })
+      const previewPath = await transcodeVideoForPreviewImpl(resolvedSrc, (pct) => {
+        emit({ percent: Math.round(pct * 100), label: 'Transcoding preview…' })
+      })
+      emit({ percent: 100, label: 'Preview ready', done: true })
+
+      return { success: true, path: previewPath }
+    } catch (error) {
+      logger.error(`Error transcoding preview video: ${error}`)
+      // Terminal event so any listener toast dismisses on failure.
+      emit({ percent: 0, label: 'Failed', done: true })
       return { success: false, error: String(error) }
     }
   })

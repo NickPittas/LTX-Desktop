@@ -70,7 +70,10 @@ models/*
 backend/models/
 
 # Profiling scripts and results
-backend/scripts/
+# Ignore backend/scripts/ contents but keep the Phase 1 live workflow harness
+# visible (it is invoked by the `live:workflow-test` package script).
+backend/scripts/*
+!backend/scripts/live_workflow_test.py
 backend/profile_results/
 
 # Temporary working directory

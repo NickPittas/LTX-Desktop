@@ -39,6 +39,8 @@ from api_types import (
     ScanArtifactStatus,
 )
 
+from services.local_memory_plan import QuantizationKind
+
 #: Directories excluded from the registry's evidence walk (mirror the scanner).
 _SKIP_DIRS: frozenset[str] = frozenset({
     ".downloading",
@@ -80,6 +82,7 @@ class BaseVideoRegistryStaticEntry:
     artifact_kind: ArtifactKind
     component_role: str
     transformer_format: TransformerFormat
+    quantization_kind: QuantizationKind
     base_family: BaseFamily
     runtime_readiness: RuntimeReadiness
 
@@ -111,6 +114,7 @@ _REGISTRY: tuple[BaseVideoRegistryStaticEntry, ...] = (
         artifact_kind="diffusion_model",
         component_role="base_diffusion_model",
         transformer_format="safetensors",
+        quantization_kind="bf16",
         base_family="distilled",
         runtime_readiness="none",
     ),
@@ -129,6 +133,7 @@ _REGISTRY: tuple[BaseVideoRegistryStaticEntry, ...] = (
         artifact_kind="diffusion_model",
         component_role="base_diffusion_model_fp8",
         transformer_format="safetensors",
+        quantization_kind="kijai_fp8_scaled",
         base_family="distilled",
         runtime_readiness="requires_active_profile_sidecars",
     ),
@@ -147,6 +152,7 @@ _REGISTRY: tuple[BaseVideoRegistryStaticEntry, ...] = (
         artifact_kind="gguf",
         component_role="base_diffusion_model_gguf",
         transformer_format="gguf",
+        quantization_kind="gguf",
         base_family="distilled",
         runtime_readiness="requires_active_profile_sidecars",
     ),
@@ -165,6 +171,7 @@ _REGISTRY: tuple[BaseVideoRegistryStaticEntry, ...] = (
         artifact_kind="gguf",
         component_role="base_diffusion_model_gguf",
         transformer_format="gguf",
+        quantization_kind="gguf",
         base_family="distilled",
         runtime_readiness="requires_active_profile_sidecars",
     ),
@@ -183,6 +190,7 @@ _REGISTRY: tuple[BaseVideoRegistryStaticEntry, ...] = (
         artifact_kind="gguf",
         component_role="base_diffusion_model_gguf",
         transformer_format="gguf",
+        quantization_kind="gguf",
         base_family="distilled",
         runtime_readiness="requires_active_profile_sidecars",
     ),
@@ -201,6 +209,7 @@ _REGISTRY: tuple[BaseVideoRegistryStaticEntry, ...] = (
         artifact_kind="gguf",
         component_role="base_diffusion_model_gguf",
         transformer_format="gguf",
+        quantization_kind="gguf",
         base_family="distilled",
         runtime_readiness="requires_active_profile_sidecars",
     ),
@@ -219,6 +228,7 @@ _REGISTRY: tuple[BaseVideoRegistryStaticEntry, ...] = (
         artifact_kind="gguf",
         component_role="base_diffusion_model_gguf",
         transformer_format="gguf",
+        quantization_kind="gguf",
         base_family="distilled",
         runtime_readiness="requires_active_profile_sidecars",
     ),
@@ -237,6 +247,7 @@ _REGISTRY: tuple[BaseVideoRegistryStaticEntry, ...] = (
         artifact_kind="gguf",
         component_role="base_diffusion_model_gguf",
         transformer_format="gguf",
+        quantization_kind="gguf",
         base_family="distilled",
         runtime_readiness="requires_active_profile_sidecars",
     ),
@@ -255,6 +266,7 @@ _REGISTRY: tuple[BaseVideoRegistryStaticEntry, ...] = (
         artifact_kind="gguf",
         component_role="base_diffusion_model_gguf",
         transformer_format="gguf",
+        quantization_kind="gguf",
         base_family="distilled",
         runtime_readiness="requires_active_profile_sidecars",
     ),
@@ -274,6 +286,7 @@ _REGISTRY: tuple[BaseVideoRegistryStaticEntry, ...] = (
         artifact_kind="diffusion_model",
         component_role="base_diffusion_model",
         transformer_format="safetensors",
+        quantization_kind="bf16",
         base_family="dev",
         runtime_readiness="requires_active_profile_sidecars",
     ),
@@ -292,6 +305,7 @@ _REGISTRY: tuple[BaseVideoRegistryStaticEntry, ...] = (
         artifact_kind="gguf",
         component_role="base_diffusion_model_gguf",
         transformer_format="gguf",
+        quantization_kind="gguf",
         base_family="dev",
         runtime_readiness="requires_active_profile_sidecars",
     ),
@@ -310,6 +324,7 @@ _REGISTRY: tuple[BaseVideoRegistryStaticEntry, ...] = (
         artifact_kind="gguf",
         component_role="base_diffusion_model_gguf",
         transformer_format="gguf",
+        quantization_kind="gguf",
         base_family="dev",
         runtime_readiness="requires_active_profile_sidecars",
     ),
@@ -328,6 +343,7 @@ _REGISTRY: tuple[BaseVideoRegistryStaticEntry, ...] = (
         artifact_kind="gguf",
         component_role="base_diffusion_model_gguf",
         transformer_format="gguf",
+        quantization_kind="gguf",
         base_family="dev",
         runtime_readiness="requires_active_profile_sidecars",
     ),
@@ -346,6 +362,7 @@ _REGISTRY: tuple[BaseVideoRegistryStaticEntry, ...] = (
         artifact_kind="gguf",
         component_role="base_diffusion_model_gguf",
         transformer_format="gguf",
+        quantization_kind="gguf",
         base_family="dev",
         runtime_readiness="requires_active_profile_sidecars",
     ),
@@ -406,6 +423,7 @@ class BaseVideoModelRegistryEntry:
     artifact_kind: ArtifactKind
     component_role: str
     transformer_format: TransformerFormat
+    quantization_kind: QuantizationKind
     base_family: BaseFamily
     runtime_readiness: RuntimeReadiness
     # Derived from models_dir + filesystem evidence
@@ -459,6 +477,7 @@ def _resolve_entry(
             artifact_kind=static.artifact_kind,
             component_role=static.component_role,
             transformer_format=static.transformer_format,
+            quantization_kind=static.quantization_kind,
             base_family=static.base_family,
             runtime_readiness=static.runtime_readiness,
             scanner_status="missing",
@@ -495,6 +514,7 @@ def _resolve_entry(
         artifact_kind=static.artifact_kind,
         component_role=static.component_role,
         transformer_format=static.transformer_format,
+        quantization_kind=static.quantization_kind,
         base_family=static.base_family,
         runtime_readiness=static.runtime_readiness,
         scanner_status=status,

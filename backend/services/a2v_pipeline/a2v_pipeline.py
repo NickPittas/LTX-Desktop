@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
     from ltx_pipelines.utils.types import OffloadMode
     from services.ltx_components import CheckpointPath, ResolvedLtxComponents
+    from services.local_memory_plan import LocalMemoryPlan
     from services.media_encoder.media_encoder import MediaEncoder
     from services.color_management import ColorSpace
     import torch
@@ -25,6 +26,10 @@ class A2VPipeline(Protocol):
         device: torch.device,
         offload_mode: OffloadMode,
         components: ResolvedLtxComponents | None = None,
+        *,
+        # Phase 2: memory plan owns the offload/quantization decision. None is a
+        # narrow compatibility default until the handler slice passes explicit plans.
+        memory_plan: LocalMemoryPlan | None = None,
     ) -> "A2VPipeline": ...
 
     def generate(

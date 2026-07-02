@@ -19,15 +19,24 @@ from __future__ import annotations
 
 import functools
 import itertools
+import logging
 from typing import Any
 
 import torch
 from torch import nn
 
-from ltx_core.layer_streaming import LayerStreamingWrapper
+logger = logging.getLogger(__name__)
+
+try:
+    from ltx_core.layer_streaming import LayerStreamingWrapper
+except (ModuleNotFoundError, ImportError):
+    logger.info(
+        "ltx_core.layer_streaming is not available; record_stream_fix will no-op."
+    )
+    LayerStreamingWrapper = None  # type: ignore[assignment]
 
 
-def _patched_register_hooks(self: LayerStreamingWrapper) -> None:
+def _patched_register_hooks(self: Any) -> None:
     idx_map: dict[int, int] = {id(layer): idx for idx, layer in enumerate(self._layers)}
     num_layers = len(self._layers)
 
@@ -82,18 +91,17 @@ def _patched_register_hooks(self: LayerStreamingWrapper) -> None:
         self._hooks.extend([h1, h2])
 
 
-_original_teardown = LayerStreamingWrapper.teardown
+if LayerStreamingWrapper is not None:
+    _original_teardown = LayerStreamingWrapper.teardown
 
+    def _patched_teardown(self: Any) -> None:
+        # Clear held GPU references before the original teardown evicts layers.
+        if hasattr(self, "_gpu_refs"):
+            torch.cuda.synchronize(device=self._target_device)
+            self._gpu_refs.clear()
+            self._ref_events.clear()
+        _original_teardown(self)
 
-def _patched_teardown(self: LayerStreamingWrapper) -> None:
-    # Clear held GPU references before the original teardown evicts layers.
-    if hasattr(self, "_gpu_refs"):
-        torch.cuda.synchronize(device=self._target_device)
-        self._gpu_refs.clear()
-        self._ref_events.clear()
-    _original_teardown(self)
-
-
-# Apply patches.
-LayerStreamingWrapper._register_hooks = _patched_register_hooks  # type: ignore[assignment]
-LayerStreamingWrapper.teardown = _patched_teardown  # type: ignore[assignment]
+    # Apply patches.
+    LayerStreamingWrapper._register_hooks = _patched_register_hooks  # type: ignore[assignment]
+    LayerStreamingWrapper.teardown = _patched_teardown  # type: ignore[assignment]

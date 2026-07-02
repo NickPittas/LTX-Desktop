@@ -43,6 +43,13 @@ from services.interfaces import (
     RetakePipeline,
     VideoPipelineModelType,
 )
+from services import memory_trace
+from services.local_memory_plan import (
+    LocalMemoryPlan,
+    Workflow,
+    detect_vram_gb,
+    plan_for_transformer,
+)
 from services.services_utils import device_supports_fp8, get_device_type
 from state.app_state_types import (
     A2VPipelineState,
@@ -147,7 +154,10 @@ class PipelinesHandler(StateHandlerBase):
         return entry
 
     def _pipeline_matches_model_type(
-        self, model_type: VideoPipelineModelType, model_selection: ModelSelectionID | None = None
+        self,
+        model_type: VideoPipelineModelType,
+        model_selection: ModelSelectionID | None = None,
+        memory_plan: LocalMemoryPlan | None = None,
     ) -> bool:
         match self.state.gpu_slot:
             case GpuSlot(active_pipeline=VideoPipelineState(pipeline=pipeline, cache_key=cached_key)):
@@ -161,7 +171,7 @@ class PipelinesHandler(StateHandlerBase):
                 ) and pipeline.pipeline_kind != model_type:
                     return False
                 # ponytail: cache_key comparison only; richer invalidation lands with split/GGUF
-                expected_key = self._current_cache_key(model_selection)
+                expected_key = self._current_cache_key(model_selection, memory_plan)
                 return cached_key == expected_key
             case _:
                 return False
@@ -196,9 +206,16 @@ class PipelinesHandler(StateHandlerBase):
                 cache_key = (*cache_key, effective_lora)
         return cache_key
 
-    def _current_cache_key(self, model_selection: ModelSelectionID | None = None) -> tuple[str, ...]:
+    def _current_cache_key(
+        self,
+        model_selection: ModelSelectionID | None = None,
+        memory_plan: LocalMemoryPlan | None = None,
+    ) -> tuple[str, ...]:
         components = self._resolve_active_components(model_selection)
-        return self._video_cache_key_for_components(components, model_selection)
+        key = self._video_cache_key_for_components(components, model_selection)
+        if memory_plan is not None:
+            key = (*key, *memory_plan.cache_key_parts)
+        return key
 
     def _assert_invariants(self) -> None:
         match self.state.gpu_slot:
@@ -242,6 +259,7 @@ class PipelinesHandler(StateHandlerBase):
                 selected_transformer_format=entry.transformer_format,
                 selected_base_family=entry.base_family,
                 selected_runtime_readiness=entry.runtime_readiness,
+                selected_quantization_kind=entry.quantization_kind,
             )
 
         # No active profile (legacy downloaded-model path).
@@ -272,7 +290,17 @@ class PipelinesHandler(StateHandlerBase):
             raise HTTPError(409, "NO_DOWNLOADED_LTX_MODEL")
         return model_id
 
-    def _compile_if_enabled(self, state: VideoPipelineState) -> VideoPipelineState:
+    def _compile_if_enabled(
+        self,
+        state: VideoPipelineState,
+        memory_plan: LocalMemoryPlan | None = None,
+    ) -> VideoPipelineState:
+        if memory_plan is not None and memory_plan.disable_compile:
+            logger.info(
+                "Skipping torch.compile() - disabled by local memory plan (strategy=%s)",
+                memory_plan.strategy,
+            )
+            return state
         if not self.state.app_settings.use_torch_compile:
             return state
         if state.is_compiled:
@@ -408,10 +436,90 @@ class PipelinesHandler(StateHandlerBase):
 
         return OffloadMode(offload_mode_value_for_mode(self.config.local_generations_mode))
 
+    def _block_offload_available(self) -> bool:
+        """Whether the block-offload residency strategy is wired and usable.
+
+        Phase 3B: delegates to
+        :func:`services.block_offload.block_offload_available` (the core service
+        + the DiffusionStage ``_build_transformer`` patch imported at server
+        boot). The memory planner maps low-VRAM transformers to ``block_offload``;
+        such plans always carry ``requires_block_offload=True`` — when this
+        returns ``False`` the handler gates construction with a 409 (see
+        ``_enforce_memory_plan_gate``).
+        """
+        from services.block_offload import block_offload_available
+
+        return block_offload_available()
+
+    def _memory_plan_for_components(
+        self,
+        components: ResolvedLtxComponents | None,
+        workflow: Workflow,
+    ) -> LocalMemoryPlan:
+        """Compute the local memory plan for a resolved transformer.
+
+        Derives (transformer format, base family, componentized-split-ness,
+        quantization kind) from ``components`` with safe defaults for the
+        no-profile legacy downloaded-model path, probes VRAM via
+        :func:`detect_vram_gb` (no GPU injection), and delegates to
+        :func:`plan_for_transformer`. ``workflow`` distinguishes HDR
+        (``"hdr"``) from the standard non-HDR pipelines (``"standard"``).
+        """
+        if components is not None:
+            transformer_format = components.transformer_format
+            base_family = components.base_family
+            # ponytail: a multi-path builder tuple is the split/componentized
+            # signal (split-safetensors + sidecars, GGUF + sidecars, Kijai).
+            is_componentized_split = len(components.checkpoint_paths_for_filtered_builders) > 1
+            quantization_kind = components.quantization_kind
+        else:
+            # No active profile (legacy downloaded-bundle path): mirror the
+            # distilled safetensors monolith shape assumed elsewhere here.
+            transformer_format = "safetensors"
+            base_family = "distilled"
+            is_componentized_split = False
+            quantization_kind = "bf16"
+        return plan_for_transformer(
+            transformer_format,
+            base_family,
+            is_componentized_split,
+            quantization_kind,
+            detect_vram_gb(),
+            workflow,
+            block_offload_available=self._block_offload_available(),
+        )
+
+    def _enforce_memory_plan_gate(self, memory_plan: LocalMemoryPlan) -> None:
+        """Gate heavy load on the memory plan before pipeline construction.
+
+        When the plan requires block offload but the strategy is unavailable,
+        emit a ``memory_strategy_gate`` trace event and raise 409 so the client
+        sees an actionable error rather than an OOM deep inside the GPU build.
+        Phase 3B: block offload is wired, so a ``requires_block_offload`` plan
+        proceeds when :meth:`_block_offload_available` is True.
+        """
+        if not memory_plan.requires_block_offload:
+            return
+        if self._block_offload_available():
+            return
+        memory_trace.write_event(
+            "memory_strategy_gate",
+            "local_memory_strategy",
+            strategy=memory_plan.strategy,
+            code="LOCAL_MEMORY_STRATEGY_UNAVAILABLE",
+            reason=memory_plan.reason,
+        )
+        raise HTTPError(
+            409,
+            f"Required local memory strategy is not available: {memory_plan.strategy}",
+            code="LOCAL_MEMORY_STRATEGY_UNAVAILABLE",
+        )
+
     def _create_video_pipeline(
         self,
         model_type: VideoPipelineModelType,
         model_selection: ModelSelectionID | None = None,
+        memory_plan: LocalMemoryPlan | None = None,
     ) -> VideoPipelineState:
         checkpoint_path, gemma_root, upsampler_path, _resolved_cache_key = self._resolve_checkpoint_paths(model_selection)
         # Fast video pipeline always invokes the spatial upscaler during
@@ -431,6 +539,12 @@ class PipelinesHandler(StateHandlerBase):
             )
         components = self._resolve_active_components(model_selection)
         transformer_format = components.transformer_format if components is not None else "safetensors"
+
+        # Phase 2: compute exactly one local memory plan before construction
+        # (caller may pass it from the cache-matching path; otherwise derive it
+        # here from the resolved components).
+        if memory_plan is None:
+            memory_plan = self._memory_plan_for_components(components, "standard")
 
         # Phase 3D (plan §12): route dev/distilled pipeline selection via
         # base_family. Unknown base family fails fast with an actionable error
@@ -471,30 +585,39 @@ class PipelinesHandler(StateHandlerBase):
                     code="DISTILLED_LORA_REQUIRED",
                 )
 
-        pipeline = self._fast_video_pipeline_class.create(
-            checkpoint_path,
-            gemma_root,
-            upsampler_path,
-            self.config.device,
-            self._local_offload_mode(),
-            components=components,
-            transformer_format=transformer_format,
-            distilled_lora_path=distilled_lora_path,
-        )
+        # Gate heavy load on the memory plan (raises 409 if block offload is
+        # required but unavailable).
+        self._enforce_memory_plan_gate(memory_plan)
+
+        with memory_trace.phase("pipeline_create:video"):
+            pipeline = self._fast_video_pipeline_class.create(
+                checkpoint_path,
+                gemma_root,
+                upsampler_path,
+                self.config.device,
+                self._local_offload_mode(),
+                components=components,
+                transformer_format=transformer_format,
+                distilled_lora_path=distilled_lora_path,
+                memory_plan=memory_plan,
+            )
 
         # Cache key must reflect the effective distilled LoRA path so a dev
         # profile that toggles between explicit and canonical fallback (or
         # whose fallback appears/disappears on disk) invalidates correctly.
         # Computed via the same helper as ``_current_cache_key`` so a second
         # ``load_gpu_pipeline`` (e.g. inside ``generate_video``) cache-hits.
+        # Phase 2: append the memory-plan cache-key parts so a strategy/
+        # quantization change invalidates the pipeline cache.
         effective_cache_key = self._video_cache_key_for_components(components, model_selection)
+        effective_cache_key = (*effective_cache_key, *memory_plan.cache_key_parts)
 
         state = VideoPipelineState(
             pipeline=pipeline,
             is_compiled=False,
             cache_key=effective_cache_key,
         )
-        return self._compile_if_enabled(state)
+        return self._compile_if_enabled(state, memory_plan)
 
     def unload_gpu_pipeline(self) -> None:
         with self._lock:
@@ -580,9 +703,11 @@ class PipelinesHandler(StateHandlerBase):
                 should_cleanup = True
 
         if should_park_image_generation_pipeline:
-            self.park_image_generation_pipeline_on_cpu()
+            with memory_trace.phase("pipeline_evict:gpu_swap"):
+                self.park_image_generation_pipeline_on_cpu()
         elif should_cleanup:
-            self._gpu_cleaner.cleanup()
+            with memory_trace.phase("pipeline_evict:gpu_swap"):
+                self._gpu_cleaner.cleanup()
 
     def load_gpu_pipeline(
         self,
@@ -591,9 +716,14 @@ class PipelinesHandler(StateHandlerBase):
     ) -> VideoPipelineState:
         self._install_text_patches_if_needed()
 
+        # Phase 2: compute exactly one memory plan for both cache matching and
+        # construction (the VRAM probe happens outside the lock).
+        components = self._resolve_active_components(model_selection)
+        memory_plan = self._memory_plan_for_components(components, "standard")
+
         state: VideoPipelineState | None = None
         with self._lock:
-            if self._pipeline_matches_model_type(model_type, model_selection):
+            if self._pipeline_matches_model_type(model_type, model_selection, memory_plan):
                 match self.state.gpu_slot:
                     case GpuSlot(active_pipeline=VideoPipelineState() as existing_state):
                         state = existing_state
@@ -601,8 +731,9 @@ class PipelinesHandler(StateHandlerBase):
                         pass
 
         if state is None:
-            self._evict_gpu_pipeline_for_swap()
-            state = self._create_video_pipeline(model_type, model_selection)
+            with memory_trace.phase("pipeline_load:video"):
+                self._evict_gpu_pipeline_for_swap()
+                state = self._create_video_pipeline(model_type, model_selection, memory_plan)
         with self._lock:
             self.state.gpu_slot = GpuSlot(active_pipeline=state)
             self._assert_invariants()
@@ -619,6 +750,7 @@ class PipelinesHandler(StateHandlerBase):
         hdr_lora_path: str,
         scene_embeddings_path: str,
         effective_distilled_lora_path: str | None,
+        memory_plan: LocalMemoryPlan | None = None,
     ) -> tuple[str, ...]:
         """Cache key for the HDR IC-LoRA pipeline state.
 
@@ -628,13 +760,15 @@ class PipelinesHandler(StateHandlerBase):
         generation tag), the model selection id (or empty), the HDR LoRA
         path, the scene-embeddings path (so changing scene embeddings
         invalidates the cache), and the effective distilled LoRA path (or
-        empty) so toggling any of these invalidates the cache.
+        empty) so toggling any of these invalidates the cache. Phase 2:
+        appends the memory-plan cache-key parts so a strategy/quantization
+        change invalidates the HDR cache.
         """
         if components is None:
             component_key: tuple[str, ...] = ()
         else:
             component_key = components.cache_key
-        return (
+        key = (
             *component_key,
             "hdr_ic_lora_official_v1",
             model_selection or "",
@@ -642,6 +776,9 @@ class PipelinesHandler(StateHandlerBase):
             scene_embeddings_path,
             effective_distilled_lora_path or "",
         )
+        if memory_plan is not None:
+            key = (*key, *memory_plan.cache_key_parts)
+        return key
 
     def load_hdr_ic_lora(
         self,
@@ -651,15 +788,18 @@ class PipelinesHandler(StateHandlerBase):
     ) -> HdrICLoraState:
         """Load (or cache-hit) the dedicated HDR IC-LoRA two-stage pipeline.
 
-        Phase 3 initial HDR support is restricted to the **official distilled
-        safetensors** base checkpoint (single, non-split). It reuses the same
-        component/checkpoint/upsampler resolution helpers as the fast pipeline
-        load path and surfaces actionable error codes:
+        HDR accepts dev, distilled, split, Kijai, and GGUF component builds.
+        ``checkpoint_path`` passed to ``create`` is the effective builder path
+        (single for a monolith, tuple for split/GGUF) via
+        ``checkpoint_path_arg(components)``. LoRA selection and post-build
+        component patching are owned by ``LTXHdrIcLoraPipeline.create``. This
+        handler surfaces actionable error codes:
 
-        - ``UNSUPPORTED_MODEL_BASE_FAMILY`` (409) when the base family is not
-          ``distilled`` (dev/full/unknown are rejected).
-        - ``UNSUPPORTED_MODEL_FORMAT`` (409) for GGUF/non-safetensors or
-          split/tuple checkpoint paths.
+        - ``UNSUPPORTED_MODEL_BASE_FAMILY`` (409) when the base family is
+          ``unknown`` (dev/distilled are supported; distilled LoRA is required
+          for dev).
+        - ``DISTILLED_LORA_REQUIRED`` (409) when the dev base has no usable
+          distilled LoRA (explicit profile path or canonical fallback).
         - ``UPSCALER_REQUIRED`` (409) when no usable spatial upscaler exists.
 
         ``scene_embeddings_path`` is forwarded into the pipeline ``create()``
@@ -669,33 +809,59 @@ class PipelinesHandler(StateHandlerBase):
         self._install_text_patches_if_needed()
 
         components = self._resolve_active_components(model_selection)
+        # ``_resolve_active_components`` already validates a live selection
+        # (``UNSUPPORTED_MODEL_SELECTION`` / ``MODEL_SELECTION_NOT_INSTALLED`` /
+        # ``MODEL_SELECTION_REQUIRES_PROFILE``). HDR ``create`` owns LoRA
+        # selection, quantization, and post-build component patching, so the
+        # handler no longer forces a single selected transformer path.
 
-        # Validate base family before any heavy work. Phase 3 initial HDR
-        # support is restricted to the official distilled base; reject dev/
-        # full/unknown families with an explicit, user-readable reason and
-        # never silently fall back.
+        # Validate base family before any heavy work. Dev and distilled are
+        # supported; reject unknown families explicitly (never silently guess).
         base_family = components.base_family if components is not None else "distilled"
-        if base_family != "distilled":
+        if base_family == "unknown":
             raise HTTPError(
                 409,
                 (
-                    "HDR IC-LoRA initial support requires the official distilled "
-                    "LTX-2.3 safetensors base checkpoint. The active model's base "
-                    f"family is {base_family!r}, which is not supported for HDR. "
-                    "Select the official distilled base model."
+                    "HDR IC-LoRA supports 'dev' and 'distilled' LTX-2.3 base models. "
+                    "The active model's base family could not be recognized "
+                    f"(base_family={base_family!r}). Choose an official LTX-2.3 "
+                    "dev or distilled transformer."
                 ),
                 code="UNSUPPORTED_MODEL_BASE_FAMILY",
             )
 
-        # Distilled-only HDR: no distilled-LoRA stacking (dev-only) applies.
+        # Dev base requires a distilled LoRA (applied first @ 0.5 by the
+        # pipeline); distilled base skips it. Resolve explicit → canonical
+        # fallback; if neither exists, fail before pipeline creation.
         effective_distilled_lora_path: str | None = None
+        if base_family == "dev":
+            effective_distilled_lora_path = self._resolve_distilled_lora_path(components)
+            if not effective_distilled_lora_path:
+                canonical_paths = ", ".join(
+                    str(p) for _role, p in self._canonical_distilled_lora_candidates()
+                )
+                raise HTTPError(
+                    409,
+                    (
+                        "Dev base model requires a distilled LoRA for HDR IC-LoRA, "
+                        "but none was found. Install one of the official distilled "
+                        f"LoRAs at: {canonical_paths}."
+                    ),
+                    code="DISTILLED_LORA_REQUIRED",
+                )
 
+        # Phase 2: compute exactly one memory plan for the HDR workflow and
+        # build the cache key with its parts so a strategy/quantization change
+        # invalidates the HDR cache. (components is resolved above; base_family
+        # is dev/distilled here.)
+        memory_plan = self._memory_plan_for_components(components, "hdr")
         cache_key = self._hdr_cache_key(
             components,
             model_selection,
             hdr_lora_path,
             scene_embeddings_path,
             effective_distilled_lora_path,
+            memory_plan,
         )
 
         with self._lock:
@@ -704,6 +870,9 @@ class PipelinesHandler(StateHandlerBase):
                     return state
                 case _:
                     pass
+
+        # Gate heavy load on the memory plan before any GPU work.
+        self._enforce_memory_plan_gate(memory_plan)
 
         # Upsampler is required for the HDR two-stage spatial upsample step.
         # ``_resolve_profile_upsampler_path`` short-circuits to "" when there is
@@ -731,51 +900,33 @@ class PipelinesHandler(StateHandlerBase):
             )
 
         # Resolve checkpoint paths (threads model_selection) and derive the
-        # transformer format for the HDR loader path. checkpoint_path_arg
-        # returns either a single path or a tuple for split builds.
+        # transformer format for the HDR loader path. ``checkpoint_path`` is
+        # already ``checkpoint_path_arg(components)`` when components is not
+        # None (single path for a monolith, tuple for split/GGUF); for the
+        # no-profile downloaded-bundle path it is a single model CP path.
         checkpoint_path, gemma_root, _upsampler, _resolved_cache_key = self._resolve_checkpoint_paths(model_selection)
         transformer_format = components.transformer_format if components is not None else "safetensors"
-        resolved_checkpoint = checkpoint_path_arg(components) if components is not None else checkpoint_path
 
-        # Phase 3 initial HDR gating: official distilled safetensors, single
-        # (non-split) checkpoint only. Reject GGUF / non-safetensors and
-        # split/tuple checkpoint paths with an explicit reason; never fall back.
-        if transformer_format != "safetensors":
-            raise HTTPError(
-                409,
-                (
-                    "HDR IC-LoRA initial support requires the official distilled "
-                    f"safetensors base checkpoint; transformer_format={transformer_format!r} "
-                    "(e.g. GGUF) is not supported for HDR."
-                ),
-                code="UNSUPPORTED_MODEL_FORMAT",
-            )
-        if isinstance(resolved_checkpoint, tuple):
-            raise HTTPError(
-                409,
-                (
-                    "HDR IC-LoRA initial support requires a single (non-split) "
-                    "official distilled safetensors checkpoint; a split/tuple "
-                    "checkpoint path is not supported for HDR."
-                ),
-                code="UNSUPPORTED_MODEL_FORMAT",
-            )
+        with memory_trace.phase("pipeline_load:hdr_ic_lora"):
+            self._evict_gpu_pipeline_for_swap()
 
-        self._evict_gpu_pipeline_for_swap()
+            with memory_trace.phase("pipeline_create:hdr_ic_lora"):
+                pipeline = self._hdr_ic_lora_pipeline_class.create(
+                    checkpoint_path=checkpoint_path,
+                    upsampler_path=upsampler_path,
+                    hdr_lora_path=hdr_lora_path,
+                    scene_embeddings_path=scene_embeddings_path,
+                    device=self.config.device,
+                    components=components,
+                    transformer_format=transformer_format,
+                    base_family=base_family,
+                    distilled_lora_path=effective_distilled_lora_path,
+                    gemma_root=gemma_root,
+                    offload_mode=self._local_offload_mode(),
+                    memory_plan=memory_plan,
+                )
 
-        pipeline = self._hdr_ic_lora_pipeline_class.create(
-            checkpoint_path=resolved_checkpoint,
-            upsampler_path=upsampler_path,
-            hdr_lora_path=hdr_lora_path,
-            scene_embeddings_path=scene_embeddings_path,
-            device=self.config.device,
-            components=components,
-            transformer_format=transformer_format,
-            base_family=base_family,
-            distilled_lora_path=effective_distilled_lora_path,
-            gemma_root=gemma_root,
-        )
-        state = HdrICLoraState(pipeline=pipeline, cache_key=cache_key)
+            state = HdrICLoraState(pipeline=pipeline, cache_key=cache_key)
 
         with self._lock:
             self.state.gpu_slot = GpuSlot(active_pipeline=state)
@@ -791,50 +942,57 @@ class PipelinesHandler(StateHandlerBase):
     ) -> ICLoraState:
         self._install_text_patches_if_needed()
 
+        # Phase 2: compute exactly one memory plan for the (standard) IC-LoRA
+        # workflow and derive the cache key from it.
+        components = self._resolve_active_components()
+        memory_plan = self._memory_plan_for_components(components, "standard")
+        cache_key = (
+            *self._current_cache_key(None, memory_plan),
+            "ic_lora",
+            adapter_path or "",
+            depth_model_path or "",
+            f"lora_strength={lora_strength:.4f}",
+            *lora_paths,
+        )
+
         with self._lock:
             match self.state.gpu_slot:
-                case GpuSlot(
-                    active_pipeline=ICLoraState(
-                        lora_paths=current_lora_paths,
-                        depth_model_path=current_depth_model_path,
-                        adapter_path=current_adapter_path,
-                        lora_strength=current_lora_strength,
-                    ) as state
-                ) if (
-                    current_lora_paths == lora_paths
-                    and current_depth_model_path == depth_model_path
-                    and current_adapter_path == adapter_path
-                    and abs(current_lora_strength - lora_strength) < 0.001
-                ):
+                case GpuSlot(active_pipeline=ICLoraState(cache_key=cached_key) as state) if cached_key == cache_key:
                     return state
                 case _:
                     pass
 
-        self._evict_gpu_pipeline_for_swap()
-        checkpoint_path, gemma_root, upsampler_path, _cache_key = self._resolve_checkpoint_paths()
-        components = self._resolve_active_components()
+        # Gate heavy load on the memory plan before any GPU work.
+        self._enforce_memory_plan_gate(memory_plan)
 
-        pipeline = self._ic_lora_pipeline_class.create(
-            checkpoint_path,
-            gemma_root,
-            upsampler_path,
-            lora_paths,
-            self.config.device,
-            self._local_offload_mode(),
-            components=components,
-            lora_strength=lora_strength,
-        )
-        depth_pipeline: DepthProcessorPipeline | None = None
-        if depth_model_path is not None:
-            depth_pipeline = self._depth_processor_pipeline_class.create(depth_model_path, self.config.device)
-        state = ICLoraState(
-            pipeline=pipeline,
-            lora_paths=lora_paths,
-            lora_strength=lora_strength,
-            depth_pipeline=depth_pipeline,
-            depth_model_path=depth_model_path,
-            adapter_path=adapter_path,
-        )
+        with memory_trace.phase("pipeline_load:ic_lora"):
+            self._evict_gpu_pipeline_for_swap()
+            checkpoint_path, gemma_root, upsampler_path, _cache_key = self._resolve_checkpoint_paths()
+
+            with memory_trace.phase("pipeline_create:ic_lora"):
+                pipeline = self._ic_lora_pipeline_class.create(
+                    checkpoint_path,
+                    gemma_root,
+                    upsampler_path,
+                    lora_paths,
+                    self.config.device,
+                    self._local_offload_mode(),
+                    components=components,
+                    lora_strength=lora_strength,
+                    memory_plan=memory_plan,
+                )
+            depth_pipeline: DepthProcessorPipeline | None = None
+            if depth_model_path is not None:
+                depth_pipeline = self._depth_processor_pipeline_class.create(depth_model_path, self.config.device)
+            state = ICLoraState(
+                pipeline=pipeline,
+                lora_paths=lora_paths,
+                lora_strength=lora_strength,
+                depth_pipeline=depth_pipeline,
+                depth_model_path=depth_model_path,
+                adapter_path=adapter_path,
+                cache_key=cache_key,
+            )
 
         with self._lock:
             self.state.gpu_slot = GpuSlot(active_pipeline=state)
@@ -844,26 +1002,37 @@ class PipelinesHandler(StateHandlerBase):
     def load_a2v_pipeline(self) -> A2VPipelineState:
         self._install_text_patches_if_needed()
 
+        # Phase 2: compute exactly one memory plan for the (standard) A2V
+        # workflow and derive the cache key from it.
+        components = self._resolve_active_components()
+        memory_plan = self._memory_plan_for_components(components, "standard")
+        cache_key = (*self._current_cache_key(None, memory_plan), "a2v")
+
         with self._lock:
             match self.state.gpu_slot:
-                case GpuSlot(active_pipeline=A2VPipelineState() as state):
+                case GpuSlot(active_pipeline=A2VPipelineState(cache_key=cached_key) as state) if cached_key == cache_key:
                     return state
                 case _:
                     pass
 
-        self._evict_gpu_pipeline_for_swap()
-        checkpoint_path, gemma_root, upsampler_path, _cache_key = self._resolve_checkpoint_paths()
-        components = self._resolve_active_components()
+        # Gate heavy load on the memory plan before any GPU work.
+        self._enforce_memory_plan_gate(memory_plan)
 
-        pipeline = self._a2v_pipeline_class.create(
-            checkpoint_path,
-            gemma_root,
-            upsampler_path,
-            self.config.device,
-            self._local_offload_mode(),
-            components=components,
-        )
-        state = A2VPipelineState(pipeline=pipeline)
+        with memory_trace.phase("pipeline_load:a2v"):
+            self._evict_gpu_pipeline_for_swap()
+            checkpoint_path, gemma_root, upsampler_path, _cache_key = self._resolve_checkpoint_paths()
+
+            with memory_trace.phase("pipeline_create:a2v"):
+                pipeline = self._a2v_pipeline_class.create(
+                    checkpoint_path,
+                    gemma_root,
+                    upsampler_path,
+                    self.config.device,
+                    self._local_offload_mode(),
+                    components=components,
+                    memory_plan=memory_plan,
+                )
+            state = A2VPipelineState(pipeline=pipeline, cache_key=cache_key)
 
         with self._lock:
             self.state.gpu_slot = GpuSlot(active_pipeline=state)
@@ -875,41 +1044,59 @@ class PipelinesHandler(StateHandlerBase):
 
         quantized = device_supports_fp8(self.config.device)
 
+        # Phase 2: compute exactly one memory plan for the (standard) retake
+        # workflow and derive the cache key from it.
+        components = self._resolve_active_components()
+        memory_plan = self._memory_plan_for_components(components, "standard")
+        cache_key = (
+            *self._current_cache_key(None, memory_plan),
+            "retake",
+            *memory_plan.cache_key_parts,
+        )
+
         with self._lock:
             match self.state.gpu_slot:
-                case GpuSlot(
-                    active_pipeline=RetakePipelineState(distilled=current_distilled, quantized=current_quantized) as state
-                ) if current_distilled == distilled and current_quantized == quantized:
+                case GpuSlot(active_pipeline=RetakePipelineState(cache_key=cached_key) as state) if cached_key == cache_key:
                     return state
                 case _:
                     pass
 
-        self._evict_gpu_pipeline_for_swap()
+        # Gate heavy load on the memory plan before any GPU work.
+        self._enforce_memory_plan_gate(memory_plan)
 
-        checkpoint_path, gemma_root, _upsampler_path, _cache_key = self._resolve_checkpoint_paths()
-        # build_policy needs a single checkpoint path; split-safetensors
-        # checkpoints arrive as a tuple of shards — read from the first shard
-        # (for non-prequant checkpoints this is equivalent to the old path-less
-        # fp8_cast(), and the retake pipeline overrides split+fp8 with its own
-        # kijai guard regardless). Net gating is unchanged.
-        if quantized:
-            from ltx_core.quantization.fp8_cast import build_policy
+        with memory_trace.phase("pipeline_load:retake"):
+            self._evict_gpu_pipeline_for_swap()
 
-            cp = checkpoint_path[0] if isinstance(checkpoint_path, tuple) else checkpoint_path
-            quantization = build_policy(cp)
-        else:
-            quantization = None
-        components = self._resolve_active_components()
-        pipeline = self._retake_pipeline_class.create(
-            checkpoint_path=checkpoint_path,
-            gemma_root=gemma_root,
-            device=self.config.device,
-            offload_mode=self._local_offload_mode(),
-            components=components,
-            loras=[],
-            quantization=quantization,
-        )
-        state = RetakePipelineState(pipeline=pipeline, distilled=distilled, quantized=quantized)
+            checkpoint_path, gemma_root, _upsampler_path, _cache_key = self._resolve_checkpoint_paths()
+            # build_policy needs a single checkpoint path; split-safetensors
+            # checkpoints arrive as a tuple of shards — read from the first shard
+            # (for non-prequant checkpoints this is equivalent to the old path-less
+            # fp8_cast(), and the retake pipeline overrides split+fp8 with its own
+            # kijai guard regardless). Net gating is unchanged.
+            if quantized:
+                from ltx_core.quantization.fp8_cast import build_policy
+
+                cp = checkpoint_path[0] if isinstance(checkpoint_path, tuple) else checkpoint_path
+                quantization = build_policy(cp)
+            else:
+                quantization = None
+            with memory_trace.phase("pipeline_create:retake"):
+                pipeline = self._retake_pipeline_class.create(
+                    checkpoint_path=checkpoint_path,
+                    gemma_root=gemma_root,
+                    device=self.config.device,
+                    offload_mode=self._local_offload_mode(),
+                    components=components,
+                    loras=[],
+                    quantization=quantization,
+                    memory_plan=memory_plan,
+                )
+            state = RetakePipelineState(
+                pipeline=pipeline,
+                distilled=distilled,
+                quantized=quantized,
+                cache_key=cache_key,
+            )
 
         with self._lock:
             self.state.gpu_slot = GpuSlot(active_pipeline=state)

@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from api_types import ImageConditioningInput, OutputFormat
+from services.block_offload import attach_memory_plan_to_stages
 from services.exr_input import iter_video_frames_to_model_domain
 from services.ltx_components import CheckpointPath, ResolvedLtxComponents
 from services.ltx_pipeline_common import (
@@ -19,14 +20,14 @@ from services.ltx_pipeline_common import (
     video_chunks_number,
 )
 from services.media_encoder.media_encoder import HdrProxyPolicy
+from services import memory_trace
 from services.services_utils import AudioOrNone, TilingConfigType, device_supports_fp8
 
 if TYPE_CHECKING:
     from ltx_pipelines.utils.types import OffloadMode
+    from services.local_memory_plan import LocalMemoryPlan
     from services.media_encoder.media_encoder import MediaEncoder
     from services.color_management import ColorSpace
-
-_fp8_lora_fuse_patched = False
 
 # ponytail: mask_grow_px controls LTXVDilateVideoMask radii only (derive_stage_radii).
 # INPAINT_BLEND1_LOW_RES_DILATION=5 for bridge blend (stage1, node 5266, linked input) to soften edge ghosting at stage1.
@@ -54,46 +55,6 @@ def derive_stage_radii(mask_grow_px: int) -> tuple[int, int]:
     stage2 = mask_grow_px
     stage1 = (mask_grow_px + 1) // 2
     return (stage1, stage2)
-
-
-def _quantize_fp8_same_layout(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    weight_fp32 = weight.to(torch.float32)
-    fp8 = torch.finfo(torch.float8_e4m3fn)
-    max_abs = torch.amax(torch.abs(weight_fp32))
-    scale = fp8.max / max_abs.clamp_min(1e-12)
-    quantized = torch.clamp(weight_fp32 * scale, min=fp8.min, max=fp8.max).to(torch.float8_e4m3fn)
-    return quantized, scale.reciprocal()
-
-
-def _install_kijai_fp8_lora_fuse_patch() -> None:
-    global _fp8_lora_fuse_patched  # noqa: PLW0603
-    if _fp8_lora_fuse_patched:
-        return
-
-    import ltx_core.loader.fuse_loras as fuse_loras  # noqa: PLC0415
-    from ltx_core.quantization.fp8_scaled_mm import quantize_weight_to_fp8_per_tensor  # noqa: PLC0415
-
-    def _layout_aware_fuse_delta_with_scaled_fp8(
-        deltas: torch.Tensor,
-        weight: torch.Tensor,
-        key: str,
-        scale_key: str,
-        model_sd: Any,
-    ) -> dict[str, torch.Tensor]:
-        weight_scale = model_sd.sd[scale_key]
-        if weight.shape == deltas.shape:
-            original_weight = weight.to(torch.float32) * weight_scale
-            new_weight = original_weight + deltas.to(torch.float32)
-            new_fp8_weight, new_weight_scale = _quantize_fp8_same_layout(new_weight)
-            return {key: new_fp8_weight, scale_key: new_weight_scale}
-
-        original_weight = weight.t().to(torch.float32) * weight_scale
-        new_weight = original_weight + deltas.to(torch.float32)
-        new_fp8_weight, new_weight_scale = quantize_weight_to_fp8_per_tensor(new_weight)
-        return {key: new_fp8_weight, scale_key: new_weight_scale}
-
-    setattr(fuse_loras, "_fuse_delta_with_scaled_fp8", _layout_aware_fuse_delta_with_scaled_fp8)
-    _fp8_lora_fuse_patched = True
 
 
 def _vae_compatible_frame_count(num_frames: int) -> int:
@@ -228,6 +189,8 @@ class LTXIcLoraPipeline:
         offload_mode: OffloadMode,
         components: ResolvedLtxComponents | None = None,
         lora_strength: float = 1.0,
+        *,
+        memory_plan: LocalMemoryPlan | None = None,
     ) -> "LTXIcLoraPipeline":
         return LTXIcLoraPipeline(
             checkpoint_path=checkpoint_path,
@@ -238,6 +201,7 @@ class LTXIcLoraPipeline:
             offload_mode=offload_mode,
             components=components,
             lora_strength=lora_strength,
+            memory_plan=memory_plan,
         )
 
     def __init__(
@@ -250,6 +214,8 @@ class LTXIcLoraPipeline:
         offload_mode: OffloadMode,
         components: ResolvedLtxComponents | None = None,
         lora_strength: float = 1.0,
+        *,
+        memory_plan: LocalMemoryPlan | None = None,
     ) -> None:
         self._components = components
         from ltx_core.loader.primitives import LoraPathStrengthAndSDOps
@@ -279,12 +245,11 @@ class LTXIcLoraPipeline:
 
             quantization = build_policy(checkpoint_path) if device_supports_fp8(device) else None  # type: ignore[arg-type]  # non-split branch → str checkpoint
 
-        # ponytail: split safetensors 22B does not fit full residency on 32GB;
-        # stream from CPU unless an explicit non-NONE offload mode is set.
-        from ltx_pipelines.utils.types import OffloadMode
-
-        if is_split and offload_mode == OffloadMode.NONE:
-            offload_mode = OffloadMode.CPU
+        # Phase 2: trust the memory plan's offload decision when provided; no
+        # internal split/GGUF coercion. Transitional handler path
+        # (memory_plan=None) uses the caller's offload_mode as-is.
+        if memory_plan is not None:
+            offload_mode = memory_plan.offload_mode
         self._offload_mode = offload_mode
         # ponytail: one strength applies uniformly to all LoRAs in the stack;
         # split per-LoRA only if product needs it.
@@ -301,6 +266,11 @@ class LTXIcLoraPipeline:
             quantization=quantization,
             offload_mode=self._offload_mode,
         )
+        # Phase 3B: stamp the memory plan onto the upstream pipeline's
+        # DiffusionStage(s) (stage_1/stage_2) so the block-offload build patch
+        # can read it when the transformer is built lazily at generation time.
+        if memory_plan is not None:
+            attach_memory_plan_to_stages(self.pipeline, memory_plan)
 
         if is_gguf:
             from services.patches.gguf_loader_fix import install_gguf_component_paths, install_gguf_loader
@@ -320,7 +290,6 @@ class LTXIcLoraPipeline:
             c = self._components
             assert c is not None  # is_split guarantees this
             install_kijai_transformer_config_patch(self.pipeline, checkpoint_path)
-            _install_kijai_fp8_lora_fuse_patch()
             install_gguf_component_paths(
                 self.pipeline,
                 checkpoint_path,
@@ -813,6 +782,7 @@ class LTXIcLoraPipeline:
 
         # ponytail: offload originals to CPU before stage1 denoising — 196f 1080p originals
         # (~4.7GB @ bf16) + GGUF transformer raw load OOMs on 8/12GB. Back for blend only.
+        memory_trace.snapshot("inpaint_stage1:before_drain")
         del green_half, mask_video, mask_gray, mask_stage1_full
         video_half = video_half.cpu()
         video_full = video_full.cpu()
@@ -820,7 +790,9 @@ class LTXIcLoraPipeline:
         mask_stage2_full = mask_stage2_full.cpu()
         mask_full_gray = mask_full_gray.cpu()
         if device.type == "cuda":
+            memory_trace.write_event("manual_drain", "manual_drain:ic_lora")
             torch.cuda.empty_cache()
+        memory_trace.snapshot("inpaint_stage1:after_drain")
 
         stage1_sigmas = DISTILLED_SIGMAS.to(dtype=torch.float32, device=device)
 
@@ -896,12 +868,15 @@ class LTXIcLoraPipeline:
             lambda enc: enc.tiled_encode(blend_full_bcfhw, tiling_config)
         )  # (1, 128, F', H'_full, W'_full)
         # ponytail: free large intermediates before stage 2 denoising — no longer needed
+        memory_trace.snapshot("inpaint_stage2:before_drain")
         del blend_stage1, blend_stage1_bchw, blend_full, blend_full_bcfhw
         # ponytail: offload half-res originals back to CPU before stage 2 denoising
         video_half = video_half.cpu()
         mask_stage1_half = mask_stage1_half.cpu()
         if device.type == "cuda":
+            memory_trace.write_event("manual_drain", "manual_drain:ic_lora")
             torch.cuda.empty_cache()
+        memory_trace.snapshot("inpaint_stage2:after_drain")
 
         # ------------------------------------------------------------------ #
         # 9. Stage 2: denoising at full resolution

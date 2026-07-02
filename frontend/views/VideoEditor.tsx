@@ -706,16 +706,21 @@ function VideoEditorWithStore({
 
     const takeIndex = clip.takeIndex ?? liveAsset.activeTakeIndex
     let takePath = liveAsset.path
+    let takeProxyPath = liveAsset.proxyPath
     if (liveAsset.takes && liveAsset.takes.length > 0 && takeIndex !== undefined) {
       const idx = Math.max(0, Math.min(takeIndex, liveAsset.takes.length - 1))
       takePath = liveAsset.takes[idx].path
+      takeProxyPath = liveAsset.takes[idx].proxyPath
     }
 
     const linkedIds = new Set(clip.linkedClipIds || [])
     linkedIds.add(clip.id)
 
+    // P0-2: submit the PRIMARY path to the backend (videoPath), and forward the
+    // take/asset proxy path (if any) for preview-only playback in the panel.
     setGenSpaceIcLoraSource({
       videoPath: takePath,
+      previewPath: takeProxyPath ?? takePath,
       clipId: clip.id,
       assetId: liveAsset.id,
       linkedClipIds: [...linkedIds],

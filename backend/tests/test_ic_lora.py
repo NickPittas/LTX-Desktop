@@ -1030,10 +1030,7 @@ class TestIcLoraWorkflowGating:
                 "adapter_id": "hdr",
             },
         )
-        assert_http_error(
-            response, status_code=400, code="HTTP_400",
-            message="video_path is required for this adapter",
-        )
+        assert_http_error(response, status_code=400, code="HTTP_400", message="video_path is required for this adapter")
 
     def test_hdr_ignores_conditioning_type(self, client, test_state, fake_services, create_fake_model_files):
         """HDR ignores conditioning_type (the source video is the guide) — request succeeds."""
@@ -1247,15 +1244,79 @@ class TestIcLoraWorkflowGating:
         assert len(fake_services.hdr_ic_lora_pipeline.generate_calls) == 1
         assert fake_services.hdr_ic_lora_pipeline.generate_calls[0]["num_frames"] == 2
 
-    def test_hdr_rejects_dev_base(
-        self, client, test_state, create_fake_model_files, tmp_path
+    def test_hdr_dev_base_succeeds_with_distilled_lora(
+        self, client, test_state, fake_services, create_fake_model_files, tmp_path
     ):
-        """HDR initial support is distilled-only — a dev base is rejected."""
+        """HDR dev base succeeds when a distilled LoRA is available (applied @ 0.5 first).
+
+        Dev base requires a distilled LoRA; HDR LoRA is applied second @ 1.0.
+        With a canonical distilled LoRA installed, the HDR pipeline ``create()``
+        receives base_family='dev' and the effective distilled LoRA path.
+        """
+        from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
+
         create_fake_model_files()
         self._setup_hdr_artifacts(test_state)
         test_state.state.app_settings.use_local_text_encoder = True
 
-        # Dev profile with NO distilled LoRA installed.
+        # Install the canonical distilled LoRA so the dev-base resolver finds it.
+        models_dir = test_state.config.default_models_dir
+        adapters_dir = models_dir / "adapters"
+        adapters_dir.mkdir(parents=True, exist_ok=True)
+        distilled_lora = adapters_dir / OFFICIAL_LTX23_ADAPTERS["distilled_lora_384_1_1"].filename
+        distilled_lora.write_bytes(b"\x00" * 1024)
+
+        dev_transformer = tmp_path / "dev.safetensors"
+        dev_transformer.write_bytes(b"\x00" * 1024)
+        upsampler = tmp_path / "ups.safetensors"
+        upsampler.write_bytes(b"\x00" * 1024)
+        profile = ModelProfilePayload(
+            id="dev-with-lora",
+            name="Dev With LoRA",
+            source="official",
+            components=ModelComponentPaths(
+                transformer=str(dev_transformer),
+                transformer_format="official_safetensors",
+                upsampler=str(upsampler),
+                text_encoder_format="api",
+            ),
+        )
+        test_state.state.model_profiles = [profile]
+        test_state.state.active_model_profile_id = profile.id
+
+        video_path = test_state.config.outputs_dir / "src.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(
+            str(video_path), FakeCapture(frames=["a"] * 17, width=512, height=512)
+        )
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "prompt": "HDR dev test",
+                "images": [],
+                "adapter_id": "hdr",
+            },
+        )
+        assert response.status_code == 200, response.text
+        # Dev base threads the effective distilled LoRA path into HDR create.
+        assert fake_services.hdr_ic_lora_pipeline.last_base_family == "dev"
+        assert fake_services.hdr_ic_lora_pipeline.last_distilled_lora_path == str(distilled_lora)
+        assert fake_services.hdr_ic_lora_pipeline.last_transformer_format == "safetensors"
+        assert fake_services.hdr_ic_lora_pipeline.last_components is not None
+        # gemma_root is captured by the fake (handler threads the resolved root).
+        assert isinstance(fake_services.hdr_ic_lora_pipeline.last_gemma_root, str)
+
+    def test_hdr_dev_base_without_distilled_lora_rejects(
+        self, client, test_state, create_fake_model_files, tmp_path
+    ):
+        """HDR dev base without any distilled LoRA is rejected with DISTILLED_LORA_REQUIRED."""
+        create_fake_model_files()
+        self._setup_hdr_artifacts(test_state)
+        test_state.state.app_settings.use_local_text_encoder = True
+
+        # No distilled LoRA installed anywhere.
         dev_transformer = tmp_path / "dev.safetensors"
         dev_transformer.write_bytes(b"\x00" * 1024)
         upsampler = tmp_path / "ups.safetensors"
@@ -1289,11 +1350,9 @@ class TestIcLoraWorkflowGating:
                 "adapter_id": "hdr",
             },
         )
-        # Dev base is not supported for HDR initial support — explicit reject
-        # with an actionable code (no silent fallback).
         assert response.status_code == 409
         payload = response.json()
-        assert payload["code"] == "UNSUPPORTED_MODEL_BASE_FAMILY"
+        assert payload["code"] == "DISTILLED_LORA_REQUIRED"
 
     def test_hdr_distilled_selected_base_does_not_require_distilled_lora(
         self, client, test_state, fake_services, create_fake_model_files
@@ -1381,16 +1440,25 @@ class TestIcLoraWorkflowGating:
         assert "model_selection" in components.cache_key
         assert "ltx-2.3-22b-distilled" in components.cache_key
 
-    def test_hdr_rejects_kijai_or_split_selection(
-        self, client, test_state, create_fake_model_files, tmp_path
+    def test_hdr_model_selection_kijai_fp8_succeeds(
+        self, client, test_state, fake_services, create_fake_model_files, tmp_path
     ):
-        """HDR initial support rejects Kijai/split-safetensors selections (distilled-only)."""
+        """HDR accepts a Kijai FP8 distilled component selection.
+
+        With ``model_selection='ltx-2.3-22b-distilled-fp8-kijai-v3'`` and an
+        active split-component profile providing the sidecars, the HDR
+        ``checkpoint_path`` is now the component tuple from
+        ``checkpoint_path_arg(components)`` (selected transformer + profile
+        sidecars) — HDR componentized loading threads the full component tuple
+        so the pipeline ``create()`` can patch the stage transformer config and
+        reroute VAE/component builders to the sidecar files.
+        """
         create_fake_model_files()
         self._setup_hdr_artifacts(test_state)
         test_state.state.app_settings.use_local_text_encoder = True
 
         models_dir = test_state.config.default_models_dir
-        # Kijai-style split distilled transformer at its canonical registry path.
+        # Kijai-style FP8 distilled transformer at its canonical registry path.
         kijai_rel = (
             "diffusion_models/ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v3.safetensors"
         )
@@ -1438,13 +1506,177 @@ class TestIcLoraWorkflowGating:
                 "model_selection": "ltx-2.3-22b-distilled-fp8-kijai-v3",
             },
         )
-        # Kijai/split-safetensors is not supported for HDR initial support —
-        # explicit reject with an actionable gating code (no silent fallback).
-        assert response.status_code == 409, response.text
-        payload = response.json()
-        assert payload["code"] in ("UNSUPPORTED_MODEL_BASE_FAMILY", "UNSUPPORTED_MODEL_FORMAT"), (
-            f"Expected HDR model gating rejection, got {payload!r}"
+        assert response.status_code == 200, response.text
+        # HDR pipeline create() received the COMPONENT TUPLE (selected
+        # transformer + profile sidecars), not a single selected path. HDR
+        # componentized loading threads the full tuple so post-build patching
+        # (Kijai V2 config + VAE sidecars) can scan all shards.
+        checkpoint = fake_services.hdr_ic_lora_pipeline.last_checkpoint_path
+        assert isinstance(checkpoint, tuple), (
+            f"Expected component tuple checkpoint, got {checkpoint!r}"
         )
+        assert str(kijai_path) in checkpoint, (
+            f"Selected Kijai transformer missing from checkpoint tuple {checkpoint!r}"
+        )
+        # Sidecars are threaded too.
+        assert sidecars["tp"] in checkpoint
+        assert sidecars["vvae"] in checkpoint
+        assert sidecars["avae"] in checkpoint
+        assert fake_services.hdr_ic_lora_pipeline.last_transformer_format == "safetensors"
+        assert fake_services.hdr_ic_lora_pipeline.last_base_family == "distilled"
+        assert fake_services.hdr_ic_lora_pipeline.last_distilled_lora_path is None
+        assert isinstance(fake_services.hdr_ic_lora_pipeline.last_gemma_root, str)
+        # components still carries the selection (cache key includes it).
+        components = fake_services.hdr_ic_lora_pipeline.last_components
+        assert components is not None
+        assert "model_selection" in components.cache_key
+        assert "ltx-2.3-22b-distilled-fp8-kijai-v3" in components.cache_key
+
+    def test_hdr_split_profile_tuple_checkpoint_succeeds(
+        self, client, test_state, fake_services, create_fake_model_files, tmp_path
+    ):
+        """HDR accepts an active split-component profile (no model_selection).
+
+        Without a live ``model_selection``, ``checkpoint_path_arg(components)``
+        returns a tuple (transformer + sidecars) for a ``split_safetensors``
+        profile. HDR componentized loading accepts the tuple; the pipeline
+        ``create()`` receives it and the distilled base family.
+        """
+        create_fake_model_files()
+        self._setup_hdr_artifacts(test_state)
+        test_state.state.app_settings.use_local_text_encoder = True
+        # Streaming local policy → handler forwards OffloadMode.CPU. The real
+        # LTXHdrIcLoraPipeline.create() also coerces NONE→CPU for split
+        # safetensors (OOM mitigation), but that coercion runs inside create(),
+        # which this fake-backed test bypasses, so the streaming policy is used
+        # here to observe CPU offload on the split workflow.
+        test_state.config.local_generations_mode = "streaming_models_loading"
+
+        # Active split-component profile, NO model_selection. The transformer
+        # filename contains "distilled" so the base family resolves to distilled.
+        transformer = tmp_path / "distilled-split.safetensors"
+        transformer.write_bytes(b"x")
+        sidecars: dict[str, str] = {}
+        for name in ("tp", "vvae", "avae", "ups"):
+            p = tmp_path / f"{name}.safetensors"
+            p.write_bytes(b"x")
+            sidecars[name] = str(p)
+        profile = ModelProfilePayload(
+            id="split-hdr",
+            name="Split HDR",
+            source="official",
+            components=ModelComponentPaths(
+                transformer=str(transformer),
+                transformer_format="split_safetensors",
+                text_projection=sidecars["tp"],
+                video_vae=sidecars["vvae"],
+                audio_vae=sidecars["avae"],
+                upsampler=sidecars["ups"],
+                text_encoder_format="api",
+            ),
+        )
+        test_state.state.model_profiles = [profile]
+        test_state.state.active_model_profile_id = "split-hdr"
+
+        video_path = test_state.config.outputs_dir / "src.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(
+            str(video_path), FakeCapture(frames=["a"] * 17, width=512, height=512)
+        )
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "prompt": "HDR split test",
+                "images": [],
+                "adapter_id": "hdr",
+            },
+        )
+        assert response.status_code == 200, response.text
+        # Component tuple checkpoint is threaded through (no longer rejected).
+        checkpoint = fake_services.hdr_ic_lora_pipeline.last_checkpoint_path
+        assert isinstance(checkpoint, tuple), (
+            f"Expected component tuple checkpoint, got {checkpoint!r}"
+        )
+        assert str(transformer) in checkpoint
+        assert sidecars["tp"] in checkpoint
+        assert sidecars["vvae"] in checkpoint
+        assert fake_services.hdr_ic_lora_pipeline.last_transformer_format == "safetensors"
+        assert fake_services.hdr_ic_lora_pipeline.last_base_family == "distilled"
+        assert fake_services.hdr_ic_lora_pipeline.last_distilled_lora_path is None
+        assert fake_services.hdr_ic_lora_pipeline.last_components is not None
+        # Componentized split safetensors uses CPU offload (streaming policy
+        # forwarded here; create() also coerces NONE→CPU for split in production).
+        forwarded_offload = fake_services.hdr_ic_lora_pipeline.last_offload_mode
+        assert forwarded_offload is not None
+        assert forwarded_offload.value == "cpu"
+
+    def test_hdr_gguf_profile_succeeds(
+        self, client, test_state, fake_services, create_fake_model_files, tmp_path
+    ):
+        """HDR accepts a GGUF component profile (no longer format-rejected).
+
+        A GGUF base profile (transformer_format='gguf') with sidecars resolves
+        to a component tuple checkpoint; HDR ``create()`` receives the tuple,
+        transformer_format='gguf', and the distilled base family. The real
+        GGUF loader/patch path is exercised manually; this test pins the
+        handler→create component-threading contract.
+        """
+        create_fake_model_files()
+        self._setup_hdr_artifacts(test_state)
+        test_state.state.app_settings.use_local_text_encoder = True
+
+        transformer = tmp_path / "ltx-2.3-22b-distilled.gguf"
+        transformer.write_bytes(b"GGUF")
+        sidecars: dict[str, str] = {}
+        for name in ("tp", "vvae", "avae", "ups"):
+            p = tmp_path / f"{name}.safetensors"
+            p.write_bytes(b"x")
+            sidecars[name] = str(p)
+        profile = ModelProfilePayload(
+            id="gguf-hdr",
+            name="GGUF HDR",
+            source="kijai",
+            components=ModelComponentPaths(
+                transformer=str(transformer),
+                transformer_format="gguf",
+                text_projection=sidecars["tp"],
+                video_vae=sidecars["vvae"],
+                audio_vae=sidecars["avae"],
+                upsampler=sidecars["ups"],
+                text_encoder_format="api",
+            ),
+        )
+        test_state.state.model_profiles = [profile]
+        test_state.state.active_model_profile_id = "gguf-hdr"
+
+        video_path = test_state.config.outputs_dir / "src.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(
+            str(video_path), FakeCapture(frames=["a"] * 17, width=512, height=512)
+        )
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "prompt": "HDR GGUF test",
+                "images": [],
+                "adapter_id": "hdr",
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert fake_services.hdr_ic_lora_pipeline.last_transformer_format == "gguf"
+        checkpoint = fake_services.hdr_ic_lora_pipeline.last_checkpoint_path
+        assert isinstance(checkpoint, tuple), (
+            f"Expected component tuple checkpoint, got {checkpoint!r}"
+        )
+        assert str(transformer) in checkpoint
+        assert sidecars["vvae"] in checkpoint
+        assert fake_services.hdr_ic_lora_pipeline.last_base_family == "distilled"
+        assert fake_services.hdr_ic_lora_pipeline.last_distilled_lora_path is None
+        assert fake_services.hdr_ic_lora_pipeline.last_components is not None
 
     def test_hdr_missing_scene_embeddings_returns_400(
         self, client, test_state, create_fake_model_files
@@ -2307,3 +2539,70 @@ class TestHdrPromptEncoderAudioFallback:
         assert torch.equal(ctx.video_encoding, hdr_video)
         assert ctx.audio_encoding is not None
         assert torch.equal(ctx.audio_encoding, real_audio)
+
+
+class TestHdrEncoderDtypeInference:
+    """Unit tests for the HDR conditioning encoder device/dtype inference.
+
+    Guards against the bf16-vs-float32 conv bias mismatch that crashes
+    ``video_encoder(video)`` when a Kijai FP8/sidecar VAE keeps float32 conv
+    bias while the pipeline dtype is bf16::
+
+        RuntimeError: Input type (c10::BFloat16) and bias type (float) should be the same
+
+    Exercises the module-level ``_module_device_dtype`` helper directly against
+    real ``torch.nn.Module`` instances (no mocks).
+    """
+
+    def test_hdr_module_device_dtype_prefers_param(self):
+        """A float32 param module returns float32 even with a bf16 fallback."""
+        import torch
+
+        from services.hdr_ic_lora_pipeline.ltx_hdr_ic_lora_pipeline import (
+            _module_device_dtype,
+        )
+
+        encoder = torch.nn.Linear(2, 2).to(dtype=torch.float32)
+        device, dtype = _module_device_dtype(
+            encoder,
+            fallback_device=torch.device("cpu"),
+            fallback_dtype=torch.bfloat16,
+        )
+        # Must take the encoder's float32 param, NOT the bf16 fallback.
+        assert dtype == torch.float32
+        assert device == torch.device("cpu")
+
+    def test_hdr_module_device_dtype_uses_buffer_when_no_params(self):
+        """A param-less module with a registered buffer yields the buffer dtype."""
+        import torch
+
+        from services.hdr_ic_lora_pipeline.ltx_hdr_ic_lora_pipeline import (
+            _module_device_dtype,
+        )
+
+        encoder = torch.nn.Module()
+        encoder.register_buffer("conv_bias", torch.zeros(3, dtype=torch.float32))
+        device, dtype = _module_device_dtype(
+            encoder,
+            fallback_device=torch.device("cpu"),
+            fallback_dtype=torch.bfloat16,
+        )
+        assert dtype == torch.float32
+        assert device == torch.device("cpu")
+
+    def test_hdr_module_device_dtype_falls_back_when_empty(self):
+        """A module with no params/buffers returns the provided fallback."""
+        import torch
+
+        from services.hdr_ic_lora_pipeline.ltx_hdr_ic_lora_pipeline import (
+            _module_device_dtype,
+        )
+
+        encoder = torch.nn.Module()
+        device, dtype = _module_device_dtype(
+            encoder,
+            fallback_device=torch.device("cpu"),
+            fallback_dtype=torch.bfloat16,
+        )
+        assert dtype == torch.bfloat16
+        assert device == torch.device("cpu")

@@ -1498,6 +1498,7 @@ export function GenSpace() {
     })
     setIcLoraInitial({
       videoPath: genSpaceIcLoraSource.videoPath,
+      previewPath: genSpaceIcLoraSource.previewPath,
     })
     setIcLoraPanelKey((prev) => prev + 1)
     setGenSpaceIcLoraSource(null)

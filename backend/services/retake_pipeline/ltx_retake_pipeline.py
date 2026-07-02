@@ -34,6 +34,7 @@ from services.retake_pipeline.retake_pipeline import RetakePipeline
 if TYPE_CHECKING:
     from services.media_encoder.media_encoder import MediaEncoder
     from services.color_management import ColorSpace
+    from services.local_memory_plan import LocalMemoryPlan
 
 
 
@@ -48,6 +49,7 @@ class LTXRetakePipeline:
         *,
         loras: list[LoraPathStrengthAndSDOps] | None = None,
         quantization: QuantizationPolicy | None = None,
+        memory_plan: LocalMemoryPlan | None = None,
     ) -> RetakePipeline:
         return LTXRetakePipeline(
             checkpoint_path=checkpoint_path,
@@ -57,6 +59,7 @@ class LTXRetakePipeline:
             components=components,
             loras=loras or [],
             quantization=quantization,
+            memory_plan=memory_plan,
         )
 
     def __init__(
@@ -69,6 +72,7 @@ class LTXRetakePipeline:
         *,
         loras: list[LoraPathStrengthAndSDOps],
         quantization: QuantizationPolicy | None,
+        memory_plan: LocalMemoryPlan | None = None,
     ) -> None:
         self._components = components
         from ltx_pipelines.utils.blocks import (
@@ -92,10 +96,11 @@ class LTXRetakePipeline:
 
             install_gguf_prompt_encoder_patch()
 
-        # ponytail: split safetensors 22B does not fit full residency on 32GB;
-        # stream from CPU unless an explicit non-NONE offload mode is set.
-        if is_split and offload_mode == OffloadMode.NONE:
-            offload_mode = OffloadMode.CPU
+        # Phase 2: trust the memory plan's offload decision when provided; no
+        # internal split/GGUF coercion. Transitional handler path
+        # (memory_plan=None) uses the caller's offload_mode as-is.
+        if memory_plan is not None:
+            offload_mode = memory_plan.offload_mode
         self.device = device
         self.dtype = torch.bfloat16
         self._offload_mode = offload_mode
@@ -134,6 +139,12 @@ class LTXRetakePipeline:
             quantization=stage_quantization,
             offload_mode=self._offload_mode,
         )
+        # Phase 3B: stamp the memory plan onto the DiffusionStage so the
+        # block-offload build patch can read it when the transformer is built
+        # lazily at generation time. ``memory_plan`` is a dynamic attribute
+        # (read via ``getattr`` in the patch); not declared on DiffusionStage.
+        if memory_plan is not None:
+            self.stage.memory_plan = memory_plan  # type: ignore[attr-defined]
         self.video_decoder = VideoDecoder(
             checkpoint_path=checkpoint_path,  # type: ignore[arg-type]
             dtype=self.dtype,

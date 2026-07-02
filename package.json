@@ -24,6 +24,7 @@
     "openapi:generate": "pnpm openapi:export && pnpm openapi:types",
     "openapi:check": "pnpm openapi:generate && git diff --exit-code -- frontend/generated/backend-openapi.json frontend/generated/backend-openapi.ts",
     "backend:test": "cd backend && uv sync --frozen --extra test --extra dev && uv run pytest -v --tb=short",
+    "live:workflow-test": "cd backend && uv run python scripts/live_workflow_test.py",
     "build": "node scripts/run-script.js scripts/local-build",
     "build:skip-python": "node scripts/run-script.js scripts/local-build --skip-python",
     "build:fast": "node scripts/run-script.js scripts/local-build --unpack --skip-python",

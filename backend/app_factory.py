@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hmac
+import os
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
@@ -28,6 +29,7 @@ from _routes.runtime_policy import router as runtime_policy_router
 from _routes.settings import router as settings_router
 from api_types import HTTPErrorResponse
 from logging_policy import log_http_error, log_unhandled_exception
+from services import memory_trace
 from state import init_state_service
 
 if TYPE_CHECKING:
@@ -48,6 +50,62 @@ DEFAULT_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
         "description": "Server Error",
     },
 }
+
+#: Request-state attribute recording whether an exception handler already wrote
+#: the single terminal ``http_error`` event. Lives on the shared request scope
+#: state so it survives Starlette's ``BaseHTTPMiddleware`` task isolation (a bare
+#: contextvar would not propagate back out of ``call_next``).
+_TRACE_TERMINAL_ATTR = "ltx_memory_terminal_recorded"
+_HTTP_TRACE_LABEL = "http"
+
+
+def _trace_http_event(
+    request: Request,
+    event_type: str,
+    *,
+    status_code: int | None = None,
+    code: str | None = None,
+    message: str | None = None,
+) -> None:
+    """Write an HTTP trace event with the standard request fields."""
+    fields: dict[str, object] = {
+        "path": request.url.path,
+        "method": request.method,
+    }
+    if status_code is not None:
+        fields["status_code"] = status_code
+    if code is not None:
+        fields["code"] = code
+    if message is not None:
+        fields["message"] = message
+    memory_trace.write_event(event_type, _HTTP_TRACE_LABEL, **fields)
+
+
+def _record_http_terminal(
+    request: Request,
+    *,
+    status_code: int,
+    code: str,
+    message: str,
+) -> None:
+    """Write the single terminal ``http_error`` and flag it on the request."""
+    if not memory_trace.is_enabled():
+        return
+    try:
+        _trace_http_event(
+            request,
+            "http_error",
+            status_code=status_code,
+            code=code,
+            message=message,
+        )
+        setattr(request.state, _TRACE_TERMINAL_ATTR, True)
+    except Exception:
+        pass
+
+
+def _http_terminal_recorded(request: Request) -> bool:
+    return bool(getattr(request.state, _TRACE_TERMINAL_ATTR, False))
 
 
 def create_app(
@@ -109,43 +167,118 @@ def create_app(
             content=build_http_error_response(401, "Unauthorized").model_dump(),
         )
 
+    @app.middleware("http")
+    async def _memory_trace_middleware(  # pyright: ignore[reportUnusedFunction]
+        request: Request,
+        call_next: Callable[[Request], Awaitable[StarletteResponse]],
+    ) -> StarletteResponse:
+        if not memory_trace.is_enabled():
+            return await call_next(request)
+        run_id = (
+            request.headers.get("x-ltx-memory-run-id")
+            or os.environ.get("LTX_MEMORY_TRACE_RUN_ID")
+            or "__process__"
+        )
+        case_id = request.headers.get("x-ltx-memory-case-id") or "__process__"
+        ctx = memory_trace.MemoryTraceContext(run_id=run_id, case_id=case_id)
+        setattr(request.state, _TRACE_TERMINAL_ATTR, False)
+        with memory_trace.use_context(ctx):
+            _trace_http_event(request, "http_start")
+            try:
+                response = await call_next(request)
+            except Exception:
+                if not _http_terminal_recorded(request):
+                    _trace_http_event(
+                        request,
+                        "http_error",
+                        status_code=500,
+                        code="HTTP_500",
+                        message="Internal Server Error",
+                    )
+                    setattr(request.state, _TRACE_TERMINAL_ATTR, True)
+                raise
+            if not _http_terminal_recorded(request):
+                status = response.status_code
+                if status < 400:
+                    _trace_http_event(request, "http_end", status_code=status)
+                else:
+                    _trace_http_event(
+                        request,
+                        "http_error",
+                        status_code=status,
+                        code=f"HTTP_{status}",
+                        message=f"HTTP {status}",
+                    )
+                    setattr(request.state, _TRACE_TERMINAL_ATTR, True)
+        return response
+
     async def _route_http_error_handler(request: Request, exc: Exception) -> JSONResponse:
         if isinstance(exc, HTTPError):
             log_http_error(request, exc)
+            _record_http_terminal(
+                request,
+                status_code=exc.status_code,
+                code=exc.code,
+                message=exc.detail,
+            )
             return JSONResponse(status_code=exc.status_code, content=exc.response.model_dump())
-        return JSONResponse(
+        resp = build_http_error_response(500, str(exc))
+        _record_http_terminal(
+            request,
             status_code=500,
-            content=build_http_error_response(500, str(exc)).model_dump(),
+            code=resp.code,
+            message=resp.message,
         )
+        return JSONResponse(status_code=500, content=resp.model_dump())
 
     async def _starlette_http_error_handler(request: Request, exc: Exception) -> JSONResponse:
         if isinstance(exc, StarletteHTTPException):
-            return JSONResponse(
+            resp = build_http_error_response(exc.status_code, exc.detail)
+            _record_http_terminal(
+                request,
                 status_code=exc.status_code,
-                content=build_http_error_response(exc.status_code, exc.detail).model_dump(),
+                code=resp.code,
+                message=resp.message,
             )
-        return JSONResponse(
+            return JSONResponse(status_code=exc.status_code, content=resp.model_dump())
+        resp = build_http_error_response(500, str(exc))
+        _record_http_terminal(
+            request,
             status_code=500,
-            content=build_http_error_response(500, str(exc)).model_dump(),
+            code=resp.code,
+            message=resp.message,
         )
+        return JSONResponse(status_code=500, content=resp.model_dump())
 
     async def _validation_error_handler(request: Request, exc: Exception) -> JSONResponse:
         if isinstance(exc, RequestValidationError):
-            return JSONResponse(
+            resp = build_http_error_response(422, str(exc))
+            _record_http_terminal(
+                request,
                 status_code=422,
-                content=build_http_error_response(422, str(exc)).model_dump(),
+                code=resp.code,
+                message=resp.message,
             )
-        return JSONResponse(
+            return JSONResponse(status_code=422, content=resp.model_dump())
+        resp = build_http_error_response(422, str(exc))
+        _record_http_terminal(
+            request,
             status_code=422,
-            content=build_http_error_response(422, str(exc)).model_dump(),
+            code=resp.code,
+            message=resp.message,
         )
+        return JSONResponse(status_code=422, content=resp.model_dump())
 
     async def _route_generic_error_handler(request: Request, exc: Exception) -> JSONResponse:
         log_unhandled_exception(request, exc)
-        return JSONResponse(
+        resp = build_http_error_response(500, str(exc))
+        _record_http_terminal(
+            request,
             status_code=500,
-            content=build_http_error_response(500, str(exc)).model_dump(),
+            code=resp.code,
+            message=resp.message,
         )
+        return JSONResponse(status_code=500, content=resp.model_dump())
 
     app.add_exception_handler(RequestValidationError, _validation_error_handler)
     app.add_exception_handler(HTTPError, _route_http_error_handler)

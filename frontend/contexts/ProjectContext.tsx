@@ -64,6 +64,8 @@ export interface PendingRetakeUpdate {
 
 export interface GenSpaceIcLoraSource {
   videoPath: string
+  /** Optional browser-playable proxy path used only for preview playback. */
+  previewPath?: string
   clipId?: string
   assetId?: string
   linkedClipIds?: string[]

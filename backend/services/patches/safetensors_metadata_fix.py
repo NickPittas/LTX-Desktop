@@ -58,9 +58,13 @@ assert hasattr(SafetensorsModelStateDictLoader, "metadata") and callable(
 SafetensorsModelStateDictLoader.metadata = _patched_model_metadata  # type: ignore[assignment]
 
 
-# --- Patch 2: ltx_pipelines.ic_lora._read_lora_reference_downscale_factor ---
+# --- Patch 2: ltx_pipelines.ic_lora reference-downscale reader ---
+
+import logging
 
 import ltx_pipelines.ic_lora as _ic_lora_module
+
+_logger = logging.getLogger(__name__)
 
 
 def _patched_read_lora_reference_downscale_factor(lora_path: str) -> int:
@@ -68,15 +72,31 @@ def _patched_read_lora_reference_downscale_factor(lora_path: str) -> int:
         meta = _read_safetensors_metadata(lora_path) or {}
         return int(meta.get("reference_downscale_factor", 1))
     except Exception:
-        import logging
-        logging.warning(f"Failed to read metadata from LoRA file '{lora_path}'")
+        _logger.warning(f"Failed to read metadata from LoRA file '{lora_path}'")
         return 1
 
 
-assert hasattr(_ic_lora_module, "_read_lora_reference_downscale_factor"), (
-    "ltx_pipelines.ic_lora._read_lora_reference_downscale_factor not found — patch needs updating."
-)
-_ic_lora_module._read_lora_reference_downscale_factor = _patched_read_lora_reference_downscale_factor
+# Upstream renamed `_read_lora_reference_downscale_factor` to the public
+# `read_lora_reference_downscale_factor` (and added a sibling temporal-scale
+# reader). Patch whichever symbol exists; skip only this subpatch if neither
+# is present rather than crashing backend startup.
+_lora_downscale_attr: str | None = None
+for _candidate in (
+    "read_lora_reference_downscale_factor",
+    "_read_lora_reference_downscale_factor",
+):
+    if hasattr(_ic_lora_module, _candidate):
+        _lora_downscale_attr = _candidate
+        break
+
+if _lora_downscale_attr is not None:
+    setattr(_ic_lora_module, _lora_downscale_attr, _patched_read_lora_reference_downscale_factor)
+else:
+    _logger.warning(
+        "Neither ltx_pipelines.ic_lora.read_lora_reference_downscale_factor nor "
+        "_read_lora_reference_downscale_factor was found — skipping LoRA "
+        "reference-downscale metadata patch."
+    )
 
 
 # --- Patch 3: ltx_pipelines.utils.constants.detect_params ---

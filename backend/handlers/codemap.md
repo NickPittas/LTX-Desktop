@@ -153,12 +153,19 @@ and `_snap_frame_count` (min 9, 1+8k), loads only the adapter LoRA with
 `lora_strength=req.lora_strength`). The `hdr` branch (`_generate_hdr`)
 **ignores** prompt/audio/`conditioning_type`/`images` (an empty prompt is
 fine), requires a source video, **never rejects by frame count** (the wrapper
-decodes all frames and pads in memory to `8n+1`), gates to the **official
-distilled safetensors** base only (`load_hdr_ic_lora` rejects dev/full/GGUF/
-split/Kijai/QuantStack with `UNSUPPORTED_MODEL_BASE_FAMILY`/
-`UNSUPPORTED_MODEL_FORMAT`), forwards `scene_embeddings_path` into the HDR
-pipeline `create()` (and includes it in `_hdr_cache_key`), and returns
-`video_path` = EXR dir + `proxy_path` = SDR MP4. All other non-ingredients
+decodes all frames and pads in memory to `8n+1`), and accepts **dev,
+distilled, split, Kijai, and GGUF** component builds
+(`load_hdr_ic_lora` rejects only `base_family == "unknown"` with
+`UNSUPPORTED_MODEL_BASE_FAMILY`; dev requires a distilled LoRA else
+`DISTILLED_LORA_REQUIRED`; distilled skips the distilled LoRA). The HDR
+`checkpoint_path` is `checkpoint_path_arg(components)` — a single path for a
+monolith, a tuple (transformer + sidecars) for split/Kijai/GGUF. LoRA
+selection (distilled @ 0.5 first for dev, then HDR @ 1.0) and post-build
+component patching (`install_gguf_loader`/`install_kijai_transformer_config_patch`/
+`install_gguf_component_paths`) are owned by `LTXHdrIcLoraPipeline.create`,
+not the handler. Forwards `scene_embeddings_path` into the HDR pipeline
+`create()` (and includes it in `_hdr_cache_key`), and returns `video_path` =
+EXR dir + `proxy_path` = SDR MP4. All other non-ingredients
 workflows **require** `req.video_path` (existence-checked) plus workflow-
 specific guards: `union_control` requires `conditioning_type`, `in_outpainting`
 requires `mask_path` (and is the only non-HDR workflow allowing an empty
@@ -209,6 +216,10 @@ no key (rebuilt if not already A2V). Image-gen pipelines park on CPU
 `gpu_cleaner.cleanup()` outside the lock), `_resolve_checkpoint_paths`, and
 `_compile_if_enabled` (skips `torch.compile` on MPS).
 `_assert_invariants` forbids an image-gen pipeline being in both slots.
+Every load/create/evict path is wrapped in `memory_trace.phase(...)`
+(`pipeline_load:*`, `pipeline_create:*`, `pipeline_evict:gpu_swap`) as
+observational instrumentation — pure diagnostic, no-op when
+`LTX_MEMORY_TRACE_PATH` is unset.
 
 **`text_handler.TextHandler`** — `should_use_local_encoding()` returns True if
 the active profile provides a local encoder, else if both API+local are

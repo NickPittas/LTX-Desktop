@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Final
 import torch
 
 from api_types import ImageConditioningInput, OutputFormat
+from services.block_offload import attach_memory_plan_to_stages
 from services.ltx_components import BaseFamily, CheckpointPath, ResolvedLtxComponents
 from services.ltx_pipeline_common import (
     default_tiling_config,
@@ -22,6 +23,7 @@ from services.services_utils import AudioOrNone, TilingConfigType, device_suppor
 if TYPE_CHECKING:
     from ltx_core.model.transformer.compiling import CompilationConfig
     from ltx_pipelines.utils.types import OffloadMode
+    from services.local_memory_plan import LocalMemoryPlan
     from services.media_encoder.media_encoder import MediaEncoder
     from services.color_management import ColorSpace
 
@@ -42,6 +44,7 @@ class LTXFastVideoPipeline:
         *,
         transformer_format: str = "safetensors",
         distilled_lora_path: str | None = None,
+        memory_plan: LocalMemoryPlan | None = None,
     ) -> "LTXFastVideoPipeline":
         return LTXFastVideoPipeline(
             checkpoint_path=checkpoint_path,
@@ -52,6 +55,7 @@ class LTXFastVideoPipeline:
             components=components,
             transformer_format=transformer_format,
             distilled_lora_path=distilled_lora_path,
+            memory_plan=memory_plan,
         )
 
     def __init__(
@@ -65,6 +69,7 @@ class LTXFastVideoPipeline:
         *,
         transformer_format: str = "safetensors",
         distilled_lora_path: str | None = None,
+        memory_plan: LocalMemoryPlan | None = None,
     ) -> None:
         self._components = components
         from services.patches.gguf_loader_fix import install_gguf_t2v_conditioning_patch
@@ -96,12 +101,12 @@ class LTXFastVideoPipeline:
             and self._components is not None
             and self._components.video_vae_path is not None
         )
-        # ponytail: split safetensors 22B does not fit full residency on 32GB;
-        # stream from CPU unless an explicit non-NONE offload mode is set.
-        from ltx_pipelines.utils.types import OffloadMode
-
-        if is_split and offload_mode == OffloadMode.NONE:
-            offload_mode = OffloadMode.CPU
+        # Phase 2: trust the memory plan's offload decision when provided; no
+        # internal split/GGUF coercion (the plan owns the residency strategy).
+        # Transitional handler path (memory_plan=None) uses the caller's
+        # offload_mode as-is until the handler passes explicit plans.
+        if memory_plan is not None:
+            offload_mode = memory_plan.offload_mode
         self._offload_mode = offload_mode
         if transformer_format == "gguf":
             self._quantization = None
@@ -120,6 +125,12 @@ class LTXFastVideoPipeline:
 
         self.pipeline = self._build_upstream_pipeline()
         self._install_post_build_patches(is_split=is_split, transformer_format=transformer_format)
+        # Phase 3B: stamp the memory plan onto the upstream pipeline's
+        # DiffusionStage(s) so the block-offload build patch can read it when
+        # the transformer is built lazily at generation time. ``None`` (the
+        # transitional handler path) leaves stages untouched.
+        if memory_plan is not None:
+            attach_memory_plan_to_stages(self.pipeline, memory_plan)
 
     def _build_upstream_pipeline(self) -> object:
         """Construct the upstream pipeline based on ``base_family``.

@@ -115,6 +115,96 @@ export function ICLoraPanel({
   const inputVideoUrl = previewPath ? pathToFileUrl(previewPath) : null
   const [inputTime, setInputTime] = useState(0)
 
+  // Preview-only transcode state. `inputVideoPath` is the source-of-truth
+  // submitted to the backend; `previewPath` is only for browser playback.
+  // mov/avi/mkv (and unsupported-codec mp4 via onError) are transcoded to a
+  // browser-playable MP4 in a safe temp location — the original is never sent
+  // to the backend for preview, only inputVideoPath is.
+  const inputVideoPathRef = useRef<string | null>(inputVideoPath)
+  inputVideoPathRef.current = inputVideoPath
+  const [previewTranscoding, setPreviewTranscoding] = useState(false)
+  const [previewProgress, setPreviewProgress] = useState(0)
+  const [previewError, setPreviewError] = useState<string | null>(null)
+  // Unique token per in-flight preview transcode. A slow earlier transcode
+  // completing after the user picked a different source (or cleared the panel)
+  // must not overwrite previewPath. Stale results are ignored by token compare.
+  const previewTokenRef = useRef<string | null>(null)
+
+  const startPreviewTranscode = useCallback(async (srcPath: string) => {
+    const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    previewTokenRef.current = token
+    setPreviewTranscoding(true)
+    setPreviewProgress(0)
+    setPreviewError(null)
+    // While transcoding we drop the stale preview so the progress overlay shows
+    // instead of a broken/grey <video> for non-browser-safe containers.
+    setPreviewPath(null)
+
+    const unsubscribe = window.electronAPI.onAssetImportProgress((ev) => {
+      if (ev.jobId !== token) return
+      setPreviewProgress(Math.max(0, Math.min(100, Math.round(ev.percent))))
+    })
+
+    try {
+      const result = await window.electronAPI.transcodeVideoForPreview({ srcPath, jobId: token })
+      // Race guard: a newer selection/clear produced a different token.
+      if (previewTokenRef.current !== token) return
+      if (result.success) {
+        // Only adopt the preview if the selected source is still current.
+        if (inputVideoPathRef.current === srcPath) {
+          setPreviewPath(result.path)
+        }
+      } else {
+        setPreviewError(result.error || 'Preview transcoding failed')
+      }
+    } catch (err) {
+      if (previewTokenRef.current === token) {
+        setPreviewError(String(err))
+      }
+    } finally {
+      if (previewTokenRef.current === token) {
+        setPreviewTranscoding(false)
+      }
+      unsubscribe()
+    }
+  }, [])
+
+  // Selecting a new source video. Always records the original path as the
+  // backend input; preview is the original for browser-safe types (with an
+  // onError fallback), and a transcoded MP4 for non-browser-safe containers.
+  const selectVideoSource = useCallback((filePath: string) => {
+    // A new selection supersedes any in-flight preview transcode: invalidate
+    // its token so its stale result/finally can't touch preview state.
+    previewTokenRef.current = null
+    setInputVideoPath(filePath)
+    setConditioningPreview(null)
+    setExtractError(null)
+    setPreviewError(null)
+    setPreviewTranscoding(false)
+    setPreviewProgress(0)
+    const ext = filePath.split('.').pop()?.toLowerCase() ?? ''
+    const NON_BROWSER_SAFE = new Set(['mov', 'avi', 'mkv'])
+    if (NON_BROWSER_SAFE.has(ext)) {
+      // mov/avi/mkv: start preview transcode; show progress overlay.
+      void startPreviewTranscode(filePath)
+    } else {
+      // mp4/webm/etc: preview the original. If the codec is unsupported,
+      // <video onError> will trigger the preview-transcode fallback below.
+      setPreviewPath(filePath)
+    }
+  }, [startPreviewTranscode])
+
+  const handleVideoError = useCallback((e: React.SyntheticEvent<HTMLVideoElement>) => {
+    console.error('[ICLoraPanel] Input video failed to load:', inputVideoUrl, (e.target as HTMLVideoElement)?.error)
+    // Fallback: if preview is still the original source and no transcode is
+    // already running, transcode a browser-playable preview without changing
+    // inputVideoPath. This covers unsupported-codec .mp4 (e.g. HEVC).
+    const currentSrc = inputVideoPathRef.current
+    if (currentSrc && previewPath === currentSrc && !previewTranscoding) {
+      void startPreviewTranscode(currentSrc)
+    }
+  }, [inputVideoUrl, previewPath, previewTranscoding, startPreviewTranscode])
+
   const [internalCondType, setInternalCondType] = useState<ICLoraConditioningType>(null)
   const [internalCondStrength, setInternalCondStrength] = useState(1.0)
   const [internalAdapterId, setInternalAdapterId] = useState<string | null>(null)
@@ -153,8 +243,12 @@ export function ICLoraPanel({
 
   useEffect(() => {
     if (resetKey === undefined) return
+    previewTokenRef.current = null
     setInputVideoPath(initialVideoPath || null)
     setPreviewPath(initialPreviewPath || initialVideoPath || null)
+    setPreviewTranscoding(false)
+    setPreviewProgress(0)
+    setPreviewError(null)
     setInputTime(0)
     setInternalCondType(null)
     setInternalCondStrength(1.0)
@@ -352,13 +446,9 @@ export function ICLoraPanel({
       filters: [{ name: 'Video', extensions: ['mp4', 'mov', 'avi', 'webm', 'mkv'] }],
     })
     if (paths && paths.length > 0) {
-      const filePath = paths[0]
-      setInputVideoPath(filePath)
-      setPreviewPath(filePath) // user upload: primary == preview
-      setConditioningPreview(null)
-      setExtractError(null)
+      selectVideoSource(paths[0])
     }
-  }, [])
+  }, [selectVideoSource])
 
   const handlePickImage = useCallback(async (title: string) => {
     const paths = await window.electronAPI.showOpenFileDialog({
@@ -380,8 +470,12 @@ export function ICLoraPanel({
   }, [])
 
   const handleClear = useCallback(() => {
+    previewTokenRef.current = null
     setInputVideoPath(null)
     setPreviewPath(null)
+    setPreviewTranscoding(false)
+    setPreviewProgress(0)
+    setPreviewError(null)
     setMaskPath(null)
     setIngredientPaths([])
     setInputTime(0)
@@ -396,10 +490,17 @@ export function ICLoraPanel({
     const assetData = e.dataTransfer.getData('asset')
     if (assetData) {
       try {
-        const asset = JSON.parse(assetData) as { type?: string; path?: string }
+        const asset = JSON.parse(assetData) as { type?: string; path?: string; proxyPath?: string }
         if (asset.type === 'video' && asset.path) {
+          // Re-entry from an existing asset: keep the primary/original path as
+          // the backend input, and prefer the browser-playable proxy for preview.
+          // No transcode needed — the proxy is already browser-playable.
+          previewTokenRef.current = null
           setInputVideoPath(asset.path)
-          setPreviewPath(asset.path)
+          setPreviewPath(asset.proxyPath ?? asset.path)
+          setPreviewTranscoding(false)
+          setPreviewProgress(0)
+          setPreviewError(null)
           setConditioningPreview(null)
           setExtractError(null)
           return
@@ -413,14 +514,10 @@ export function ICLoraPanel({
     if (file) {
       const filePath = window.electronAPI?.getPathForFile(file)
       if (filePath) {
-        setInputVideoPath(filePath)
-        setPreviewPath(filePath)
-        
-        setConditioningPreview(null)
-        setExtractError(null)
+        selectVideoSource(filePath)
       }
     }
-  }, [])
+  }, [selectVideoSource])
 
   const showDownloadGate = isCheckingIcLora || !icLoraReady
   const runningDownloadProgress =
@@ -604,18 +701,33 @@ export function ICLoraPanel({
               </div>
             ) : (
               <div
-                className={`flex-1 min-h-0 bg-black flex items-center justify-center relative ${!inputVideoUrl ? 'border-2 border-dashed border-zinc-700 m-3 rounded-lg' : ''} ${isDragOver ? 'border-blue-500 bg-blue-500/10' : ''}`}
+                className={`flex-1 min-h-0 bg-black flex items-center justify-center relative ${!inputVideoUrl && !previewTranscoding ? 'border-2 border-dashed border-zinc-700 m-3 rounded-lg' : ''} ${isDragOver ? 'border-blue-500 bg-blue-500/10' : ''}`}
                 onDragOver={(e) => { e.preventDefault(); setIsDragOver(true) }}
                 onDragLeave={() => setIsDragOver(false)}
                 onDrop={handleDrop}
               >
-                {inputVideoUrl ? (
+                {previewTranscoding ? (
+                  <div className="text-center p-4 w-full max-w-xs">
+                    <div className="w-12 h-12 rounded-full bg-blue-500/10 flex items-center justify-center mx-auto mb-3">
+                      <Loader2 className="h-6 w-6 text-blue-400 animate-spin" />
+                    </div>
+                    <p className="text-zinc-300 text-sm font-medium">Transcoding preview…</p>
+                    <p className="text-zinc-500 text-xs mt-1">Preparing a browser-playable preview</p>
+                    <div className="mt-3 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                      <div
+                        className="h-full transition-all duration-300 bg-blue-500"
+                        style={{ width: `${previewProgress}%` }}
+                      />
+                    </div>
+                    <div className="mt-1 text-[10px] text-zinc-500 tabular-nums">{previewProgress}%</div>
+                  </div>
+                ) : inputVideoUrl ? (
                   <video
                     ref={inputVideoRef}
                     src={inputVideoUrl}
                     className="w-full h-full object-contain"
                     controls
-                    onError={(e) => console.error('[ICLoraPanel] Input video failed to load:', inputVideoUrl, (e.target as HTMLVideoElement)?.error)}
+                    onError={handleVideoError}
                   />
                 ) : (
                   <div className="text-center p-4">
@@ -914,11 +1026,11 @@ export function ICLoraPanel({
         </div>
       )}
 
-      {extractError && (
+      {(extractError || previewError) && (
         <div className="px-4 py-3 border-t border-zinc-800 flex-shrink-0">
           <div className="flex items-center gap-2 text-xs text-red-400">
             <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" />
-            <span>{extractError}</span>
+            <span>{previewError || extractError}</span>
           </div>
         </div>
       )}

@@ -219,6 +219,18 @@ export const electronAPISchemas = {
       height: z.number(),
     }),
   },
+  /**
+   * Preview-only transcode of a user-selected source video to a
+   * browser-playable H.264/AAC/yuv420p MP4. The source is NEVER mutated
+   * (not deleted/renamed/overwritten); the preview MP4 is written to a safe
+   * app temp/cache location with a unique filename. Progress is streamed on
+   * the `asset:importProgress` channel using the provided (or generated)
+   * `jobId`, then a terminal `done` event is emitted.
+   */
+  transcodeVideoForPreview: {
+    input: z.object({ srcPath: z.string(), jobId: z.string().optional() }),
+    output: ipcResult({ path: z.string() }),
+  },
   getProjectAssetsPath: {
     input: z.object({}),
     output: z.string(),

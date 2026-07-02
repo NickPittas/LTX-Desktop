@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from api_types import ModelProfilePayload, ModelSelectionID
+from services.local_memory_plan import QuantizationKind
 
 CheckpointPath = str | tuple[str, ...]
 TransformerFormat = Literal["safetensors", "gguf"]
@@ -29,6 +30,39 @@ _DISTILLED_LORA_ROLES: tuple[str, ...] = (
     "distilled_lora_384_1_1",
     "distilled_lora_384",
 )
+
+#: The four exact ``QuantizationKind`` values. Used to admit an active profile's
+#: free-form ``transformer_quantization`` string only when it already matches a
+#: known kind; anything else falls back to the container-format default rather
+#: than raising (the handler owns the error in a later slice).
+_VALID_QUANT_KINDS: frozenset[str] = frozenset({
+    "bf16",
+    "official_fp8_cast",
+    "kijai_fp8_scaled",
+    "gguf",
+})
+
+
+def _resolve_quantization_kind(
+    *,
+    selected: QuantizationKind | None,
+    profile_transformer_quantization: str | None,
+    fmt: TransformerFormat,
+) -> QuantizationKind:
+    """Derive the effective quantization kind for a resolved transformer.
+
+    Precedence: explicit selection metadata (from the registry entry) > an exact
+    match on the profile's ``transformer_quantization`` string > container-format
+    default (``gguf`` for GGUF, else ``bf16``). Unknown non-empty quantization
+    strings do not raise here — the handler owns that error in a later slice.
+    """
+    if selected is not None:
+        return selected
+    tq = (profile_transformer_quantization or "").strip().lower()
+    if tq in _VALID_QUANT_KINDS:
+        return tq  # type: ignore[return-value]
+    # Unknown / non-empty / unmatched: fall back to container-format default.
+    return "gguf" if fmt == "gguf" else "bf16"
 
 
 def _infer_base_family(transformer_path: str) -> BaseFamily:
@@ -87,6 +121,10 @@ class ResolvedLtxComponents:
     # resolution lives in the handler, where the models dir is known).
     base_family: BaseFamily
     distilled_lora_path: str | None
+    # Phase 2 Slice 1: quantization kind drives the local memory plan
+    # (``services.local_memory_plan``). Admitted from explicit selection
+    # metadata, an exact profile match, or the container-format default.
+    quantization_kind: QuantizationKind
     cache_key: tuple[str, ...]
 
 
@@ -98,6 +136,7 @@ def resolve_components(
     selected_transformer_format: TransformerFormat | None = None,
     selected_base_family: BaseFamily | None = None,
     selected_runtime_readiness: RuntimeReadiness | None = None,
+    selected_quantization_kind: QuantizationKind | None = None,
 ) -> ResolvedLtxComponents:
     """Turn a model profile's component paths into a typed bundle.
 
@@ -210,6 +249,12 @@ def resolve_components(
 
     explicit_distilled_lora_path = _extract_distilled_lora_path(c.official_adapters)
 
+    quant_kind = _resolve_quantization_kind(
+        selected=selected_quantization_kind,
+        profile_transformer_quantization=c.transformer_quantization,
+        fmt=fmt,
+    )
+
     # Sidecar metadata is cleared ONLY for a true monolith — the official
     # distilled (``runtime_readiness == "none"``) which loads as a single
     # self-contained file with no profile sidecar inputs. Kijai FP8 (distilled
@@ -251,6 +296,9 @@ def resolve_components(
         # exists, so cache invalidates correctly on fallback resolution.
         base_family,
         explicit_distilled_lora_path or "",
+        # Phase 2 Slice 1: quantization kind drives the local memory plan; it is
+        # part of the cache key so a quantization change invalidates the cache.
+        quant_kind,
     )
     if selected_transformer_path is not None:
         # Live model selection marker + identity: presence + CP id + path so
@@ -279,6 +327,7 @@ def resolve_components(
         audio_vae_path=audio_vae_path,
         base_family=base_family,
         distilled_lora_path=explicit_distilled_lora_path,
+        quantization_kind=quant_kind,
         cache_key=cache_key,
     )
 
