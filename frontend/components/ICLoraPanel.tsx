@@ -9,8 +9,10 @@ import { pathToFileUrl } from '../lib/file-url'
 import { useHfAuth } from '../hooks/use-hf-auth'
 import { useHfModelAccess } from '../hooks/use-hf-model-access'
 
-const VIDEO_EXTS = new Set(['mp4', 'mov', 'avi', 'webm', 'mkv'])
-const isVideoPath = (p: string) => VIDEO_EXTS.has(p.split('.').pop()?.toLowerCase() ?? '')
+const BROWSER_VIDEO_EXTS = new Set(['mp4', 'webm'])
+const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'])
+const isBrowserPlayableVideo = (p: string) => BROWSER_VIDEO_EXTS.has(p.split('.').pop()?.toLowerCase() ?? '')
+const isImagePath = (p: string) => IMAGE_EXTS.has(p.split('.').pop()?.toLowerCase() ?? '')
 
 export type ICLoraConditioningType = 'canny' | 'depth' | null
 
@@ -169,6 +171,36 @@ export function ICLoraPanel({
     }
   }, [])
 
+  const startMaskPreviewTranscode = useCallback(async (srcPath: string) => {
+    const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    maskPreviewTokenRef.current = token
+    setMaskPreviewTranscoding(true)
+    setMaskPreviewProgress(0)
+    setMaskPreviewPath(null)
+
+    const unsubscribe = window.electronAPI.onAssetImportProgress((ev) => {
+      if (ev.jobId !== token) return
+      setMaskPreviewProgress(Math.max(0, Math.min(100, Math.round(ev.percent))))
+    })
+
+    try {
+      const result = await window.electronAPI.transcodeVideoForPreview({ srcPath, jobId: token })
+      if (maskPreviewTokenRef.current !== token) return
+      if (result.success) {
+        if (maskPathRef.current === srcPath) {
+          setMaskPreviewPath(result.path)
+        }
+      }
+    } catch {
+      // Non-fatal: mask preview just won't be playable
+    } finally {
+      if (maskPreviewTokenRef.current === token) {
+        setMaskPreviewTranscoding(false)
+      }
+      unsubscribe()
+    }
+  }, [])
+
   // Selecting a new source video. Always records the original path as the
   // backend input; preview is the original for browser-safe types (with an
   // onError fallback), and a transcoded MP4 for non-browser-safe containers.
@@ -214,6 +246,13 @@ export function ICLoraPanel({
   const [isExtracting, setIsExtracting] = useState(false)
 
   const [maskPath, setMaskPath] = useState<string | null>(null)
+  const [maskPreviewPath, setMaskPreviewPath] = useState<string | null>(null)
+  const [maskPreviewTranscoding, setMaskPreviewTranscoding] = useState(false)
+  const [maskPreviewProgress, setMaskPreviewProgress] = useState(0)
+  const maskPreviewTokenRef = useRef<string | null>(null)
+  const maskPathRef = useRef<string | null>(null)
+  maskPathRef.current = maskPath
+  const [guidanceImagePaths, setGuidanceImagePaths] = useState<string[]>([])
   const [maskGrowPx, setMaskGrowPx] = useState(30)
   const [laplacianBlendGrow, setLaplacianBlendGrow] = useState(12)
   const [finalMaskBlurPx, setFinalMaskBlurPx] = useState(6)
@@ -279,7 +318,11 @@ export function ICLoraPanel({
     const adapterReady = internalAdapterId !== null && selectedEntry?.workflow !== 'unavailable'
     const needsVideo = !isNoInputWorkflow
     const ready = (needsVideo ? !!inputVideoPath : true) && icLoraReady && requiredSlotsReady && (conditioningType !== null || adapterReady)
-    const images = selectedWorkflow === 'ingredients' ? ingredientPaths.map(p => ({ path: p })) : []
+    const images = selectedWorkflow === 'ingredients'
+      ? ingredientPaths.map(p => ({ path: p }))
+      : selectedWorkflow === 'in_outpainting'
+        ? guidanceImagePaths.map(p => ({ path: p }))
+        : []
     onChange?.({
       videoPath: isNoInputWorkflow ? null : inputVideoPath,
       conditioningType: isNoInputWorkflow || isHdrWorkflow ? null : conditioningType,
@@ -292,7 +335,7 @@ export function ICLoraPanel({
       laplacianBlendGrow: selectedEntry?.workflow === 'in_outpainting' ? laplacianBlendGrow : 12,
       finalMaskBlurPx: selectedEntry?.workflow === 'in_outpainting' ? finalMaskBlurPx : 6,
     })
-  }, [inputVideoUrl, inputVideoPath, conditioningType, conditioningStrength, internalAdapterId, icLoraReady, maskPath, maskGrowPx, laplacianBlendGrow, finalMaskBlurPx, ingredientPaths, onChange])
+    }, [inputVideoUrl, inputVideoPath, conditioningType, conditioningStrength, internalAdapterId, icLoraReady, maskPath, maskGrowPx, laplacianBlendGrow, finalMaskBlurPx, ingredientPaths, guidanceImagePaths, onChange])
 
   const checkIcLoraAvailability = useCallback(async () => {
     setIsCheckingIcLora(true)
@@ -463,6 +506,7 @@ export function ICLoraPanel({
       title: 'Select Mask Video or Image',
       filters: [
         { name: 'Video', extensions: ['mp4', 'mov', 'avi', 'webm', 'mkv'] },
+        { name: 'EXR', extensions: ['exr'] },
         { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] },
       ],
     })
@@ -798,64 +842,100 @@ export function ICLoraPanel({
                   />
                   <span className="text-[10px] text-zinc-400 w-6 text-right tabular-nums">{maskGrowPx}</span>
                 </label>
-                <label className="flex items-center gap-2">
-                  <span className="text-[10px] text-zinc-400 shrink-0">Blend grow:</span>
-                  <span className="text-[9px] text-zinc-600 shrink-0">Laplacian mask</span>
-                  <input
-                    type="range"
-                    min={0}
-                    max={64}
-                    value={laplacianBlendGrow}
-                    onChange={(e) => setLaplacianBlendGrow(Number(e.target.value))}
-                    className="w-full h-1.5 accent-blue-500"
-                  />
-                  <span className="text-[10px] text-zinc-400 w-6 text-right tabular-nums">{laplacianBlendGrow}</span>
-                </label>
-                <label className="flex items-center gap-2">
-                  <span className="text-[10px] text-zinc-400 shrink-0">Final blur:</span>
-                  <span className="text-[9px] text-zinc-600 shrink-0">edge feather</span>
-                  <input
-                    type="range"
-                    min={0}
-                    max={64}
-                    value={finalMaskBlurPx}
-                    onChange={(e) => setFinalMaskBlurPx(Number(e.target.value))}
-                    className="w-full h-1.5 accent-blue-500"
-                  />
-                  <span className="text-[10px] text-zinc-400 w-6 text-right tabular-nums">{finalMaskBlurPx}</span>
-                </label>
               </div>
               <div className="flex-1 flex items-center justify-center min-h-0 p-4">
                 {maskPath ? (
                   <div className="text-center">
-                    {isVideoPath(maskPath) ? (
+                    {maskPreviewTranscoding ? (
+                      <div className="flex flex-col items-center gap-2 py-8">
+                        <Loader2 className="h-6 w-6 text-blue-400 animate-spin" />
+                        <p className="text-zinc-400 text-xs">Transcoding mask preview... {maskPreviewProgress}%</p>
+                      </div>
+                    ) : isBrowserPlayableVideo(maskPath) || maskPreviewPath ? (
                       <video
-                        src={pathToFileUrl(maskPath)}
-                        className="max-w-full max-h-40 object-contain mx-auto mb-2"
+                        src={pathToFileUrl(maskPreviewPath ?? maskPath)}
+                        className="max-w-full max-h-96 object-contain mx-auto mb-2"
                         controls
                         muted
                         playsInline
-                        onError={(e) => console.error('[ICLoraPanel] Mask video failed to load:', maskPath, (e.target as HTMLVideoElement)?.error)}
+                        onError={(e) => {
+                          console.error('[ICLoraPanel] Mask video failed to load:', maskPath, (e.target as HTMLVideoElement)?.error)
+                          if (!maskPreviewPath && maskPath && !isBrowserPlayableVideo(maskPath) && !isImagePath(maskPath)) {
+                            void startMaskPreviewTranscode(maskPath)
+                          }
+                        }}
                       />
-                    ) : (
+                    ) : isImagePath(maskPath) ? (
                       <img
                         src={pathToFileUrl(maskPath)}
                         alt="Mask"
-                        className="max-w-full max-h-40 object-contain mx-auto mb-2"
+                        className="max-w-full max-h-96 object-contain mx-auto mb-2"
                         onError={() => console.error('[ICLoraPanel] Mask image failed to load:', maskPath)}
                       />
+                    ) : (
+                      <p className="text-zinc-500 text-xs py-8">Preview unavailable — browser cannot play this format</p>
                     )}
                     <p className="text-zinc-400 text-[10px] truncate max-w-[150px] mx-auto">{maskPath.split(/[\\/]/).pop()}</p>
-                    <button onClick={() => setMaskPath(null)} className="text-[10px] text-red-400 hover:text-red-300 mt-1">Remove</button>
+                    <button onClick={() => { setMaskPath(null); setMaskPreviewPath(null); maskPreviewTokenRef.current = null }} className="text-[10px] text-red-400 hover:text-red-300 mt-1">Remove</button>
                   </div>
                 ) : (
                   <button
-                    onClick={() => { void handlePickMaskFile().then(setMaskPath) }}
+                    onClick={() => {
+                      void handlePickMaskFile().then(p => {
+                        if (!p) return
+                        setMaskPath(p)
+                        setMaskPreviewPath(null)
+                        maskPreviewTokenRef.current = null
+                        const ext = p.split('.').pop()?.toLowerCase() ?? ''
+                        const NON_BROWSER_SAFE = new Set(['mov', 'avi', 'mkv', 'exr'])
+                        if (NON_BROWSER_SAFE.has(ext)) {
+                          void startMaskPreviewTranscode(p)
+                        }
+                      })
+                    }}
                     className="flex flex-col items-center gap-1 px-3 py-2 text-[10px] text-blue-400 border border-blue-500/30 rounded-lg hover:bg-blue-600/10 transition-colors"
                   >
                     <ImageIcon className="h-5 w-5" />
                     Select mask video or image
                   </button>
+                )}
+              </div>
+              {/* Optional guidance images for inpaint */}
+              <div className="flex-none px-3 py-2 border-t border-zinc-800">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">Guidance images</span>
+                  <button
+                    onClick={() => { void handlePickImage('Add Guidance Image').then(p => p && setGuidanceImagePaths(prev => [...prev, p])) }}
+                    disabled={isProcessing}
+                    className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] text-blue-400 hover:text-blue-300 hover:bg-blue-600/10 transition-colors disabled:opacity-50"
+                  >
+                    + Add
+                  </button>
+                </div>
+                <p className="text-[10px] text-zinc-500 leading-relaxed mb-1">
+                  Optional reference frame/image used with source video and mask.
+                </p>
+                {guidanceImagePaths.length > 0 && (
+                  <div className="flex gap-2 flex-wrap">
+                    {guidanceImagePaths.map((path, idx) => (
+                      <div key={idx} className="relative group rounded-lg border border-zinc-700 bg-zinc-900 overflow-hidden w-20 h-20">
+                        <div className="w-full h-full bg-black flex items-center justify-center">
+                          <img
+                            src={pathToFileUrl(path)}
+                            alt={`Guidance ${idx + 1}`}
+                            className="w-full h-full object-contain"
+                          />
+                        </div>
+                        <button
+                          onClick={() => setGuidanceImagePaths(prev => prev.filter((_, i) => i !== idx))}
+                          className="absolute top-0.5 right-0.5 p-0.5 rounded bg-black/60 text-red-400 opacity-0 group-hover:opacity-100 hover:text-red-300 transition-opacity"
+                          title="Remove guidance image"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
                 )}
               </div>
             </div>
@@ -929,8 +1009,13 @@ export function ICLoraPanel({
                   setInternalAdapterId(val || null)
                   setInternalCondType(null)
                   onConditioningTypeChange?.(null)
-                  setMaskPath(null)
-                  setIngredientPaths([])
+    setMaskPath(null)
+    setMaskPreviewPath(null)
+    setMaskPreviewTranscoding(false)
+    setMaskPreviewProgress(0)
+    maskPreviewTokenRef.current = null
+    setGuidanceImagePaths([])
+    setIngredientPaths([])
                 }}
                 className="bg-zinc-800 text-[10px] text-zinc-300 border border-zinc-700 rounded px-1.5 py-1 max-w-[140px] cursor-pointer focus:outline-none focus:border-zinc-500"
               >

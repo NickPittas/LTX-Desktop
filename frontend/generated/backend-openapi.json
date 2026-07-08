@@ -1173,6 +1173,17 @@
             "title": "Phase",
             "type": "string"
           },
+          "phaseDetail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phasedetail"
+          },
           "phaseElapsedSeconds": {
             "anyOf": [
               {
@@ -1264,6 +1275,17 @@
               }
             ],
             "title": "Vramusedmb"
+          },
+          "workloadMode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workloadmode"
           }
         },
         "required": [
@@ -1572,6 +1594,17 @@
             ],
             "title": "Proxy Path"
           },
+          "stage_1_preview_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stage 1 Preview Path"
+          },
           "status": {
             "const": "complete",
             "title": "Status",
@@ -1750,6 +1783,11 @@
             "default": "",
             "title": "Prompt",
             "type": "string"
+          },
+          "save_stage_1_preview": {
+            "default": false,
+            "title": "Save Stage 1 Preview",
+            "type": "boolean"
           },
           "video_path": {
             "anyOf": [
@@ -3427,6 +3465,17 @@
             ],
             "title": "Mode",
             "type": "string"
+          },
+          "model_selection": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Selection"
           },
           "output_format": {
             "anyOf": [

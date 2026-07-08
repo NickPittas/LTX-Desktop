@@ -59,6 +59,9 @@ class LocalMemoryPlan:
     trace_labels: tuple[str, ...]
     cache_key_parts: tuple[str, ...]
     disable_compile: bool
+    # Per-run effective/free VRAM tier (bucketed) — included in cache_key_parts
+    # so a pipeline cached under high free VRAM is not reused under low free VRAM.
+    effective_vram_tier_gib: int | None = None
 
 
 def detect_vram_gb() -> int | None:
@@ -82,6 +85,93 @@ def detect_vram_gb() -> int | None:
     except Exception:
         return None
     return total_bytes // (1024 ** 3)
+
+
+def detect_free_vram_gib() -> int | None:
+    """Floor of the current CUDA device's free VRAM in GiB, or ``None``.
+
+    Uses ``torch.cuda.mem_get_info``. Lazy-imports torch; never raises.
+    """
+    try:
+        import torch  # noqa: PLC0415
+    except Exception:
+        return None
+    if not torch.cuda.is_available():
+        return None
+    try:
+        free_bytes, _total = torch.cuda.mem_get_info()  # type: ignore[reportUnknownMemberType]
+    except Exception:
+        return None
+    return free_bytes // (1024 ** 3)
+
+
+_VRAM_TIER_THRESHOLDS: tuple[int, ...] = (56, 48, 40, 31, 28, 24, 16, 15, 12)
+
+
+def bucket_effective_vram_gib(effective_gib: int | None) -> int | None:
+    """Bucket effective VRAM to the highest tier threshold ``<= effective_gib``.
+
+    Returns ``effective_gib`` if below the lowest threshold (12). ``None`` if
+    ``effective_gib`` is ``None``.
+    """
+    if effective_gib is None:
+        return None
+    for threshold in _VRAM_TIER_THRESHOLDS:
+        if effective_gib >= threshold:
+            return threshold
+    return effective_gib
+
+
+@dataclass(frozen=True, slots=True)
+class VramSnapshot:
+    """Per-run VRAM snapshot for effective/free-aware planning."""
+
+    total_gib: int | None
+    free_gib: int | None
+    effective_gib: int | None
+    effective_tier_gib: int | None
+
+
+def snapshot_vram(reserve_gib: int = 2) -> VramSnapshot:
+    """Snapshot total + free + effective VRAM at call time.
+
+    ``effective_gib = max(0, min(total or free, free - reserve_gib))`` — the
+    conservative usable estimate (free minus a safety reserve). Falls back to
+    total-only if free is unavailable.
+
+    ``effective_tier_gib`` is the bucketed tier. **Near-empty exception**: when
+    both total and free are known and ``(total - free) <= reserve_gib`` (the card
+    is basically empty — used VRAM is within the reserve), tiering uses ``total``
+    instead of ``effective``. This prevents a fresh-boot 31 GiB card (free≈31,
+    effective=29) from being downgraded to tier 28 when it should be tier 31.
+    """
+    total = detect_vram_gb()
+    free = detect_free_vram_gib()
+    if free is not None:
+        upper = total if total is not None else free
+        effective = max(0, min(upper, free - reserve_gib))
+    elif total is not None:
+        effective = total
+    else:
+        effective = None
+
+    # Near-empty exception: if the card is basically empty (used VRAM within the
+    # reserve), don't downgrade the tier. Tier on total (physical capacity).
+    if (
+        total is not None
+        and free is not None
+        and (total - free) <= reserve_gib
+    ):
+        tier_source = total
+    else:
+        tier_source = effective
+
+    return VramSnapshot(
+        total_gib=total,
+        free_gib=free,
+        effective_gib=effective,
+        effective_tier_gib=bucket_effective_vram_gib(tier_source),
+    )
 
 
 def _block_offload_plan(

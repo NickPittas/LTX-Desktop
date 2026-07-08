@@ -57,6 +57,7 @@ class IcLoraPipeline(Protocol):
         hdr_video_context: torch.Tensor | None = None,
         hdr_audio_context: torch.Tensor | None = None,
         output_postprocess: Callable[[torch.Tensor], torch.Tensor] | None = None,
+        on_phase_update: Callable[[str, str | None], None] | None = None,
     ) -> None:
         ...
 
@@ -81,5 +82,7 @@ class IcLoraPipeline(Protocol):
         proxy_path: str | None = None,
         on_progress: Callable[[float], None] | None = None,
         input_colorspace: ColorSpace | None = None,
-    ) -> None:
+        on_phase_update: Callable[[str, str | None], None] | None = None,
+        save_stage_1_preview: bool = False,
+    ) -> str | None:
         ...

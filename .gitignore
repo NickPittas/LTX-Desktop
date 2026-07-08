@@ -97,3 +97,6 @@ resources/vc_redist.x64.exe
 
 # Local OpenCode planning/codemap state
 .slim/
+
+# Secrets (never commit)
+HF_TOKEN

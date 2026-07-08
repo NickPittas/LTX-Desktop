@@ -86,6 +86,7 @@ class HdrIcLoraPipeline(Protocol):
         proxy_path: str | None = None,
         input_colorspace: ColorSpace | None = None,
         on_progress: Callable[[float], None] | None = None,
+        on_phase_update: Callable[[str, str | None], None] | None = None,
     ) -> None:
         """Run the official HDR IC-LoRA two-stage flow on the source video.
 

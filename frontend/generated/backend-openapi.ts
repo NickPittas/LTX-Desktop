@@ -992,6 +992,8 @@ export interface components {
             gpuUtilPct?: number | null;
             /** Phase */
             phase: string;
+            /** Phasedetail */
+            phaseDetail?: string | null;
             /** Phaseelapsedseconds */
             phaseElapsedSeconds?: number | null;
             /** Progress */
@@ -1013,6 +1015,8 @@ export interface components {
             vramTotalMb?: number | null;
             /** Vramusedmb */
             vramUsedMb?: number | null;
+            /** Workloadmode */
+            workloadMode?: string | null;
         };
         /** GpuInfoResponse */
         GpuInfoResponse: {
@@ -1140,6 +1144,8 @@ export interface components {
         IcLoraGenerateCompleteResponse: {
             /** Proxy Path */
             proxy_path?: string | null;
+            /** Stage 1 Preview Path */
+            stage_1_preview_path?: string | null;
             /**
              * Status
              * @constant
@@ -1227,6 +1233,11 @@ export interface components {
              * @default
              */
             prompt: string;
+            /**
+             * Save Stage 1 Preview
+             * @default false
+             */
+            save_stage_1_preview: boolean;
             /** Video Path */
             video_path?: string | null;
             /**
@@ -1782,6 +1793,8 @@ export interface components {
              * @enum {string}
              */
             mode: "replace_audio_and_video" | "replace_video" | "replace_audio";
+            /** Model Selection */
+            model_selection?: string | null;
             output_format?: components["schemas"]["OutputFormat"] | null;
             /**
              * Prompt

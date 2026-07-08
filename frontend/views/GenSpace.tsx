@@ -407,7 +407,7 @@ function ModelSelectionPopover({
       <button
         onClick={() => !disabled && setIsOpen(!isOpen)}
         disabled={disabled}
-        className={`flex shrink-0 items-center gap-1 whitespace-nowrap px-2 py-1.5 rounded-md transition-colors ${
+        className={`flex min-w-0 max-w-[12rem] items-center gap-1 px-2 py-1.5 rounded-md transition-colors ${
           disabled
             ? 'cursor-not-allowed text-zinc-600'
             : isOpen
@@ -415,8 +415,8 @@ function ModelSelectionPopover({
               : 'hover:bg-zinc-800'
         }`}
       >
-        <span className="text-zinc-500 text-[10px]">Model</span>
-        <span className="text-zinc-300 font-medium">{triggerLabel}</span>
+        <span className="text-zinc-500 text-[10px] shrink-0">Model</span>
+        <span className="text-zinc-300 font-medium truncate">{triggerLabel}</span>
         {isLoading ? (
           <span className="w-3 h-3 border-2 border-zinc-600 border-t-zinc-400 rounded-full animate-spin" />
         ) : (
@@ -617,6 +617,7 @@ function PromptBar({
     audio?: boolean
     outputFormat?: OutputFormat
     modelSelection?: ModelSelectionID | null
+    saveStage1Preview?: boolean
   }
   onSettingsChange: (settings: any) => void
   videoModelSpecs: VideoGenerationModelSpecItem[]
@@ -652,7 +653,8 @@ function PromptBar({
   )
 
   const modelSelectionWorkflow: ModelSelectionWorkflow | null = (() => {
-    if (isRetake || isApiMode) return null
+    if (isApiMode) return null
+    if (isRetake) return 'retake'
     if (isIcLora) {
       // HDR uses its own workflow; every other IC-LoRA adapter (ingredients,
       // in/outpainting, standard_video, union_control) shares 'ic-lora'.
@@ -694,10 +696,13 @@ function PromptBar({
   // never offer a dev/full GGUF (and vice versa). The backend rejects mismatches
   // defensively; this prevents the confusing UI state up-front.
   const activeModelFamily = resolvedVideoOptions?.selectedModel ?? settings.model
-  const visibleModelSelectionOptions =
-    activeModelFamily === 'fast' || activeModelFamily === 'full'
-      ? modelSelectionOptions.filter((option) => option.pipeline_family === activeModelFamily)
-      : modelSelectionOptions
+  const visibleModelSelectionOptions = modelSelectionOptions
+    .filter((option) => option.installed === true)
+    .filter((option) =>
+      activeModelFamily === 'fast' || activeModelFamily === 'full'
+        ? option.pipeline_family === activeModelFamily
+        : true,
+    )
 
   const formatValue = settings.outputFormat || 'mp4'
   const formatOptions = OUTPUT_FORMAT_OPTIONS.map((option) => ({
@@ -886,7 +891,7 @@ function PromptBar({
       </div>
       
       {/* Bottom row: Mode selector + Settings */}
-      <div className="flex items-center gap-0.5 px-1.5 py-1.5 border-t border-zinc-800/60 text-xs text-zinc-400">
+      <div className="flex flex-wrap items-center gap-0.5 px-1.5 py-1.5 border-t border-zinc-800/60 text-xs text-zinc-400">
         {/* Mode dropdown */}
         <SettingsDropdown
           title="MODE"
@@ -911,6 +916,15 @@ function PromptBar({
         
         {isRetake ? (
           <>
+            <ModelSelectionPopover
+              options={visibleModelSelectionOptions}
+              selectedId={settings.modelSelection ?? null}
+              onChange={(id) => onSettingsChange({ ...settings, modelSelection: id })}
+              disabled={!modelSelectionWorkflow || isLoadingModelSelectionOptions}
+              isLoading={isLoadingModelSelectionOptions}
+              errorMessage={modelSelectionErrorMessage}
+            />
+            <div className="w-px h-4 bg-zinc-700 mx-0.5" />
             {formatDropdown}
             <div className="text-[10px] text-zinc-500 pr-2">Trim in the panel above, then retake</div>
           </>
@@ -982,6 +996,17 @@ function PromptBar({
                 <div className="w-px h-4 bg-zinc-700 mx-0.5" />
                 {formatDropdown}
               </>
+            )}
+            {icLoraAdapterId === 'in_outpainting' && (
+              <label className="flex items-center gap-1 px-2 py-1 text-[10px] text-zinc-500 cursor-pointer whitespace-nowrap">
+                <input
+                  type="checkbox"
+                  checked={settings.saveStage1Preview}
+                  onChange={(e) => onSettingsChange({ ...settings, saveStage1Preview: e.target.checked })}
+                  className="h-3 w-3 accent-violet-500"
+                />
+                S1 Preview
+              </label>
             )}
             {icLoraAdapterId === 'hdr' && (
               <>
@@ -1314,6 +1339,7 @@ const DEFAULT_VIDEO_SETTINGS = {
   audio: true,
   outputFormat: 'mp4' as OutputFormat,
   modelSelection: null as ModelSelectionID | null,
+  saveStage1Preview: false,
 }
 
 export function GenSpace() {
@@ -1464,6 +1490,8 @@ export function GenSpace() {
     icLoraRamUsedMb,
     icLoraRamTotalMb,
     icLoraCpuUtilPct,
+    icLoraPhaseDetail,
+    icLoraWorkloadMode,
   } = useIcLora()
   
   // Handle incoming frame from the Video Editor for editing
@@ -1709,6 +1737,7 @@ export function GenSpace() {
         frameRate: isIngredients ? fpsForIcLora : undefined,
         outputFormat: settings.outputFormat,
         modelSelection: settings.modelSelection ?? null,
+        saveStage1Preview: settings.saveStage1Preview,
         ...(isIngredients
           ? { width: icWidth, height: icHeight, numFrames: icNumFrames }
           : {}),
@@ -1721,6 +1750,9 @@ export function GenSpace() {
           setActiveIcLoraSource(null)
           resetIcLora()
           return
+        }
+        if (result.proxyPath && !copied.proxyPath) {
+          logger.error(`IC-LoRA proxy path lost during persistence: primary=${result.videoPath}, proxy=${result.proxyPath}, copiedPath=${copied.path}`)
         }
 
         if (activeIcLoraSource?.assetId) {
@@ -1784,6 +1816,34 @@ export function GenSpace() {
           })
         }
 
+        if (result.stage1PreviewPath) {
+          const previewCopied = await addVisualAssetToProject(result.stage1PreviewPath, currentProjectId!, 'video')
+          if (previewCopied) {
+            addAsset(currentProjectId!, {
+              type: 'video',
+              path: previewCopied.path,
+              proxyPath: previewCopied.proxyPath ?? undefined,
+              bigThumbnailPath: previewCopied.bigThumbnailPath,
+              smallThumbnailPath: previewCopied.smallThumbnailPath,
+              width: previewCopied.width,
+              height: previewCopied.height,
+              prompt: 'Stage 1 preview',
+              resolution: '',
+              duration: 0,
+              takes: [{
+                path: previewCopied.path,
+                proxyPath: previewCopied.proxyPath ?? undefined,
+                bigThumbnailPath: previewCopied.bigThumbnailPath,
+                smallThumbnailPath: previewCopied.smallThumbnailPath,
+                width: previewCopied.width,
+                height: previewCopied.height,
+                createdAt: Date.now(),
+              }],
+              activeTakeIndex: 0,
+            })
+          }
+        }
+
         setActiveIcLoraSource(null)
       })
       return
@@ -1803,6 +1863,7 @@ export function GenSpace() {
         prompt: trimmedPrompt,
         mode: 'replace_audio_and_video',
         outputFormat: settings.outputFormat,
+        modelSelection: settings.modelSelection ?? null,
       }, async (result) => {
         // ponytail: runs async in the hook's closure, survives GenSpace unmount (Bug A)
         const usedPrompt = trimmedPrompt
@@ -1833,6 +1894,7 @@ export function GenSpace() {
               width: copied.width,
               height: copied.height,
               createdAt: Date.now(),
+              generationElapsedSeconds: result.generationElapsedSeconds,
             })
             if (activeRetakeSource.linkedClipIds?.length) {
               setPendingRetakeUpdate({
@@ -1851,6 +1913,7 @@ export function GenSpace() {
             smallThumbnailPath: copied.smallThumbnailPath,
             width: copied.width,
             height: copied.height,
+            generationElapsedSeconds: result.generationElapsedSeconds,
             prompt: usedPrompt,
             resolution: '',
             duration: usedInput.duration,
@@ -2023,6 +2086,8 @@ export function GenSpace() {
   const activeRamUsedMb = isIcLoraGenerating ? icLoraRamUsedMb : ramUsedMb
   const activeRamTotalMb = isIcLoraGenerating ? icLoraRamTotalMb : ramTotalMb
   const activeCpuUtilPct = isIcLoraGenerating ? icLoraCpuUtilPct : cpuUtilPct
+  const activePhaseDetail = isIcLoraGenerating ? icLoraPhaseDetail : null
+  const activeWorkloadMode = isIcLoraGenerating ? icLoraWorkloadMode : null
   
   // Close size menu on click outside
   useEffect(() => {
@@ -2174,6 +2239,13 @@ export function GenSpace() {
                       </div>
                     </div>
                     <p className="text-sm text-zinc-400">{activeStatusMessage}</p>
+                    {(activePhaseDetail || activeWorkloadMode) && (
+                      <p className="text-xs text-zinc-600 mt-0.5">
+                        {activePhaseDetail ?? activeWorkloadMode}
+                        {activePhaseDetail && activeWorkloadMode && activePhaseDetail !== activeWorkloadMode
+                          ? ` · ${activeWorkloadMode}` : ''}
+                      </p>
+                    )}
                     {activeProgress > 0 && (
                       <div className="w-32 h-1 bg-zinc-800 rounded-full mt-2 overflow-hidden">
                         <div className="h-full bg-violet-500 transition-all" style={{ width: `${activeProgress}%` }} />
@@ -2234,6 +2306,7 @@ export function GenSpace() {
       )}
 
       {mode === 'ic-lora' && !forceApiGenerations && (
+        <>
         <div className="absolute inset-x-0 top-0 bottom-[160px] px-4 pt-4 pb-4 flex flex-col overflow-hidden">
           <ICLoraPanel
             initialVideoPath={icLoraInitial.videoPath}
@@ -2251,6 +2324,43 @@ export function GenSpace() {
             onChange={setIcLoraInput}
           />
         </div>
+        {isIcLoraGenerating && (
+          <div className="absolute bottom-[170px] right-4 z-50 bg-zinc-900/95 backdrop-blur-md border border-zinc-700 rounded-lg px-4 py-3 shadow-xl max-w-[280px]">
+            <div className="flex items-center gap-2 mb-1">
+              <div className="w-4 h-4 rounded-full border-2 border-violet-500/30 border-t-violet-500 animate-spin shrink-0" />
+              <p className="text-sm text-zinc-300">{activeStatusMessage}</p>
+            </div>
+            {(activePhaseDetail || activeWorkloadMode) && (
+              <p className="text-[11px] text-zinc-500 mb-1">
+                {activePhaseDetail ?? activeWorkloadMode}
+                {activePhaseDetail && activeWorkloadMode && activePhaseDetail !== activeWorkloadMode
+                  ? ` · ${activeWorkloadMode}` : ''}
+              </p>
+            )}
+            {activeProgress > 0 && (
+              <div className="w-full h-1 bg-zinc-800 rounded-full mb-2 overflow-hidden">
+                <div className="h-full bg-violet-500 transition-all" style={{ width: `${activeProgress}%` }} />
+              </div>
+            )}
+            {(activeElapsedSeconds !== null || activeVramUsedMb !== null) && (
+              <div className="flex items-center gap-3 text-[10px] text-zinc-500 tabular-nums">
+                {activeElapsedSeconds !== null && (
+                  <span>
+                    {Math.floor(activeElapsedSeconds / 60)}:{String(Math.floor(activeElapsedSeconds % 60)).padStart(2, '0')}
+                    {activeEstimatedRemainingSeconds !== null && ` / ETA ${Math.ceil(activeEstimatedRemainingSeconds)}s`}
+                  </span>
+                )}
+                {activeVramUsedMb !== null && activeVramTotalMb !== null && (
+                  <span>{activeVramUsedMb}/{activeVramTotalMb}MB</span>
+                )}
+                {activeGpuUtilPct !== null && (
+                  <span>{activeGpuUtilPct.toFixed(0)}% GPU</span>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+        </>
       )}
 
       {/* Floating prompt panel — wider, responsive, centered */}

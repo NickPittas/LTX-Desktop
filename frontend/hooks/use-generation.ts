@@ -103,8 +103,30 @@ export function getPhaseMessage(phase: string): string {
       return 'Decoding video...'
     case 'encoding':
       return 'Encoding video...'
-    case 'writing_proxy':
-      return 'Building preview...'
+    case 'preprocessing':
+      return 'Preprocessing...'
+    case 'vae_encode_conditioning':
+      return 'Encoding conditioning...'
+    case 'sampling_stage_1':
+      return 'Stage 1 diffusion...'
+    case 'sampling_stage_2':
+      return 'Stage 2 diffusion...'
+    case 'vae_decode_tiled':
+      return 'Decoding video...'
+    case 'blend_stage_1':
+      return 'Blending stage 1...'
+    case 'vae_encode_blend':
+      return 'Re-encoding blend...'
+    case 'blend_stage_2':
+      return 'Final blend...'
+    case 'raw_mask_guard':
+      return 'Applying mask guard...'
+    case 'hdr_postprocess':
+      return 'HDR postprocessing...'
+    case 'exr_write':
+      return 'Writing EXR...'
+    case 'proxy_encode':
+      return 'Encoding proxy...'
     case 'complete':
       return 'Complete!'
     default:

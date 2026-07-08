@@ -60,12 +60,13 @@ if str(BACKEND_DIR) not in sys.path:
 # --------------------------------------------------------------------------- #
 # Atomic case catalogue + request bodies
 # --------------------------------------------------------------------------- #
-SOURCELESS_ATOMICS = ["fast:default", "kijai:fast", "gguf:fast", "i2v:kijai_fast", "i2v:gguf_fast", "ic-lora:default", "ic-lora:kijai", "ic-lora:gguf", "harness:selftest"]
+SOURCELESS_ATOMICS = ["fast:default", "kijai:fast", "gguf:fast", "gguf:full", "i2v:kijai_fast", "i2v:gguf_fast", "ic-lora:default", "ic-lora:kijai", "ic-lora:gguf", "harness:selftest"]
 MEDIA_BACKED_ATOMICS = ["hdr:kijai_fp8_split", "hdr:gguf", "retake:default", "ic-lora-inpaint:kijai", "ic-lora-inpaint:gguf", "ic-lora-standard:kijai", "ic-lora-standard:gguf", "ic-lora-union:kijai", "ic-lora-union:gguf"]
 ALL_ATOMICS = SOURCELESS_ATOMICS + MEDIA_BACKED_ATOMICS
 
 KIJAI_ID = "ltx-2.3-22b-distilled-fp8-kijai-v3"
 GGUF_ID = "ltx-2.3-22b-distilled-gguf-quantstack-q4-k-m"
+GGUF_FULL_ID = "ltx-2.3-22b-dev-gguf-q4-k-m"
 
 # Accepted --force-memory-strategy values (mirror services.local_memory_plan's
 # LocalMemoryStrategy Literal). NOTE: only "block_offload" is actually honoured
@@ -469,6 +470,12 @@ def _build_body(
         b = dict(body)
         b["model_selection"] = GGUF_ID
         return "/api/generate", b, None
+    if atomic == "gguf:full":
+        _, body, _ = _build_body("fast:default", None, assets_dir)
+        b = dict(body)
+        b["model"] = "full"
+        b["model_selection"] = GGUF_FULL_ID
+        return "/api/generate", b, None
     if atomic == "i2v:kijai_fast":
         _, body, _ = _build_body("fast:default", None, assets_dir)
         img = assets_dir / "ingredients_input.jpg"
@@ -775,7 +782,8 @@ class Harness:
 
         # Selected model install check (Kijai / GGUF) via the base-video registry.
         model_sel = KIJAI_ID if atomic in ("kijai:fast", "i2v:kijai_fast", "ic-lora:kijai", "ic-lora-inpaint:kijai", "ic-lora-standard:kijai", "ic-lora-union:kijai", "hdr:kijai_fp8_split") else (
-            GGUF_ID if atomic in ("gguf:fast", "i2v:gguf_fast", "ic-lora:gguf", "ic-lora-inpaint:gguf", "ic-lora-standard:gguf", "ic-lora-union:gguf", "hdr:gguf") else None)
+            GGUF_ID if atomic in ("gguf:fast", "i2v:gguf_fast", "ic-lora:gguf", "ic-lora-inpaint:gguf", "ic-lora-standard:gguf", "ic-lora-union:gguf", "hdr:gguf") else
+            GGUF_FULL_ID if atomic == "gguf:full" else None)
         if model_sel:
             installed, detail = _selection_installed(models_dir, model_sel)
             if not installed:

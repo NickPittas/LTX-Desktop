@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from pathlib import Path
 from threading import RLock
 from typing import TYPE_CHECKING
@@ -49,6 +50,7 @@ from services.local_memory_plan import (
     Workflow,
     detect_vram_gb,
     plan_for_transformer,
+    snapshot_vram,
 )
 from services.services_utils import device_supports_fp8, get_device_type
 from state.app_state_types import (
@@ -479,14 +481,28 @@ class PipelinesHandler(StateHandlerBase):
             base_family = "distilled"
             is_componentized_split = False
             quantization_kind = "bf16"
-        return plan_for_transformer(
+        # Per-run effective/free VRAM: prefer the bucketed effective tier over
+        # total VRAM so thresholds reflect what's actually available. Falls back
+        # to total-only if the snapshot/tier is unavailable.
+        snap = snapshot_vram()
+        _vram_for_plan = snap.effective_tier_gib if snap.effective_tier_gib is not None else detect_vram_gb()
+        plan = plan_for_transformer(
             transformer_format,
             base_family,
             is_componentized_split,
             quantization_kind,
-            detect_vram_gb(),
+            _vram_for_plan,
             workflow,
             block_offload_available=self._block_offload_available(),
+        )
+        # Augment the plan with the effective VRAM tier for cache-key safety:
+        # a pipeline cached under high free VRAM must not be reused under low.
+        _tier = snap.effective_tier_gib
+        _tier_part = f"effective_vram_tier={_tier}" if _tier is not None else "effective_vram_tier=unknown"
+        return replace(
+            plan,
+            effective_vram_tier_gib=_tier,
+            cache_key_parts=(*plan.cache_key_parts, _tier_part),
         )
 
     def _enforce_memory_plan_gate(self, memory_plan: LocalMemoryPlan) -> None:
@@ -751,6 +767,7 @@ class PipelinesHandler(StateHandlerBase):
         scene_embeddings_path: str,
         effective_distilled_lora_path: str | None,
         memory_plan: LocalMemoryPlan | None = None,
+        workload_cache_key_parts: tuple[str, ...] = (),
     ) -> tuple[str, ...]:
         """Cache key for the HDR IC-LoRA pipeline state.
 
@@ -778,6 +795,8 @@ class PipelinesHandler(StateHandlerBase):
         )
         if memory_plan is not None:
             key = (*key, *memory_plan.cache_key_parts)
+        if workload_cache_key_parts:
+            key = (*key, *workload_cache_key_parts)
         return key
 
     def load_hdr_ic_lora(
@@ -785,6 +804,7 @@ class PipelinesHandler(StateHandlerBase):
         model_selection: ModelSelectionID | None,
         hdr_lora_path: str,
         scene_embeddings_path: str,
+        workload_cache_key_parts: tuple[str, ...] = (),
     ) -> HdrICLoraState:
         """Load (or cache-hit) the dedicated HDR IC-LoRA two-stage pipeline.
 
@@ -862,6 +882,7 @@ class PipelinesHandler(StateHandlerBase):
             scene_embeddings_path,
             effective_distilled_lora_path,
             memory_plan,
+            workload_cache_key_parts,
         )
 
         with self._lock:
@@ -940,6 +961,7 @@ class PipelinesHandler(StateHandlerBase):
         adapter_path: str | None = None,
         lora_strength: float = 1.0,
         model_selection: ModelSelectionID | None = None,
+        workload_cache_key_parts: tuple[str, ...] = (),
     ) -> ICLoraState:
         self._install_text_patches_if_needed()
 
@@ -954,6 +976,7 @@ class PipelinesHandler(StateHandlerBase):
             depth_model_path or "",
             f"lora_strength={lora_strength:.4f}",
             *lora_paths,
+            *workload_cache_key_parts,
         )
 
         with self._lock:
@@ -1040,17 +1063,22 @@ class PipelinesHandler(StateHandlerBase):
             self._assert_invariants()
         return state
 
-    def load_retake_pipeline(self, *, distilled: bool = True) -> RetakePipelineState:
+    def load_retake_pipeline(
+        self,
+        *,
+        distilled: bool = True,
+        model_selection: ModelSelectionID | None = None,
+    ) -> RetakePipelineState:
         self._install_text_patches_if_needed()
 
         quantized = device_supports_fp8(self.config.device)
 
         # Phase 2: compute exactly one memory plan for the (standard) retake
         # workflow and derive the cache key from it.
-        components = self._resolve_active_components()
+        components = self._resolve_active_components(model_selection)
         memory_plan = self._memory_plan_for_components(components, "standard")
         cache_key = (
-            *self._current_cache_key(None, memory_plan),
+            *self._current_cache_key(model_selection, memory_plan),
             "retake",
             *memory_plan.cache_key_parts,
         )
@@ -1068,7 +1096,7 @@ class PipelinesHandler(StateHandlerBase):
         with memory_trace.phase("pipeline_load:retake"):
             self._evict_gpu_pipeline_for_swap()
 
-            checkpoint_path, gemma_root, _upsampler_path, _cache_key = self._resolve_checkpoint_paths()
+            checkpoint_path, gemma_root, _upsampler_path, _cache_key = self._resolve_checkpoint_paths(model_selection)
             # GGUF components must skip build_policy — it reads a safetensors
             # header and crashes ("header too large") on a GGUF checkpoint. The
             # retake pipeline's __init__ installs the GGUF loader itself when

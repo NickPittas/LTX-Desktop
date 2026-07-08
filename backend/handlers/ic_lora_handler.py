@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 import time
 import uuid
 from pathlib import Path
@@ -50,6 +51,8 @@ from services.sequence_input import (
     sequence_metadata_from_dir,
 )
 from services.color_management import detect_colorspace
+from services.workload_policy import LoraWorkloadPlan, classify_lora_workload
+from services.local_memory_plan import snapshot_vram
 from services.ltx_pipeline_common import make_encode_progress_callback, make_primary_output_path, make_proxy_output_path
 from services.media_encoder.media_encoder import MediaEncoder
 from services.services_utils import FrameArray
@@ -129,6 +132,44 @@ def _snap_frame_count(n: int) -> int:
         return _SNAP_FRAME_MIN
     k = max(0, (n - 1) // 8)
     return 1 + 8 * k
+
+
+def _apply_lora_workload_envs(
+    plan: LoraWorkloadPlan, frame_count: int | None, *, hdr: bool
+) -> list[tuple[str, str | None]]:
+    """Apply ``plan`` env overrides, preserving any user-set value.
+
+    Returns a restore list of ``(env_name, prev_value)`` for the envs actually
+    set; pass to :func:`_restore_lora_workload_envs`. Resident / padded envs are
+    read at transformer BUILD time, so this must run before the pipeline load.
+    """
+    set_envs: list[tuple[str, str | None]] = []
+
+    def _set(env: str, value: str) -> None:
+        if os.environ.get(env) is None:
+            set_envs.append((env, os.environ.get(env)))
+            os.environ[env] = value
+
+    if plan.resident_blocks is not None:
+        _set("LTX_BLOCK_OFFLOAD_RESIDENT_BLOCKS", str(plan.resident_blocks))
+    if plan.blockswap_prefetch is not None:
+        _set("LTX_BLOCK_OFFLOAD_PREFETCH_GROUPS", str(plan.blockswap_prefetch))
+    if frame_count is not None:
+        _set("LTX_PADDED_FRAMES", str(frame_count))
+    if hdr and frame_count is not None:
+        _set("LTX_HDR_PADDED_FRAMES", str(frame_count))
+        if plan.hdr_context_window is not None:
+            _set("LTX_HDR_CONTEXT_WINDOW", str(plan.hdr_context_window))
+    return set_envs
+
+
+def _restore_lora_workload_envs(set_envs: list[tuple[str, str | None]]) -> None:
+    """Undo env overrides applied by :func:`_apply_lora_workload_envs`."""
+    for env, prev in reversed(set_envs):
+        if prev is None:
+            os.environ.pop(env, None)
+        else:
+            os.environ[env] = prev
 
 
 class IcLoraHandler(StateHandlerBase):
@@ -323,6 +364,25 @@ class IcLoraHandler(StateHandlerBase):
         t_total_start = time.perf_counter()
         logger.info("[ic-lora] Ingredients generation started")
 
+        # Workload classification from request dims (no source video).
+        height = _align_up(req.height, 64)
+        width = _align_up(req.width, 64)
+        num_frames = _snap_frame_count(req.num_frames)
+        frame_rate = req.frame_rate
+        _snap = snapshot_vram()
+        _wl_plan = classify_lora_workload(
+            workflow="ingredients",
+            frame_count=num_frames,
+            width=width,
+            height=height,
+            vram_gib=float(_snap.effective_tier_gib) if _snap.effective_tier_gib is not None else None,
+        )
+        _wl_set_envs = _apply_lora_workload_envs(_wl_plan, num_frames, hdr=False)
+        _wl_mode = _wl_plan.summary()
+        if _snap.free_gib is not None or _snap.total_gib is not None:
+            _wl_mode += f" · VRAM {_snap.free_gib}/{_snap.total_gib}GiB free, tier {_snap.effective_tier_gib}GiB"
+        logger.info("[ic-lora] Applying IC-LoRA workload plan: %s", _wl_mode)
+
         try:
             t_load_start = time.perf_counter()
             # ponytail: no conditioning → load just the adapter, no union control
@@ -344,12 +404,16 @@ class IcLoraHandler(StateHandlerBase):
                 adapter_path=adapter_path,
                 lora_strength=req.lora_strength,
                 model_selection=req.model_selection,
+                workload_cache_key_parts=_wl_plan.cache_key_parts(),
             )
             t_load_end = time.perf_counter()
             logger.info("[ic-lora] Pipeline load: %.2fs", t_load_end - t_load_start)
 
             self._generation.start_generation(generation_id)
-            self._generation.update_progress("loading_model", 5, 0, 1)
+            self._generation.update_progress("loading_model", 5, 0, 1, workload_mode=_wl_mode)
+
+            def _phase_update(phase: str, detail: str | None = None) -> None:
+                self._generation.update_progress(phase, 15, phase_detail=detail)
 
             s = self.state.app_settings
             use_api = not self._text.should_use_local_encoding(req.model_selection)
@@ -366,11 +430,6 @@ class IcLoraHandler(StateHandlerBase):
             )
             t_text_end = time.perf_counter()
             logger.info("[ic-lora] Text encoding (%s): %.2fs", encoding_method, t_text_end - t_text_start)
-
-            height = _align_up(req.height, 64)
-            width = _align_up(req.width, 64)
-            num_frames = _snap_frame_count(req.num_frames)
-            frame_rate = req.frame_rate
 
             images: list[ImageConditioningInput] = [
                 ImageConditioningInput(path=img.path, frame_idx=int(img.frame), strength=float(img.strength))
@@ -403,6 +462,7 @@ class IcLoraHandler(StateHandlerBase):
                 encoder=self.media_encoder,
                 proxy_path=proxy_path,
                 on_progress=make_encode_progress_callback(self._generation.update_progress),
+                on_phase_update=_phase_update,
             )
             t_inference_end = time.perf_counter()
             logger.info("[ic-lora] Inference: %.2fs", t_inference_end - t_inference_start)
@@ -431,6 +491,7 @@ class IcLoraHandler(StateHandlerBase):
                 return IcLoraGenerateCancelledResponse(status="cancelled")
             raise HTTPError(500, f"Generation error: {exc}") from exc
         finally:
+            _restore_lora_workload_envs(_wl_set_envs)
             self._text.clear_api_embeddings()
 
     def _resolve_hdr_scene_embeddings_path(self) -> str:
@@ -478,6 +539,8 @@ class IcLoraHandler(StateHandlerBase):
         t_total_start = time.perf_counter()
         logger.info("[ic-lora] HDR generation started")
 
+        _wl_set_envs: list[tuple[str, str | None]] = []
+
         try:
             # Resolve HDR LoRA and scene embeddings paths.
             assert req.adapter_id is not None
@@ -517,6 +580,24 @@ class IcLoraHandler(StateHandlerBase):
             fps = float(info["fps"])
             self._video_processor.release(cap)
 
+            # Workload classification for HDR: rolling context window + VAE
+            # encode tile + blockswap for long clips. Applied before load so the
+            # build-time resident policy + the HDR pipeline's own context/tiling
+            # reads see them; folded into the cache key for cache safety.
+            _snap = snapshot_vram()
+            _wl_plan = classify_lora_workload(
+                workflow="hdr",
+                frame_count=frame_count,
+                width=input_width,
+                height=input_height,
+                vram_gib=float(_snap.effective_tier_gib) if _snap.effective_tier_gib is not None else None,
+            )
+            _wl_set_envs = _apply_lora_workload_envs(_wl_plan, frame_count, hdr=True)
+            _wl_mode = _wl_plan.summary()
+            if _snap.free_gib is not None or _snap.total_gib is not None:
+                _wl_mode += f" · VRAM {_snap.free_gib}/{_snap.total_gib}GiB free, tier {_snap.effective_tier_gib}GiB"
+            logger.info("[ic-lora] Applying IC-LoRA workload plan: %s", _wl_mode)
+
             # Phase 3 frame policy: do not reject by frame count and never
             # trim/snap. The Phase 2 wrapper decodes ALL source frames and
             # applies in-memory duplicate-final-frame padding to 8n+1 itself.
@@ -550,12 +631,16 @@ class IcLoraHandler(StateHandlerBase):
                 req.model_selection,
                 hdr_lora_path,
                 scene_embeddings_path,
+                workload_cache_key_parts=_wl_plan.cache_key_parts(),
             )
             t_load_end = time.perf_counter()
             logger.info("[ic-lora] HDR pipeline load: %.2fs", t_load_end - t_load_start)
 
             self._generation.start_generation(generation_id)
-            self._generation.update_progress("loading_model", 5, 0, 1)
+            self._generation.update_progress("loading_model", 5, 0, 1, workload_mode=_wl_mode)
+
+            def _phase_update(phase: str, detail: str | None = None) -> None:
+                self._generation.update_progress(phase, 15, phase_detail=detail)
 
             # No text encoding — scene embeddings replace prompt encoding.
             # Clear any stale API embeddings.
@@ -589,6 +674,7 @@ class IcLoraHandler(StateHandlerBase):
                 proxy_path=proxy_path,
                 input_colorspace=input_colorspace,
                 on_progress=make_encode_progress_callback(self._generation.update_progress),
+                on_phase_update=_phase_update,
             )
             t_inference_end = time.perf_counter()
             logger.info("[ic-lora] HDR inference: %.2fs", t_inference_end - t_inference_start)
@@ -604,18 +690,20 @@ class IcLoraHandler(StateHandlerBase):
             self._generation.update_progress("complete", 100, 1, 1)
             self._generation.complete_generation(output_path)
             return IcLoraGenerateCompleteResponse(
-                status="complete", video_path=output_path, proxy_path=proxy_path
+                status="complete", video_path=output_path, proxy_path=proxy_path,
+                stage_1_preview_path=None,
             )
 
         except HTTPError:
-            self._generation.fail_generation("HDR generation failed")
+            self._generation.fail_generation("IC-LoRA generation failed")
             raise
         except Exception as exc:
             self._generation.fail_generation(str(exc))
             if "cancelled" in str(exc).lower():
                 return IcLoraGenerateCancelledResponse(status="cancelled")
-            raise HTTPError(500, f"HDR generation error: {exc}") from exc
+            raise HTTPError(500, f"Generation error: {exc}") from exc
         finally:
+            _restore_lora_workload_envs(_wl_set_envs)
             self._text.clear_api_embeddings()
 
     def generate(self, req: IcLoraGenerateRequest) -> IcLoraGenerateResponse:
@@ -735,6 +823,45 @@ class IcLoraHandler(StateHandlerBase):
         t_total_start = time.perf_counter()
         logger.info("[ic-lora] Generation started (conditioning=%s)", req.conditioning_type)
 
+        # Workload classification. block_offload resolves resident blocks and
+        # the IC-LoRA cache key is decided at load_ic_lora below, so classify
+        # from a cheap source probe BEFORE the load. A pipeline cache hit skips
+        # any rebuild, so the plan is also folded into the cache key (env-only is
+        # not enough). The probe is advisory and releases its own handle; the
+        # authoritative metadata read happens later inside the try.
+        _fr = _w = _h = 0
+        try:
+            if is_sequence:
+                if video_is_seq_dir:
+                    _w, _h, _fr, _ = sequence_metadata_from_dir(str(video_path))
+                else:
+                    _w, _h, _fr, _ = sequence_metadata(str(video_path))
+            else:
+                _cap = self._video_processor.open_video(str(video_path))
+                try:
+                    if _cap.isOpened():
+                        _info = self._video_processor.get_video_info(_cap)
+                        _w, _h, _fr = int(_info["width"]), int(_info["height"]), int(_info["frame_count"])
+                    else:
+                        _fr = _w = _h = 0
+                finally:
+                    self._video_processor.release(_cap)
+        except Exception:  # noqa: BLE001  probe is advisory; classify as normal
+            _fr = _w = _h = 0
+        _snap = snapshot_vram()
+        _wl_plan = classify_lora_workload(
+            workflow=workflow or "standard_video",
+            frame_count=_fr or None,
+            width=_w or None,
+            height=_h or None,
+            vram_gib=float(_snap.effective_tier_gib) if _snap.effective_tier_gib is not None else None,
+        )
+        _wl_set_envs = _apply_lora_workload_envs(_wl_plan, _fr or None, hdr=False)
+        _wl_mode = _wl_plan.summary()
+        if _snap.free_gib is not None or _snap.total_gib is not None:
+            _wl_mode += f" · VRAM {_snap.free_gib}/{_snap.total_gib}GiB free, tier {_snap.effective_tier_gib}GiB"
+        logger.info("[ic-lora] Applying IC-LoRA workload plan: %s", _wl_mode)
+
         try:
             t_load_start = time.perf_counter()
             ic_state = self._pipelines.load_ic_lora(
@@ -743,12 +870,16 @@ class IcLoraHandler(StateHandlerBase):
                 adapter_path=resolved_adapter_path,
                 lora_strength=req.lora_strength,
                 model_selection=req.model_selection,
+                workload_cache_key_parts=_wl_plan.cache_key_parts(),
             )
             t_load_end = time.perf_counter()
             logger.info("[ic-lora] Pipeline load: %.2fs", t_load_end - t_load_start)
 
             self._generation.start_generation(generation_id)
-            self._generation.update_progress("loading_model", 5, 0, 1)
+            self._generation.update_progress("loading_model", 5, 0, 1, workload_mode=_wl_mode)
+
+            def _phase_update(phase: str, detail: str | None = None) -> None:
+                self._generation.update_progress(phase, 15, phase_detail=detail)
 
             s = self.state.app_settings
             use_api = not self._text.should_use_local_encoding(req.model_selection)
@@ -903,7 +1034,7 @@ class IcLoraHandler(StateHandlerBase):
 
             t_inference_start = time.perf_counter()
             if workflow == "in_outpainting":
-                ic_state.pipeline.generate_inpaint(
+                _stage1_preview = ic_state.pipeline.generate_inpaint(
                     prompt=resolved_prompt,
                     seed=self._resolve_seed(),
                     height=height,
@@ -923,8 +1054,11 @@ class IcLoraHandler(StateHandlerBase):
                     proxy_path=proxy_path,
                     on_progress=make_encode_progress_callback(self._generation.update_progress),
                     input_colorspace=input_colorspace,
+                    on_phase_update=_phase_update,
+                    save_stage_1_preview=req.save_stage_1_preview,
                 )
             else:
+                _stage1_preview = None
                 ic_state.pipeline.generate(
                     prompt=req.prompt,
                     seed=self._resolve_seed(),
@@ -943,6 +1077,7 @@ class IcLoraHandler(StateHandlerBase):
                     proxy_path=proxy_path,
                     on_progress=make_encode_progress_callback(self._generation.update_progress),
                     input_colorspace=input_colorspace,
+                    on_phase_update=_phase_update,
                 )
             t_inference_end = time.perf_counter()
             logger.info("[ic-lora] Inference: %.2fs", t_inference_end - t_inference_start)
@@ -961,7 +1096,8 @@ class IcLoraHandler(StateHandlerBase):
             self._generation.update_progress("complete", 100, 1, 1)
             self._generation.complete_generation(output_path)
             return IcLoraGenerateCompleteResponse(
-                status="complete", video_path=output_path, proxy_path=proxy_path
+                status="complete", video_path=output_path, proxy_path=proxy_path,
+                stage_1_preview_path=_stage1_preview,
             )
 
         except HTTPError:
@@ -973,4 +1109,5 @@ class IcLoraHandler(StateHandlerBase):
                 return IcLoraGenerateCancelledResponse(status="cancelled")
             raise HTTPError(500, f"Generation error: {exc}") from exc
         finally:
+            _restore_lora_workload_envs(_wl_set_envs)
             self._text.clear_api_embeddings()

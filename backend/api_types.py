@@ -145,6 +145,10 @@ class GenerationProgressResponse(BaseModel):
     ramUsedMb: int | None = None
     ramTotalMb: int | None = None
     cpuUtilPct: float | None = None
+    # Detailed phase label (e.g. "Sampling / VAE decode via upstream IC-LoRA
+    # pipeline") and selected workload/optimization mode summary.
+    phaseDetail: str | None = None
+    workloadMode: str | None = None
 
 
 class DownloadProgressRunningResponse(BaseModel):
@@ -274,6 +278,7 @@ class IcLoraGenerateCompleteResponse(BaseModel):
     status: Literal["complete"]
     video_path: str
     proxy_path: str | None = None
+    stage_1_preview_path: str | None = None
 
 
 class IcLoraGenerateCancelledResponse(BaseModel):
@@ -920,6 +925,7 @@ class RetakeRequest(BaseModel):
     prompt: str = ""
     mode: RetakeMode = "replace_audio_and_video"
     output_format: OutputFormat | None = Field(default=None, validate_default=True)
+    model_selection: ModelSelectionID | None = None
 
     @field_validator("output_format", mode="before")
     @classmethod
@@ -986,6 +992,7 @@ class IcLoraGenerateRequest(BaseModel):
     laplacian_blend_grow: int = Field(default=12, ge=0, le=64, description="Controls Laplacian pyramid blend mask_low_res_dilation for inpaint. Larger values expand blend region at low-res level. Separate from mask_grow_px (dilation radii) and final_mask_blur_px (raw mask feather).")
     final_mask_blur_px: int = Field(default=6, ge=0, le=64, description="Blur radius for final raw-mask guard feather. Smoothens inpaint edge. 0=no feather. Separate from laplacian_blend_grow (pyramid blend level) and mask_grow_px (model context dilation).")
     lora_strength: float = Field(default=1.0, ge=0.0, le=2.0)
+    save_stage_1_preview: bool = False
     width: int = Field(default=704, ge=64, description="T2V output width (ingredients/no-video only)")
     height: int = Field(default=1280, ge=64, description="T2V output height (ingredients/no-video only)")
     num_frames: int = Field(default=121, ge=9, description="T2V frame count (ingredients/no-video only)")

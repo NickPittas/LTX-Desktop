@@ -99,7 +99,7 @@ def make_proxy_output_path(primary_path: str, output_format: OutputFormat) -> st
     from pathlib import Path
 
     p = Path(primary_path)
-    return str(p.parent / f"{p.name}_proxy.mp4")
+    return str(p.parent / f"{p.stem}_proxy.mp4")
 
 
 # Encode progress split: the encoder's primary encode covers [0, _ENCODE_FRACTION]

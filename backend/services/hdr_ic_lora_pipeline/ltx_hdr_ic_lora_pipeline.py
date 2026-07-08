@@ -1363,6 +1363,7 @@ class LTXHdrIcLoraPipeline(HDRICLoraPipeline):
         proxy_path: str | None = None,
         input_colorspace: ColorSpace | None = None,  # noqa: ARG002  # HDR source is 8-bit SDR; no colorspace detection.
         on_progress: Callable[[float], None] | None = None,
+        on_phase_update: Callable[[str, str | None], None] | None = None,
     ) -> None:
         """Run the official HDR IC-LoRA two-stage flow on the source video.
 
@@ -1372,6 +1373,11 @@ class LTXHdrIcLoraPipeline(HDRICLoraPipeline):
         tensor as the EXR primary sequence (no EOTF / tonemap / clamp) and,
         after the primary, the SDR proxy MP4.
         """
+
+        def _phase(phase: str, detail: str | None = None) -> None:
+            if on_phase_update is not None:
+                on_phase_update(phase, detail)
+
         with memory_trace.phase("hdr_generate"):
             # Env-gated coarse phase timing (debug/harness knob, NOT production
             # UI policy). ~free when LTX_HDR_TIMING is unset: checkpoints and the
@@ -1432,6 +1438,7 @@ class LTXHdrIcLoraPipeline(HDRICLoraPipeline):
             # self(...). Restored to its prior value in the finally below.
             _prev_pf_env = os.environ.get(_LTX_HDR_PADDED_FRAMES_ENV)
             os.environ[_LTX_HDR_PADDED_FRAMES_ENV] = str(padded_num_frames)
+            _phase("inference", "HDR one-stage sampling + tiled decode")
             try:
                 video_gpu: torch.Tensor = self(
                     seed=seed,
@@ -1491,6 +1498,7 @@ class LTXHdrIcLoraPipeline(HDRICLoraPipeline):
 
             out_dir = Path(output_path)
             out_dir.mkdir(parents=True, exist_ok=True)
+            _phase("exr_write", "Writing linear EXR primary")
             for idx in range(int(video.shape[0])):
                 save_exr_tensor(video[idx], out_dir / f"frame_{idx:06d}.exr", half=half)
             if on_progress is not None:
@@ -1499,6 +1507,7 @@ class LTXHdrIcLoraPipeline(HDRICLoraPipeline):
             _t0 = time.perf_counter() if timing else _t0
 
             if proxy_path is not None:
+                _phase("proxy_encode", "Encoding SDR proxy MP4")
                 encode_exr_sequence_to_mp4(out_dir, Path(proxy_path), frame_rate)
             _t_proxy = (time.perf_counter() - _t0) if timing else 0.0
             _t_total_done = (time.perf_counter() - _t_total) if timing else 0.0

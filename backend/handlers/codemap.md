@@ -152,7 +152,7 @@ via `validate_audio_file`. `generate_video()` snaps height/width to multiples of
 `_ADAPTER_WORKFLOW[adapter_id]` (`WorkflowType` literal). Workflows in
 `_UNAVAILABLE_WORKFLOWS` (`motion_track_control`, `hdr_scene_embeddings`,
 `lipdub`) are rejected with `_UNAVAILABLE_MESSAGES` before any path access.
-`hdr` is a **supported** V2V workflow (no longer unavailable). Live `model_selection` on `POST /api/ic-lora/generate` is accepted for all available IC-LoRA workflows (`hdr`, `ingredients`, `in_outpainting`, `standard_video`, `union_control` — it swaps the main transformer; sidecar components stay componentized); only the still-gated adapters (`motion_track_control`/`hdr_scene_embeddings`/`lipdub`) reject it. The generic V2V path threads `req.model_selection` into `pipelines.load_ic_lora(...)` and `should_use_local_encoding(...)`. `ingredients`
+`hdr` is a **supported** V2V workflow (no longer unavailable). Live `model_selection` on `POST /api/ic-lora/generate` is accepted for all available IC-LoRA workflows (`hdr`, `ingredients`, `in_outpainting`, `standard_video`, `union_control` — it swaps the main transformer; sidecar components stay componentized); only the still-gated adapters (`motion_track_control`/`hdr_scene_embeddings`/`lipdub`) reject it. The generic V2V path threads `req.model_selection` into `pipelines.load_ic_lora(...)` and `should_use_local_encoding(...)`. Every IC-LoRA workflow also classifies its workload via `services.workload_policy.classify_lora_workload` (frame_count/dims/VRAM → `LoraWorkloadPlan`) and passes `workload_cache_key_parts=plan.cache_key_parts()` into the pipeline load so a large workload never reuses a normal-workload pipeline; plan envs (resident blocks / HDR context window) are applied before load and restored after. Separately, `_resolve_memory_plan` snapshots per-run effective/free VRAM (`snapshot_vram`, reserve 2 GiB) and folds `effective_vram_tier=<tier>` (or `=unknown`) into every local pipeline-load cache key. `ingredients`
 is dispatched **before** `video_path` validation to `_generate_ingredients`
 (T2V: no video, no conditioning, uses `req` dims aligned via `_align_up(*, 64)`
 and `_snap_frame_count` (min 9, 1+8k), loads only the adapter LoRA with
@@ -197,7 +197,7 @@ reads a single frame, builds canny/depth, returns base64 JPEG data URIs.
 `_run_local_retake` validates the source video is readable
 (`_validate_video_metadata` via `ltx_pipelines.utils.media_io.get_videostream_metadata` —
 spatial dims are NO LONGER rejected here; the pipeline aligns them up to a multiple of 64 internally),
-prepares text encoding, loads `load_retake_pipeline(distilled=True)`, calls
+prepares text encoding, loads `load_retake_pipeline(distilled=True, model_selection=req.model_selection)` (retake now accepts an optional `model_selection`, threaded into components/checkpoint/cache-key resolution), calls
 `pipeline.generate(..., distilled=True, regenerate_video/regenerate_audio from
 _resolve_retake_mode(mode))`. **Output hardcoded `.mp4`:**
 `config.outputs_dir / f"retake_{timestamp}_{gen_id}.mp4"`.

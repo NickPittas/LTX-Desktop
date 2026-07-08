@@ -18,7 +18,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
-from services.memory_trace import write_event
+from services.memory_trace import is_enabled, write_event
 
 if TYPE_CHECKING:
     import torch
@@ -464,6 +464,17 @@ def apply_block_offload(
     # long generation does not flood the trace. No-op unless tracing is enabled.
     hook_state: dict[str, bool] = {"pre_emitted": False, "post_emitted": False}
 
+    # Observational blockswap counters (env-gated: zero overhead when trace off).
+    # Accumulated across hooks and snapshotted once per denoise step (group-0
+    # pre-hook). The analyzer diffs consecutive snapshots for per-step deltas.
+    _stats_on = is_enabled()
+    _swap_stats: dict[str, int] = {
+        "steps": 0,
+        "h2d_moves": 0,
+        "sync_fallbacks": 0,
+        "evictions": 0,
+    }
+
     # Blockswap bookkeeping (only mutated when use_blockswap). ``pf_events[gi]``
     # holds a CUDA event recorded on the prefetch stream once group ``gi``'s
     # CPU->GPU copy is queued (cleared once consumed); ``group_on_gpu[gi]`` tracks
@@ -480,6 +491,8 @@ def apply_block_offload(
             ev = torch.cuda.Event()
             ev.record()
         pf_events[gi] = ev
+        if _stats_on:
+            _swap_stats["h2d_moves"] += 1
 
     def _evict_behind(gi: int) -> None:
         """Evict offloaded groups older than the look-behind window back to CPU.
@@ -502,6 +515,8 @@ def apply_block_offload(
                 _move_group(groups[j], offload)
                 group_on_gpu[j] = False
                 pf_events[j] = None
+                if _stats_on:
+                    _swap_stats["evictions"] += 1
 
     def _make_pre_hook(gi: int) -> Callable[..., None]:
         group = groups[gi]
@@ -518,6 +533,16 @@ def apply_block_offload(
                     prefetch_groups=pf_k,
                     lookbehind_groups=lookbehind,
                 )
+            if _stats_on and gi == 0:
+                _swap_stats["steps"] += 1
+                write_event(
+                    "block_offload_stats",
+                    "block_offload",
+                    num_groups=num_groups,
+                    resident_blocks=resident_n,
+                    blockswap=use_blockswap,
+                    **_swap_stats,
+                )
             if use_blockswap:
                 # Ensure this group is on GPU before its forward launches. If a
                 # prefetch is in flight on the side stream, wait (on this, the
@@ -531,12 +556,17 @@ def apply_block_offload(
                 if not group_on_gpu[gi]:
                     _move_group(group, onload)
                     group_on_gpu[gi] = True
+                    if _stats_on:
+                        _swap_stats["sync_fallbacks"] += 1
+                        _swap_stats["h2d_moves"] += 1
                 # Prefetch the next K groups on the side stream, overlapping
                 # their H2D copy with this group's compute.
                 for j in range(gi + 1, min(gi + 1 + pf_k, num_groups)):
                     _prefetch_group(j)
             else:
                 _move_group(group, onload)
+                if _stats_on:
+                    _swap_stats["h2d_moves"] += 1
 
         return hook
 
@@ -569,6 +599,8 @@ def apply_block_offload(
                 _move_group(group, offload)
                 group_on_gpu[gi] = False
                 pf_events[gi] = None
+                if _stats_on:
+                    _swap_stats["evictions"] += 1
 
         return hook
 

@@ -83,6 +83,28 @@ if use_sage_attention:
 
         _SAGE_SUPPORTED_HEADDIMS = {64, 96, 128}
 
+        # Observational SageAttention dispatch counters. One-shot trace events
+        # (first hit / first fallback) record whether sageattn actually engages
+        # for LTX-2's head dims — sage only runs for dims in the set above. Dict
+        # mutation only (no rebinding), so no `global` needed. Emit is swallow-all
+        # so attention never breaks on a trace error.
+        _sage_dispatch_counts = {"hits": 0, "fallbacks": 0}
+        _sage_dispatch_emitted = {"hit": False, "fallback": False}
+
+        def _emit_sage_dispatch(label: str, head_dim: int) -> None:
+            try:
+                from services.memory_trace import write_event
+
+                write_event(
+                    "sage_dispatch",
+                    label,
+                    head_dim=head_dim,
+                    hits=_sage_dispatch_counts["hits"],
+                    fallbacks=_sage_dispatch_counts["fallbacks"],
+                )
+            except Exception:
+                pass
+
         def patched_sdpa(
             query: torch.Tensor,
             key: torch.Tensor,
@@ -94,13 +116,24 @@ if use_sage_attention:
             **kwargs: Any,
         ) -> torch.Tensor:
             global _sageattention_runtime_fallback_logged
+            eligible = (
+                query.dim() == 4
+                and attn_mask is None
+                and dropout_p == 0.0
+                and query.shape[-1] in _SAGE_SUPPORTED_HEADDIMS
+            )
+            if eligible:
+                _sage_dispatch_counts["hits"] += 1
+                if not _sage_dispatch_emitted["hit"]:
+                    _sage_dispatch_emitted["hit"] = True
+                    _emit_sage_dispatch("sage_hit", int(query.shape[-1]))
+            else:
+                _sage_dispatch_counts["fallbacks"] += 1
+                if not _sage_dispatch_emitted["fallback"]:
+                    _sage_dispatch_emitted["fallback"] = True
+                    _emit_sage_dispatch("sage_fallback", int(query.shape[-1]))
             try:
-                if (
-                    query.dim() == 4
-                    and attn_mask is None
-                    and dropout_p == 0.0
-                    and query.shape[-1] in _SAGE_SUPPORTED_HEADDIMS
-                ):
+                if eligible:
                     return cast(torch.Tensor, sageattn(query, key, value, is_causal=is_causal, tensor_layout="HND"))  # type: ignore[reportUnnecessaryCast]
                 else:
                     return _original_sdpa(query, key, value, attn_mask=attn_mask,
@@ -120,6 +153,21 @@ if use_sage_attention:
     except Exception:
         logger.warning("Failed to enable SageAttention", exc_info=True)
         use_sage_attention = False
+
+# ============================================================
+# TF32 / matmul precision (benchmark-gated)
+# ============================================================
+# Free Ampere+ speedup on fp32 reduction paths (VAE, RoPE, norms). Off by
+# default to preserve exact current numerics; LTX_ENABLE_TF32=1 turns it on for
+# benchmarking. Never raises.
+if os.environ.get("LTX_ENABLE_TF32") == "1":
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
+        logger.info("TF32 enabled (LTX_ENABLE_TF32=1)")
+    except Exception:
+        logger.warning("Failed to enable TF32", exc_info=True)
 
 # ============================================================
 # Constants & Paths

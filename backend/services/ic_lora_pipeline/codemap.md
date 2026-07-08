@@ -18,6 +18,7 @@ Files:
 - **Mask-radius derivation**: `derive_stage_radii(mask_grow_px)` → `(stage1=(n+1)//2, stage2=n)` mapping the user-facing `mask_grow_px` to per-stage dilation radii.
 - **Green-guide direct tensor encode** (`_encode_green_guide_conditioning`): replaces a temp-mp4 roundtrip; builds a `VideoConditionByReferenceLatent(latent=encoded, downscale_factor=1, strength=strength)` from a direct tiled VAE encode of the green composite tensor.
 - **Streaming prefetch tuning for inpaint** (`_inpaint_streaming_prefetch_count`): returns explicit override unchanged; else `LTX_INPAINT_STREAM_PREFETCH` env var if frames ≥ 97; else default 2 for long (≥97f), None for short.
+- **Large inpaint stage-2 context window**: for long clips (>121f) or ≥1080p, `generate_inpaint` stamps the HDR-installed `_ltx_desktop_context_loop` config on `stage_2` before the full-res diffusion call, then clears it for non-large cached-stage reuse.
 - **`@torch.inference_mode()`** on `generate` and `generate_inpaint`.
 
 ## Data & Control Flow
@@ -59,9 +60,9 @@ Imported from `services.ltx_pipeline_common.encode_video_output`; forwards uncha
 6. **Stage 1** (half res, `DISTILLED_SIGMAS`, `SimpleDenoiser`): conditionings = `combined_image_conditionings(...)` + `_encode_green_guide_conditioning(enc, green_half, conditioning_strength)`; `self.pipeline.stage_1(...)` → `video_state_s1`.
 7. Decode stage 1 (`self.pipeline.video_decoder(video_state_s1.latent, tiling_config, generator)`) → `_collect_frames` → `(F, H_half, W_half, 3)` in [0,1]. `laplacian_pyramid_blend(decoded_s1, video_half_frames_01, mask_s1_blend, max_level=7, mask_low_res_dilation=INPAINT_BLEND1_LOW_RES_DILATION=5)` → `blend_stage1`.
 8. Upscale `blend_stage1` 2× (bicubic), convert `(F,3,H,W)→(1,3,F,H,W)` in [-1,1], trim to `_vae_compatible_frame_count`, tiled VAE encode via `image_conditioner(lambda enc: enc.tiled_encode(..., tiling_config))` → `encoded_blend`.
-9. **Stage 2** (full res, `STAGE_2_DISTILLED_SIGMAS[1:]` scaled so first sigma ≈ 0.55, `noise_scale=0.55`, `initial_latent=encoded_blend`; audio `noise_scale=stage2_sigmas[0].item()`, `initial_latent=audio_state_s1.latent`): `self.pipeline.stage_2(...)` → `video_state_s2`, `audio_state_s2`.
-10. Decode stage 2 → `_collect_frames`. `laplacian_pyramid_blend(decoded_s2, video_full_frames_01, mask_s2_blend, max_level=7, mask_low_res_dilation=laplacian_blend_grow)` → `blend_stage2`.
-11. `_apply_raw_mask_guard(blend_stage2, mask_full_gray, video_full_frames_01, blur_radius=final_mask_blur_px)` — clamps pixels outside the raw user mask back to original, feathered via `avg_pool2d`; chunked over frames (8) to cap VRAM; returns CPU tensor `(F,H,W,3)` in [0,1].
+9. **Stage 2** (full res, `STAGE_2_DISTILLED_SIGMAS[1:]` scaled so first sigma ≈ 0.55, `noise_scale=0.55`, `initial_latent=encoded_blend`; audio `noise_scale=stage2_sigmas[0].item()`, `initial_latent=audio_state_s1.latent`): large workloads stamp a rolling context-window config on `stage_2`; `self.pipeline.stage_2(...)` → `video_state_s2`, `audio_state_s2`. Optional: if `save_stage_1_preview`, encodes a half-res `<primary_stem>_stage1_preview.mp4` after the first-stage Laplacian blend; `generate_inpaint` returns the preview path (`str | None`).
+10. Decode stage 2 → `_collect_frames`. Stage 2 output used **directly** as `blend_stage2 = decoded_s2_frames` — the second `laplacian_pyramid_blend` and `_apply_raw_mask_guard` are **skipped** per the requested inpaint change (full-res decoded frames are the final output, no blend back to original video).
+11. (removed — raw-mask guard no longer applied)
 12. Decode audio: `decoded_audio = self.pipeline.audio_decoder(audio_state_s2.latent)`. Crop `blend_stage2 = blend_stage2[:num_actual_frames]`; `chunks = video_chunks_number(num_actual_frames, tiling_config)`.
 
 ### `generate_inpaint` — encode call site (b)

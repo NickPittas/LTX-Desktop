@@ -9,6 +9,7 @@ from threading import RLock
 import time
 
 from api_types import (
+    ModelSelectionID,
     OutputFormat,
     RetakeCancelledResponse,
     RetakeMode,
@@ -98,6 +99,7 @@ class RetakeHandler(StateHandlerBase):
             prompt=prompt,
             mode=mode,
             output_format=req.output_format or OutputFormat.MP4,
+            model_selection=req.model_selection,
         )
 
     def _run_api_retake(
@@ -155,6 +157,7 @@ class RetakeHandler(StateHandlerBase):
         prompt: str,
         mode: RetakeMode,
         output_format: OutputFormat = OutputFormat.MP4,
+        model_selection: ModelSelectionID | None = None,
     ) -> RetakeResponse:
         if self._generation.is_generation_running():
             raise HTTPError(409, "Generation already in progress")
@@ -199,7 +202,7 @@ class RetakeHandler(StateHandlerBase):
         regenerate_video, regenerate_audio = self._resolve_retake_mode(mode)
 
         try:
-            pipeline_state = self._pipelines.load_retake_pipeline(distilled=True)
+            pipeline_state = self._pipelines.load_retake_pipeline(distilled=True, model_selection=model_selection)
             self._generation.start_generation(generation_id)
             self._generation.update_progress("loading_model", 5, 0, 1)
             self._generation.update_progress("inference", 15, 0, 1)

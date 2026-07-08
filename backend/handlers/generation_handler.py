@@ -178,6 +178,9 @@ class GenerationHandler(StateHandlerBase):
         progress: int,
         current_step: int | None = None,
         total_steps: int | None = None,
+        *,
+        phase_detail: str | None = None,
+        workload_mode: str | None = None,
     ) -> None:
         running_generation = self._running_generation()
         if running_generation is None:
@@ -191,6 +194,11 @@ class GenerationHandler(StateHandlerBase):
         running.progress.progress = progress
         running.progress.current_step = current_step
         running.progress.total_steps = total_steps
+        # phase_detail is set on every call (None clears stale detail).
+        running.progress.phase_detail = phase_detail
+        # workload_mode persists across phase changes (only set when non-None).
+        if workload_mode is not None:
+            running.progress.workload_mode = workload_mode
 
     def _start_metrics_sampler(self, generation_id: str) -> None:
         """Start a ~1 Hz background telemetry sampler for *generation_id*.
@@ -337,6 +345,8 @@ class GenerationHandler(StateHandlerBase):
                     ramUsedMb=m.ram_used_mb if m is not None else None,
                     ramTotalMb=m.ram_total_mb if m is not None else None,
                     cpuUtilPct=m.cpu_util_pct if m is not None else None,
+                    phaseDetail=progress.phase_detail,
+                    workloadMode=progress.workload_mode,
                 )
             case GenerationComplete():
                 return GenerationProgressResponse(

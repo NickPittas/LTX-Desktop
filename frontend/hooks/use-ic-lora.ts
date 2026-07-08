@@ -25,12 +25,14 @@ export interface IcLoraSubmitParams {
   images?: { path: string; frame?: number; strength?: number }[]
   outputFormat?: OutputFormat
   modelSelection?: ModelSelectionID | null
+  saveStage1Preview?: boolean
 }
 
 export interface IcLoraResult {
   videoPath: string
   proxyPath: string | null
   generationElapsedSeconds?: number
+  stage1PreviewPath?: string | null
 }
 
 interface UseIcLoraState {
@@ -48,6 +50,8 @@ interface UseIcLoraState {
   ramTotalMb: number | null
   gpuUtilPct: number | null
   cpuUtilPct: number | null
+  phaseDetail: string | null
+  workloadMode: string | null
 }
 
 type GenerateIcLoraBody = ApiRequestBodyOf<'generateIcLora'>
@@ -62,6 +66,8 @@ const NULL_METRICS = {
   ramTotalMb: null as number | null,
   gpuUtilPct: null as number | null,
   cpuUtilPct: null as number | null,
+  phaseDetail: null as string | null,
+  workloadMode: null as string | null,
 }
 
 export function useIcLora() {
@@ -119,6 +125,9 @@ export function useIcLora() {
     if (params.modelSelection !== undefined && params.modelSelection !== null) {
       body.model_selection = params.modelSelection
     }
+    if (params.saveStage1Preview) {
+      body.save_stage_1_preview = true
+    }
 
     // Poll the shared generation-progress endpoint for live metrics while the
     // synchronous IC-LoRA request is in flight (same contract as use-generation).
@@ -139,8 +148,10 @@ export function useIcLora() {
       if (data.elapsedSeconds != null) latestElapsed = data.elapsedSeconds
       setState(prev => ({
         ...prev,
-        progress: displayProgress,
-        status,
+      progress: displayProgress,
+          status,
+          phaseDetail: data.phaseDetail ?? null,
+          workloadMode: data.workloadMode ?? null,
         elapsedSeconds: data.elapsedSeconds ?? null,
         estimatedRemainingSeconds: data.estimatedRemainingSeconds ?? null,
         vramUsedMb: data.vramUsedMb ?? null,
@@ -184,8 +195,9 @@ export function useIcLora() {
         const finalElapsed = Math.max(latestElapsed ?? 0, (Date.now() - startWall) / 1000)
         const res: IcLoraResult = {
           videoPath: payload.video_path,
-          proxyPath: payload.proxy_path ?? null,
+          proxyPath: payload.proxy_path ?? ((payload as Record<string, unknown>).proxyPath as string | null) ?? null,
           generationElapsedSeconds: finalElapsed,
+          stage1PreviewPath: payload.stage_1_preview_path ?? ((payload as Record<string, unknown>).stage_1_preview_path as string | null) ?? null,
         }
         // Fire onComplete before local setState — runs ProjectContext mutations
         // even if GenSpace has unmounted (Bug A fix)
@@ -232,5 +244,7 @@ export function useIcLora() {
     icLoraRamUsedMb: state.ramUsedMb,
     icLoraRamTotalMb: state.ramTotalMb,
     icLoraCpuUtilPct: state.cpuUtilPct,
+    icLoraPhaseDetail: state.phaseDetail,
+    icLoraWorkloadMode: state.workloadMode,
   }
 }

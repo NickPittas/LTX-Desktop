@@ -342,6 +342,76 @@ async function transcodeVideoForPreviewImpl(
   return previewPath
 }
 
+/**
+ * Transcode an EXR file or EXR sequence directory to a browser-playable H.264
+ * MP4 for preview. EXR sequences are globbed at `-framerate 8`; a single EXR is
+ * looped for 1 second. Source is never mutated.
+ */
+async function transcodeExrForPreviewImpl(
+  srcPath: string,
+  onProgress?: (pct: number) => void,
+): Promise<string> {
+  const ffmpegPath = findFfmpegPath()
+  if (!ffmpegPath) {
+    throw new Error('ffmpeg not found for EXR preview transcoding')
+  }
+
+  const outDir = path.join(os.tmpdir(), 'ltx-preview')
+  fs.mkdirSync(outDir, { recursive: true })
+  const previewPath = path.join(outDir, `preview_${Date.now()}_${randomUUID()}.mp4`)
+
+  const stat = fs.statSync(srcPath)
+  const isDir = stat.isDirectory()
+
+  let args: string[]
+  if (isDir) {
+    const exrFiles = fs.readdirSync(srcPath)
+      .filter(f => f.toLowerCase().endsWith('.exr'))
+      .sort()
+    if (exrFiles.length === 0) {
+      throw new Error(`No .exr files found in directory: ${srcPath}`)
+    }
+    // Use glob pattern for the directory input
+    const globPattern = path.join(srcPath, '*.exr')
+    args = [
+      '-y',
+      '-framerate', '8',
+      '-pattern_type', 'glob',
+      '-i', globPattern,
+      '-map', '0:v:0',
+      '-c:v', 'libx264',
+      '-pix_fmt', 'yuv420p',
+      '-preset', 'veryfast',
+      '-crf', '20',
+      '-movflags', '+faststart',
+      previewPath,
+    ]
+  } else {
+    // Single EXR file: loop for 1 second to make a playable clip
+    args = [
+      '-y',
+      '-loop', '1', '-t', '1',
+      '-i', srcPath,
+      '-map', '0:v:0',
+      '-c:v', 'libx264',
+      '-pix_fmt', 'yuv420p',
+      '-preset', 'veryfast',
+      '-crf', '20',
+      '-movflags', '+faststart',
+      previewPath,
+    ]
+  }
+
+  // EXR duration is indeterminate; use a synthetic 30-frame estimate for progress.
+  const syntheticDurationUs = isDir ? Math.round(30 * 125_000) : 1_000_000
+  const result = await runFfmpeg(ffmpegPath, args, { onProgress, isolated: true, durationUs: syntheticDurationUs })
+  if (!result.success) {
+    try { fs.existsSync(previewPath) && fs.unlinkSync(previewPath) } catch { /* best-effort cleanup */ }
+    throw new Error(`EXR preview transcoding failed for ${srcPath}: ${result.error}`)
+  }
+  return previewPath
+}
+
 // The copied project asset doubles as playback proxy for the legacy MP4 path
 // (transcode-in-place). When a proxyPath is supplied (ProRes/EXR primary), the
 // primary is preserved verbatim and the proxy is copied alongside — the primary
@@ -650,8 +720,21 @@ export function registerFileHandlers(): void {
 
     try {
       const resolvedSrc = resolveLocalSourcePath(srcPath)
-      if (fs.statSync(resolvedSrc).isDirectory()) {
-        throw new Error('Preview transcoding is only supported for video files, not directories')
+      const srcStat = fs.statSync(resolvedSrc)
+      const isExrDir = srcStat.isDirectory()
+      const isExrFile = !srcStat.isDirectory() && resolvedSrc.toLowerCase().endsWith('.exr')
+
+      if (isExrDir || isExrFile) {
+        emit({ percent: 0, label: 'Transcoding EXR preview…' })
+        const previewPath = await transcodeExrForPreviewImpl(resolvedSrc, (pct) => {
+          emit({ percent: Math.round(pct * 100), label: 'Transcoding EXR preview…' })
+        })
+        emit({ percent: 100, label: 'Preview ready', done: true })
+        return { success: true, path: previewPath }
+      }
+
+      if (srcStat.isDirectory()) {
+        throw new Error('Preview transcoding is only supported for video/EXR files, not directories')
       }
 
       emit({ percent: 0, label: 'Transcoding preview…' })

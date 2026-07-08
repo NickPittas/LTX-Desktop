@@ -358,9 +358,11 @@ class LTXIcLoraPipeline:
             with _swap_prompt_encoder_for_hdr(
                 self.pipeline, hdr_video_context, hdr_audio_context
             ):
-                return self.pipeline(**inference_kwargs)
+                with memory_trace.phase("ic_lora_denoise_decode"):
+                    return self.pipeline(**inference_kwargs)
         else:
-            return self.pipeline(**inference_kwargs)
+            with memory_trace.phase("ic_lora_denoise_decode"):
+                return self.pipeline(**inference_kwargs)
 
     @staticmethod
     def _is_hdr_video_only_path(
@@ -519,8 +521,11 @@ class LTXIcLoraPipeline:
         hdr_video_context: torch.Tensor | None = None,
         hdr_audio_context: torch.Tensor | None = None,
         output_postprocess: Callable[[torch.Tensor], torch.Tensor] | None = None,
+        on_phase_update: Callable[[str, str | None], None] | None = None,
     ) -> None:
         tiling_config = default_tiling_config()
+        if on_phase_update is not None:
+            on_phase_update("inference", "Sampling / VAE decode via upstream IC-LoRA pipeline")
         result = self._run_inference(
             prompt=prompt,
             seed=seed,
@@ -619,7 +624,9 @@ class LTXIcLoraPipeline:
         proxy_path: str | None = None,
         on_progress: Callable[[float], None] | None = None,
         input_colorspace: ColorSpace | None = None,
-    ) -> None:
+        on_phase_update: Callable[[str, str | None], None] | None = None,
+        save_stage_1_preview: bool = False,
+    ) -> str | None:
         """Official two-stage IC-LoRA inpaint pipeline.
 
         White mask = inpaint region, black mask = keep original.
@@ -649,6 +656,10 @@ class LTXIcLoraPipeline:
 
         logger = logging.getLogger(__name__)
 
+        def _phase(phase: str, detail: str | None = None) -> None:
+            if on_phase_update is not None:
+                on_phase_update(phase, detail)
+
         assert_resolution(height=height, width=width, is_two_stage=True)
 
         # Derive mask dilation radii from configurable mask_grow_px
@@ -670,6 +681,7 @@ class LTXIcLoraPipeline:
         generator = torch.Generator(device=device).manual_seed(seed + 1)
         noiser = GaussianNoiser(generator=generator)
 
+        _phase("encoding_text", "Encoding prompt locally")
         (ctx_p,) = self.pipeline.prompt_encoder(
             [prompt],
             enhance_first_prompt=False,
@@ -743,6 +755,7 @@ class LTXIcLoraPipeline:
         # Official: stage 1 green prep uses stage1 (r=15) mask at half res
         # ponytail: only half-res green used for guide conditioning; full-res
         # green was for official blend but we blend against original video at both stages.
+        _phase("vae_encode_conditioning", "Green composite + VAE conditioning encode")
         green_half = green_composite_preprocess(video_half[:, :, :num_frames_vae_padded], mask_stage1_half)
 
         # ────────────────────────────────────────────────────────────────────── #
@@ -802,6 +815,7 @@ class LTXIcLoraPipeline:
 
         stage1_sigmas = DISTILLED_SIGMAS.to(dtype=torch.float32, device=device)
 
+        _phase("sampling_stage_1", f"Stage 1 half-res {height // 2}x{width // 2}, {num_frames_vae_padded} frames")
         video_state_s1, audio_state_s1 = self.pipeline.stage_1(
             denoiser=SimpleDenoiser(video_context, audio_context),
             sigmas=stage1_sigmas,
@@ -824,6 +838,7 @@ class LTXIcLoraPipeline:
         # ------------------------------------------------------------------ #
         logger.info("[inpaint] Decoding stage 1 and blending")
         assert video_state_s1 is not None
+        _phase("vae_decode_tiled", "Stage 1 tiled VAE decode")
         decoded_s1_iter = self.pipeline.video_decoder(video_state_s1.latent, tiling_config, generator)
         decoded_s1_frames = self._collect_frames(decoded_s1_iter)
         # decoded_s1_frames: (F, H_half, W_half, 3) in [0, 1]
@@ -841,6 +856,7 @@ class LTXIcLoraPipeline:
         # ponytail: green remains guide conditioning; Laplacian blend preserves original
         # unmasked content and avoids green bleed. Not official parity.
         mask_s1_blend = mask_stage1_half[:decoded_s1_frames.shape[0]]
+        _phase("blend_stage_1", "Laplacian blend stage 1")
         blend_stage1 = laplacian_pyramid_blend(
             decoded_s1_frames,
             video_half_frames_01[:decoded_s1_frames.shape[0]],
@@ -849,6 +865,26 @@ class LTXIcLoraPipeline:
             mask_low_res_dilation=INPAINT_BLEND1_LOW_RES_DILATION,
             device=device,
         )  # (F, H_half, W_half, 3) in [0, 1]
+
+        # Optional stage 1 preview: encode a half-res MP4 for debugging.
+        stage_1_preview_path: str | None = None
+        if save_stage_1_preview:
+            from pathlib import Path
+
+            _preview_path = str(Path(output_path).parent / f"{Path(output_path).stem}_stage1_preview.mp4")
+            _s1_chunks = video_chunks_number(blend_stage1.shape[0], tiling_config)
+            encode_video_output(
+                video=blend_stage1.clamp(0, 1),
+                audio=None,
+                fps=int(frame_rate),
+                output_path=_preview_path,
+                video_chunks_number_value=_s1_chunks,
+                output_format=OutputFormat.MP4,
+                encoder=encoder,
+                total_frames=blend_stage1.shape[0],
+            )
+            stage_1_preview_path = _preview_path
+            logger.info("[inpaint] Saved stage 1 preview: %s", _preview_path)
 
         # ------------------------------------------------------------------ #
         # 8. Upscale 2× and VAE encode tiled for stage 2
@@ -870,6 +906,7 @@ class LTXIcLoraPipeline:
         blend_full_bcfhw = blend_full_bcfhw[:, :, :blend_vae_frames]
 
         # tiling_config from earlier declaration
+        _phase("vae_encode_blend", "Re-encoding stage 1 blend to VAE latent")
         encoded_blend = self.pipeline.image_conditioner(
             lambda enc: enc.tiled_encode(blend_full_bcfhw, tiling_config)
         )  # (1, 128, F', H'_full, W'_full)
@@ -922,6 +959,38 @@ class LTXIcLoraPipeline:
         generator_s2 = torch.Generator(device=device).manual_seed(seed)
         noiser_s2 = GaussianNoiser(generator=generator_s2)
 
+        # Large-workload context window for full-res stage 2. The HDR pipeline's
+        # DiffusionStage.__call__ patch (installed at hdr-module import) injects a
+        # rolling temporal context loop when the stage carries
+        # ``_ltx_desktop_context_loop``. Inpaint stage_2 passes frames/width/
+        # height/video kwargs, so stamping the config here makes the patch window
+        # the 1080p/201f stage-2 diffusion the same way HDR does, avoiding the
+        # full-frame OOM. Cleared for non-large runs so a cached stage can't keep
+        # context mode. Helper imported lazily (also ensures the patch is installed).
+        _inpaint_large = num_frames_vae_padded > 121 or (width * height) >= 1920 * 1080
+        if _inpaint_large:
+            from services.hdr_ic_lora_pipeline.ltx_hdr_ic_lora_pipeline import _build_context_config  # type: ignore[reportPrivateImportUsage]
+
+            try:
+                from services.local_memory_plan import detect_vram_gb
+
+                _vram = detect_vram_gb()
+            except Exception:  # noqa: BLE001
+                _vram = None
+            _ctx_window, _ctx_overlap = (
+                (49, 12) if (_vram is not None and _vram < 28) else (65, 16)
+            )
+            self.pipeline.stage_2._ltx_desktop_context_loop = (  # type: ignore[attr-defined]
+                _build_context_config(_ctx_window, _ctx_overlap, "pyramid")
+            )
+            logger.info(
+                "[inpaint] stage_2 context window %d/%d (vram_gib=%s, %dx%d, %d frames)",
+                _ctx_window, _ctx_overlap, _vram, width, height, num_frames_vae_padded,
+            )
+        else:
+            self.pipeline.stage_2._ltx_desktop_context_loop = None  # type: ignore[attr-defined]
+
+        _phase("sampling_stage_2", f"Stage 2 full-res {height}x{width}, {num_frames_vae_padded} frames")
         video_state_s2, audio_state_s2 = self.pipeline.stage_2(
             denoiser=SimpleDenoiser(video_context, audio_context),
             sigmas=stage2_sigmas_video,
@@ -953,41 +1022,10 @@ class LTXIcLoraPipeline:
         decoded_s2_iter = self.pipeline.video_decoder(video_state_s2.latent, tiling_config, generator_s2)
         decoded_s2_frames = self._collect_frames(decoded_s2_iter)
 
-        # Move full-res originals back to GPU for final blend
-        video_full = video_full.to(device=device, dtype=dtype)
-        mask_stage2_full = mask_stage2_full.to(device=device)
-        mask_full_gray = mask_full_gray.to(device=device)
-
-        # Original video as [0, 1] pixel frames for stage 2 blend
-        # video_full is (1, 3, F, H, W) in [-1,1] → (F, H, W, 3) in [0, 1]
-        video_full_frames = video_full[0].permute(1, 2, 3, 0)  # (F, H, W, 3) in [-1, 1]
-        video_full_frames_01 = (video_full_frames + 1.0) / 2.0  # → [0, 1]
-
-        # Final blend [5226]: image_a=stage2_decoded, image_b=original video.
-        # ponytail: green remains guide conditioning; Laplacian blend preserves original
-        # unmasked content and avoids green bleed. Not official parity.
-        mask_s2_blend = mask_stage2_full[:decoded_s2_frames.shape[0]]
-        blend_stage2 = laplacian_pyramid_blend(
-            decoded_s2_frames,
-            video_full_frames_01[:decoded_s2_frames.shape[0]],
-            mask_s2_blend,
-            max_level=7,
-            mask_low_res_dilation=laplacian_blend_grow,
-            device=device,
-        )
-
-        # Final raw-mask guard: clamp anything outside user mask back to original.
-        # Blurs the raw mask threshold to feather the final composite edge.
-        # ponytail: final guard uses raw user mask blurred for final feather;
-        # dilation remains for model context only.
-        # laplacian_blend_grow controls Laplacian pyramid dilation only;
-        # final_mask_blur_px separately controls the raw-mask edge feather.
-        blend_stage2 = self._apply_raw_mask_guard(
-            blend_stage2,
-            mask_full_gray[:blend_stage2.shape[0]],
-            video_full_frames_01[:blend_stage2.shape[0]],
-            blur_radius=final_mask_blur_px,
-        )
+        # Stage 2 output used directly — skip the second Laplacian blend and
+        # raw-mask guard per the requested inpaint change. Full-res decoded
+        # frames are the final output (cropped back below).
+        blend_stage2 = decoded_s2_frames
 
         # ------------------------------------------------------------------ #
         # 11. Encode output video with audio
@@ -1014,6 +1052,7 @@ class LTXIcLoraPipeline:
             total_frames=num_actual_frames,
         )
         logger.info("[inpaint] Done — %s", output_path)
+        return stage_1_preview_path
 
     def _encode_video_conditioning(
         self,

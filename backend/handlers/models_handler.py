@@ -89,19 +89,19 @@ _TYPED_ADAPTER_FIELD: dict[str, str] = {
 # No filesystem paths are hardcoded here.
 
 # Workflows eligible for live model selection. Phase 1: text-to-video and
-# image-to-video. HDR IC-LoRA joins in this slice (dedicated video/sequence
-# input workflow; uses the same base-video transformer candidates and
-# installed/profile-readiness gating). Generic ``ic-lora`` stays unsupported —
-# it has no live base-model selection path.
+# image-to-video. HDR IC-LoRA and generic IC-LoRA join in this slice (dedicated
+# video/sequence input + image-conditioned workflows; all use the same base-video
+# transformer candidates and installed/profile-readiness gating).
 _LIVE_MODEL_SELECTION_SUPPORTED_WORKFLOWS: frozenset[ModelSelectionWorkflow] = frozenset[ModelSelectionWorkflow]({
     "text-to-video",
     "image-to-video",
     "hdr-ic-lora",
+    "ic-lora",
 })
 
 _LIVE_MODEL_SELECTION_UNSUPPORTED_REASON: str = (
     "Live model selection is currently available for text-to-video, "
-    "image-to-video, and HDR IC-LoRA only"
+    "image-to-video, HDR IC-LoRA, and IC-LoRA only"
 )
 
 _LIVE_MODEL_SELECTION_NOT_INSTALLED_REASON: str = "Model checkpoint is not installed"

@@ -787,6 +787,12 @@ class KijaiFp8ScaledLinear(torch.nn.Linear):
         # would dequant + promote LoRA-touched layers to BF16 resident tensors.
         # Pairs are attached CPU-side post-build (see _patch_kijai_lora_build);
         # mirrors GgufLinear.forward.
+        #
+        # Benchmark-only ablation: LTX_ABLATE_LORA_PAIRS=1 skips the runtime LoRA
+        # path to measure its per-forward cost. Default (unset) = normal
+        # behavior. Produces incorrect output when set — timing use only.
+        if os.environ.get("LTX_ABLATE_LORA_PAIRS") == "1":
+            return result
         compute_dtype = input.dtype if input.is_floating_point() else torch.float32
         for lora_A, lora_B, strength in getattr(self, "lora_pairs", ()):
             a = lora_A.to(device=input.device, dtype=compute_dtype)
@@ -1316,11 +1322,12 @@ def _install_gemma_encode_patch() -> None:
         text: str | list[str] | tuple[str, ...],
         padding_side: str = "left",  # noqa: ARG001
     ) -> list[tuple[tuple[torch.Tensor, ...], torch.Tensor]]:
-        # ponytail: upstream PromptEncoder.__call__ passes a list (e.g. [prompt]);
-        # this patch builds a single batch row, so collapse to the first prompt.
-        if isinstance(text, (list, tuple)):
-            text = text[0] if text else ""
-        token_pairs = self.tokenizer.tokenize_with_weights(text)["gemma"]
+        # Upstream PromptEncoder.__call__ iterates encode() and unpacks each
+        # element as (hidden_states, mask). Return one (hs, mask) pair PER input
+        # prompt so TI2VidTwoStages positive/negative prompts both encode
+        # (previously this collapsed a list/tuple to its first prompt). A single
+        # string still yields exactly one entry — unchanged behavior.
+        prompts: list[str] = [text] if isinstance(text, str) else list(text)
         language_model = self.model.model.language_model
         device = language_model.embed_tokens.weight.device
         if device.type == "meta":
@@ -1331,15 +1338,15 @@ def _install_gemma_encode_patch() -> None:
         if device.type == "cpu" and torch.cuda.is_available():
             device = torch.device("cuda")
             language_model.to(device)  # ponytail: builder short-circuits on unused meta vision params, only language_model moves
-        input_ids = torch.tensor([[t[0] for t in token_pairs]], device=device)
-        attention_mask = torch.tensor([[w[1] for w in token_pairs]], device=device)
-        outputs = self.model.model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
-        hidden_states = outputs.hidden_states
-        del outputs
-        # Upstream PromptEncoder.__call__ iterates the encode() result and
-        # unpacks each element as (hidden_states, mask): ``[proc.process_hidden_states(hs, mask) for hs, mask in raw_outputs]``.
-        # Return a list of one (hs, mask) pair for the single collapsed prompt.
-        return [(hidden_states, attention_mask)]
+        results: list[tuple[tuple[torch.Tensor, ...], torch.Tensor]] = []
+        for prompt_text in prompts:
+            token_pairs = self.tokenizer.tokenize_with_weights(prompt_text)["gemma"]
+            input_ids = torch.tensor([[t[0] for t in token_pairs]], device=device)
+            attention_mask = torch.tensor([[w[1] for w in token_pairs]], device=device)
+            outputs = self.model.model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
+            results.append((outputs.hidden_states, attention_mask))
+            del outputs
+        return results
 
     patched_encode._ltx_desktop_gguf_patch = True  # type: ignore[attr-defined]
     GemmaTextEncoder.encode = patched_encode  # type: ignore[method-assign]
@@ -1697,12 +1704,28 @@ def install_gguf_loader(pipeline: object) -> None:
         # Preserve any existing module ops, dropping a stale GGUF op (no duplicates).
         module_ops = tuple(op for op in builder.module_ops if op.name != GGUF_DEQUANT_LINEAR_OP.name)
         module_ops = (*module_ops, GGUF_DEQUANT_LINEAR_OP)
-        # keep_raw_on_cpu=True: GGUF transformer is full-load only (no streaming),
-        # so keep the quantized raw bytes off the active device to cap peak VRAM;
-        # dequant stays per-forward inside GgufLinear.
+        # Raw quantized weights are large. On small VRAM keep them CPU-resident
+        # (dequant copies CPU→GPU per forward) to cap peak; on >=28 GiB effective
+        # tier keep them on the active device so dequant skips that copy each
+        # forward. Uses effective/free-aware tier (not total) so a GPU loaded with
+        # other models won't keep GGUF raw on GPU if free VRAM is low.
+        # The legacy LTX_GGUF_KEEP_RAW_ON_CPU=1 still forces CPU (honored inside
+        # load()); LTX_GGUF_KEEP_RAW_ON_GPU=1 is a debug override forcing GPU.
+        from services.local_memory_plan import snapshot_vram
+
+        snap = snapshot_vram()
+        _effective = snap.effective_tier_gib
+        if os.environ.get("LTX_GGUF_KEEP_RAW_ON_GPU") == "1" or (_effective is not None and _effective >= 28):
+            keep_raw_on_cpu = False
+        else:
+            keep_raw_on_cpu = True
+        logger.info(
+            "[GGUF] raw quantized weights keep_raw_on_cpu=%s (total=%s free=%s effective=%s tier=%s)",
+            keep_raw_on_cpu, snap.total_gib, snap.free_gib, snap.effective_gib, snap.effective_tier_gib,
+        )
         replaced = _replace_builder(
             builder,
-            model_loader=GgufStateDictLoader(allow_safetensors_only=True, keep_raw_on_cpu=True),
+            model_loader=GgufStateDictLoader(allow_safetensors_only=True, keep_raw_on_cpu=keep_raw_on_cpu),
             model_sd_ops=GgufNativeSDOps(),
             module_ops=module_ops,
         )

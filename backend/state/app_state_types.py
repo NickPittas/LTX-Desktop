@@ -201,6 +201,9 @@ class GenerationProgress:
     phase_started_at: float | None = None
     # Latest resource telemetry snapshot (updated by background sampler).
     metrics: GenerationMetrics | None = None
+    # Detailed phase label + workload/optimization mode summary (Phase metrics).
+    phase_detail: str | None = None
+    workload_mode: str | None = None
 
 
 @dataclass
