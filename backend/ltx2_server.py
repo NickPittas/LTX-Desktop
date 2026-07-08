@@ -155,21 +155,6 @@ if use_sage_attention:
         use_sage_attention = False
 
 # ============================================================
-# TF32 / matmul precision (benchmark-gated)
-# ============================================================
-# Free Ampere+ speedup on fp32 reduction paths (VAE, RoPE, norms). Off by
-# default to preserve exact current numerics; LTX_ENABLE_TF32=1 turns it on for
-# benchmarking. Never raises.
-if os.environ.get("LTX_ENABLE_TF32") == "1":
-    try:
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-        torch.set_float32_matmul_precision("high")
-        logger.info("TF32 enabled (LTX_ENABLE_TF32=1)")
-    except Exception:
-        logger.warning("Failed to enable TF32", exc_info=True)
-
-# ============================================================
 # Constants & Paths
 # ============================================================
 
