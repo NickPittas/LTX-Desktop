@@ -44,10 +44,10 @@ _SAFE_TENSORS_FIELDS = (
     "ic_lora_hdr_scene_embeddings",
     "ic_lora_lipdub",
     "ic_lora_in_outpainting",
-    "depth_processor",
-    "pose_processor",
-    "person_detector",
 )
+# Path-only fields (existence-checked, no extension requirement). The depth
+# processor is a HF model FOLDER; the person/pose models are TorchScript
+# ``.torchscript.pt`` files — none of these are ``.safetensors``.
 _PATH_FIELDS = (
     "transformer",
     "upsampler",
@@ -57,6 +57,9 @@ _PATH_FIELDS = (
     "video_vae",
     "audio_vae",
     "vocoder",
+    "depth_processor",
+    "pose_processor",
+    "person_detector",
     *_SAFE_TENSORS_FIELDS[6:],
 )
 
@@ -431,7 +434,11 @@ class ModelProfilesHandler(StateHandlerBase):
         elif text_encoder_format == "safetensors":
             self._add_ext_issue(issues, "components.text_encoder_root", path_str, ".safetensors")
         elif text_encoder_format == "gguf":
-            self._add_ext_issue(issues, "components.text_encoder_root", path_str, ".gguf")
+            # A GGUF text encoder may be a single ``.gguf`` file OR a folder
+            # containing ``gemma-*.gguf`` (+ tokenizer/processor files) — the
+            # loader accepts either. Only reject a non-.gguf regular file.
+            if not Path(path_str).is_dir():
+                self._add_ext_issue(issues, "components.text_encoder_root", path_str, ".gguf")
 
     def _add_missing_path_issue(
         self,
