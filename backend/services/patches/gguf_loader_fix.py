@@ -388,7 +388,12 @@ def _install_llama_cpp_enhance_patch() -> None:
                 "GGUF prompt enhancement requires llama-cpp-python built with CUDA support"
             ) from exc
         if callable(llama_supports_gpu_offload) and not llama_supports_gpu_offload():
-            raise RuntimeError("llama-cpp-python was installed without GPU offload support")
+            logger.warning(
+                "llama-cpp-python has no GPU offload support (CPU-only build); "
+                "running GGUF prompt enhancement on CPU, which is slow. Reinstall "
+                "llama-cpp-python built with CUDA for GPU-accelerated enhancement "
+                "(or disable prompt enhancement)."
+            )
 
         llm: Any | None = None
         try:
@@ -606,7 +611,12 @@ def _enhance_prompt_with_llama_cpp(
             "GGUF prompt enhancement requires llama-cpp-python built with CUDA support"
         ) from exc
     if callable(llama_supports_gpu_offload) and not llama_supports_gpu_offload():
-        raise RuntimeError("llama-cpp-python was installed without GPU offload support")
+        logger.warning(
+            "llama-cpp-python has no GPU offload support (CPU-only build); running "
+            "GGUF prompt enhancement on CPU, which is slow. Reinstall "
+            "llama-cpp-python built with CUDA for GPU-accelerated enhancement "
+            "(or disable prompt enhancement)."
+        )
 
     system_prompt = _load_gemma_t2v_system_prompt()
 
