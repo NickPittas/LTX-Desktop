@@ -12,14 +12,10 @@ All filesystem paths are validated to be under the effective ``models_dir``.
 
 from __future__ import annotations
 
-import ctypes
-import ctypes.util
-import errno
 import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from api_types import ModelCheckpointID, ModelLibraryArtifact
 from runtime_config.model_download_specs import resolve_downloading_dir
@@ -146,65 +142,6 @@ def acquire_download_lock(models_dir: Path, cp_id: ModelCheckpointID) -> Downloa
 # ============================================================
 
 
-# Linux renameat2 flag: atomically rename only if the destination does not
-# already exist (never clobber). See renameat2(2).
-_RENAME_NOREPLACE = 0x1
-# "Relative to current working directory" dirfd — lets us pass paths directly.
-_AT_FDCWD = -100
-
-
-def _resolve_renameat2() -> Any:
-    """Resolve libc ``renameat2`` (glibc >= 2.28), or ``None`` if unavailable.
-
-    Returns the configured ctypes callable, or ``None`` when libc or the
-    symbol cannot be found (e.g. non-Linux / old glibc). Callers must fail
-    safe in that case — never fall back to an overwriting rename.
-    """
-    libc_name = ctypes.util.find_library("c")
-    if libc_name is None:
-        return None
-    try:
-        libc = ctypes.CDLL(libc_name, use_errno=True)
-    except OSError:
-        return None
-    func = getattr(libc, "renameat2", None)
-    if func is None:
-        return None
-    func.argtypes = (
-        ctypes.c_int, ctypes.c_char_p,
-        ctypes.c_int, ctypes.c_char_p,
-        ctypes.c_uint,
-    )
-    func.restype = ctypes.c_int
-    return func
-
-
-def _atomic_noreplace_rename(src: Path, dst: Path) -> None:
-    """Atomically rename *src* -> *dst*, refusing to replace an existing *dst*.
-
-    Backed by Linux ``renameat2(RENAME_NOREPLACE)``: a single atomic syscall
-    that fails (``EEXIST``) if *dst* exists — including a *dst* that appears
-    concurrently between a prior existence check and this call. This closes
-    the check-then-rename race where plain ``rename()`` would silently replace
-    an empty destination directory.
-
-    Raises ``OSError(EEXIST)`` when *dst* exists, other ``OSError`` subtypes
-    for genuine failures, and ``OSError(ENOSYS)`` if ``renameat2`` is not
-    available. **Never falls back to an overwriting rename.**
-    """
-    func = _resolve_renameat2()
-    if func is None:
-        raise OSError(errno.ENOSYS, "renameat2 unavailable; refusing to clobber")
-    result: int = func(
-        _AT_FDCWD, os.fsencode(str(src)),
-        _AT_FDCWD, os.fsencode(str(dst)),
-        _RENAME_NOREPLACE,
-    )
-    if result != 0:
-        err = ctypes.get_errno()
-        raise OSError(err, os.strerror(err), str(src))
-
-
 def _discard_src(src: Path) -> None:
     """Best-effort removal of *src* (file, directory, or symlink).
 
@@ -220,6 +157,49 @@ def _discard_src(src: Path) -> None:
         pass
     except OSError:
         pass
+
+
+def _merge_dir_noclobber(src: Path, dst: Path) -> bool:
+    """Merge staging dir *src* into final dir *dst*, never overwriting an
+    existing file.
+
+    Used for folder CPs instead of an atomic whole-directory rename because:
+
+    - ``renameat2(RENAME_NOREPLACE)`` fails with ``EINVAL`` on filesystems that
+      don't support the flag (NTFS/exFAT/some network mounts — common for large
+      model drives), which broke every folder download there.
+    - Multi-source folder CPs (e.g. the Gemma GGUF model file + its tokenizer
+      files from a second repo) and a sibling file CP that lives inside the same
+      folder (the gemma ``mmproj-BF16.gguf``) must COEXIST — a whole-folder
+      rename cannot merge into an already-populated ``dst``.
+
+    Per file: place it under *dst* only when nothing is there yet (per-file
+    no-clobber). Works on any filesystem (plain rename / move, no special
+    flags). Returns True if at least one file was placed.
+    """
+    placed = False
+    if os.path.lexists(dst) and not dst.is_dir():
+        # dst exists but is not a real directory (a file, or a broken symlink) —
+        # merging files "into" it is ambiguous, so skip (no-clobber) and discard
+        # the staged copy rather than risk clobbering it.
+        _discard_src(src)
+        return False
+    for root_dir, _dirs, files in os.walk(src):
+        rel_root = Path(root_dir).relative_to(src)
+        target_root = dst / rel_root
+        target_root.mkdir(parents=True, exist_ok=True)
+        for name in files:
+            src_file = Path(root_dir) / name
+            dst_file = target_root / name
+            if os.path.lexists(dst_file):
+                continue  # no-clobber: keep whatever is already there
+            try:
+                os.replace(src_file, dst_file)  # same-fs move, no rename flags
+            except OSError:
+                shutil.move(str(src_file), str(dst_file))  # cross-fs fallback
+            placed = True
+    _discard_src(src)
+    return placed
 
 
 def safe_atomic_promote(src: Path, dst: Path, root: Path) -> bool:
@@ -251,35 +231,30 @@ def safe_atomic_promote(src: Path, dst: Path, root: Path) -> bool:
 
     dst.parent.mkdir(parents=True, exist_ok=True)
 
-    # Fast path: lexists() detects files, dirs, AND broken symlinks (exists()
-    # follows the link and returns False for broken symlinks). The atomic
-    # syscalls below still guard against a dst appearing concurrently.
+    if src.is_dir():
+        # Folder CP: per-file no-clobber merge. Works on filesystems without
+        # renameat2(RENAME_NOREPLACE) (NTFS/exFAT/network) and lets multi-source
+        # folder CPs + a sibling file CP inside the folder coexist.
+        return _merge_dir_noclobber(src, dst)
+
+    # Regular file: no-clobber, then place it. Prefer a hard-link (atomic,
+    # never overwrites); the lexists() check preserves no-clobber intent and
+    # also covers broken symlinks (which exists() would miss).
     if os.path.lexists(dst):
         _discard_src(src)
         return False
-
-    if src.is_dir():
-        try:
-            _atomic_noreplace_rename(src, dst)
-        except OSError as exc:
-            # EEXIST (incl. concurrent empty-dir race) → no-clobber skip.
-            # ENOTEMPTY is included defensively in case a kernel/filesystem
-            # surfaces a non-empty dst that way. Any other OSError (e.g.
-            # ENOSYS when renameat2 is missing) is a genuine failure and
-            # propagates rather than risking a clobber.
-            if exc.errno in (errno.EEXIST, errno.ENOTEMPTY):
-                _discard_src(src)
-                return False
-            raise
-        return True
-
-    # Regular file: hard-link (atomic no-overwrite) then unlink the source.
     try:
         os.link(src, dst)
+        src.unlink()
     except FileExistsError:
         _discard_src(src)
         return False
-    src.unlink()
+    except OSError:
+        # No hard-link support (e.g. exFAT) or cross-device link: move instead.
+        try:
+            os.replace(src, dst)
+        except OSError:
+            shutil.move(str(src), str(dst))
     return True
 
 

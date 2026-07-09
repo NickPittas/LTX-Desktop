@@ -349,61 +349,40 @@ class TestSafeAtomicPromote:
         assert dst.is_symlink()
         assert not src.exists()
 
-    def test_directory_promote_race_does_not_clobber_empty_dst(self, tmp_path, monkeypatch):
-        """If an empty dst directory appears between the lexists check and the
-        atomic rename, it must NOT be replaced/clobbered. Plain rename() would
-        silently replace an empty destination directory on POSIX; only
-        renameat2(RENAME_NOREPLACE) closes this race atomically."""
-        from services.model_downloader import download_transaction as mod
-
+    def test_directory_promote_merges_into_existing_dst(self, tmp_path):
+        """A folder CP merges its files into an existing dst folder (per-file,
+        no-clobber) instead of being discarded — required so a multi-source
+        folder CP and a sibling file CP already inside the folder (e.g. the
+        gemma GGUF model + tokenizer files alongside the mmproj) can coexist."""
         root = tmp_path / "models"
         root.mkdir()
         src = root / "staging_dir"
         dst = root / "final_dir"
         src.mkdir()
-        (src / "model.safetensors").write_bytes(b"new")
-        # dst intentionally absent so the lexists fast-path passes.
+        (src / "model.gguf").write_bytes(b"new")
+        dst.mkdir()
+        (dst / "sibling.gguf").write_bytes(b"keep")  # pre-existing sibling file
 
-        real_rename = mod._atomic_noreplace_rename
-
-        def racing_rename(src_p: Path, dst_p: Path) -> None:
-            # Simulate a concurrent creator making dst (empty dir) immediately
-            # before the no-replace syscall runs.
-            os.mkdir(dst_p)
-            return real_rename(src_p, dst_p)
-
-        monkeypatch.setattr(mod, "_atomic_noreplace_rename", racing_rename)
-
-        assert safe_atomic_promote(src, dst, root) is False
-        # The raced dst survives — renameat2(NOREPLACE) refused to replace it.
-        assert dst.is_dir()
-        assert dst.exists()
-        # src was discarded (treated as a skipped promote).
+        assert safe_atomic_promote(src, dst, root) is True
+        assert (dst / "model.gguf").read_bytes() == b"new"     # merged in
+        assert (dst / "sibling.gguf").read_bytes() == b"keep"  # preserved
         assert not src.exists()
 
-    def test_atomic_noreplace_rename_rejects_existing_dst(self, tmp_path):
-        """The no-replace syscall helper raises OSError(EEXIST) for an existing
-        dst instead of clobbering it."""
-        import errno as _errno
-
-        from services.model_downloader import download_transaction as mod
-
+    def test_directory_merge_is_per_file_no_clobber(self, tmp_path):
+        """Merging never overwrites a file already present in dst."""
         root = tmp_path / "models"
         root.mkdir()
         src = root / "staging_dir"
         dst = root / "final_dir"
         src.mkdir()
-        (src / "model.safetensors").write_bytes(b"new")
-        dst.mkdir()  # empty existing dst
-        sentinel = dst / "preexisting.txt"
-        sentinel.write_bytes(b"keep-me")
+        (src / "shared.txt").write_bytes(b"new")
+        dst.mkdir()
+        (dst / "shared.txt").write_bytes(b"keep-me")  # collides
 
-        with pytest.raises(OSError) as exc:
-            mod._atomic_noreplace_rename(src, dst)
-        assert exc.value.errno == _errno.EEXIST
-        # dst untouched (not clobbered), src NOT moved.
-        assert sentinel.read_bytes() == b"keep-me"
-        assert src.is_dir()
+        # Nothing new to place → skipped; the existing file is untouched.
+        assert safe_atomic_promote(src, dst, root) is False
+        assert (dst / "shared.txt").read_bytes() == b"keep-me"
+        assert not src.exists()
 
 
 # ============================================================
