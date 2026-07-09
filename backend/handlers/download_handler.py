@@ -362,20 +362,45 @@ class DownloadHandler(StateHandlerBase):
         resolve_downloading_dir(models_dir).mkdir(parents=True, exist_ok=True)
 
         if spec.is_folder:
-            self._model_downloader.download_snapshot(
-                repo_id=spec.repo_id,
-                local_dir=str(resolve_downloading_path(models_dir, cp_id)),
-                on_progress=progress_cb,
-                token=hf_token,
-            )
+            folder_dir = str(resolve_downloading_path(models_dir, cp_id))
+            if spec.folder_sources:
+                # Multi-source assembly (e.g. Gemma GGUF: gguf from one repo +
+                # tokenizer/processor files from another) into one folder.
+                for source in spec.folder_sources:
+                    self._model_downloader.download_snapshot(
+                        repo_id=source.repo_id,
+                        local_dir=folder_dir,
+                        on_progress=progress_cb,
+                        token=hf_token,
+                        allow_patterns=source.allow_patterns,
+                    )
+            else:
+                self._model_downloader.download_snapshot(
+                    repo_id=spec.repo_id,
+                    local_dir=folder_dir,
+                    on_progress=progress_cb,
+                    token=hf_token,
+                )
         else:
-            self._model_downloader.download_file(
+            downloaded = self._model_downloader.download_file(
                 repo_id=spec.repo_id,
                 filename=spec.remote_name,
                 local_dir=str(resolve_downloading_path(models_dir, cp_id)),
                 on_progress=progress_cb,
                 token=hf_token,
             )
+            # hf_hub_download preserves the repo path structure under local_dir,
+            # so a file living in a repo SUBDIRECTORY (e.g. QuantStack
+            # "LTX-2.3-distilled-1.1/...", Kijai "vae/..."/"diffusion_models/...")
+            # lands at local_dir/<remote subpath>, not the canonical staging
+            # target. Relocate it so the commit (which promotes
+            # resolve_downloading_target_path) finds it. Root-of-repo files
+            # (remote basename == local basename) already land on target and
+            # skip the move.
+            target = resolve_downloading_target_path(models_dir, cp_id)
+            if downloaded.resolve() != target.resolve():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(downloaded), str(target))
 
     def _commit_staged_checkpoint(self, cp_id: ModelCheckpointID, models_dir: Path | None = None) -> bool:
         root = models_dir if models_dir is not None else self.models_dir

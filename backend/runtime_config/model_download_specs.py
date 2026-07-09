@@ -78,6 +78,13 @@ def pipeline_family_for_cp(cp_id: ModelCheckpointID) -> LTXVideoGenPipelineFamil
 
 
 @dataclass(frozen=True, slots=True)
+class FolderSource:
+    """One repo + file-filter contributing files to a multi-source folder CP."""
+    repo_id: str
+    allow_patterns: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ModelCheckpointSpec:
     relative_path: Path
     expected_size_bytes: int
@@ -95,6 +102,9 @@ class ModelCheckpointSpec:
     # Remote filename when it differs from the local basename (``relative_path.name``).
     # ``None`` ⇒ downloader uses ``relative_path.name`` as the HF filename.
     remote_filename: str | None = None
+    # Multi-source folder assembly: when non-empty (folder CP only), each source
+    # is snapshot-downloaded with its allow_patterns into the same folder.
+    folder_sources: tuple[FolderSource, ...] = ()
 
     @property
     def name(self) -> str:
@@ -184,7 +194,7 @@ OFFICIAL_LTX23_ADAPTERS: dict[AdapterID, AdapterComponent] = {
         source="official",
         repo_id="Lightricks/LTX-2.3",
         filename="ltx-2.3-22b-distilled-lora-384.safetensors",
-        expected_size_bytes=7_080_000_000,
+        expected_size_bytes=7_605_507_256,
         optional_for=("fast",),
     ),
     "distilled_lora_384_1_1": AdapterComponent(
@@ -194,7 +204,7 @@ OFFICIAL_LTX23_ADAPTERS: dict[AdapterID, AdapterComponent] = {
         source="official",
         repo_id="Lightricks/LTX-2.3",
         filename="ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
-        expected_size_bytes=7_080_000_000,
+        expected_size_bytes=7_605_507_256,
         optional_for=("fast",),
     ),
     "union_control": AdapterComponent(
@@ -509,6 +519,7 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
                 is_folder=True,
                 repo_id="Lightricks/gemma-3-12b-it-qat-q4_0-unquantized",
                 description="Gemma text encoder (bfloat16)",
+                section="text_encoder",
                 display_name="Gemma 3 12B IT QAT text encoder (unquantized, BF16)",
             )
         case "z-image-turbo":
@@ -588,10 +599,202 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
                 is_folder=False,
                 repo_id="unsloth/gemma-3-12b-it-qat-GGUF",
                 description="Gemma 3 mmproj BF16 multimodal projection",
-                section="gguf",
+                section="text_encoder",
                 display_name="Gemma 3 mmproj BF16",
                 variant_group="gemma-3-gguf",
                 downloadable=True,
+            )
+        case "ltx-2.3-22b-distilled-fp8-kijai-v3":
+            return ModelCheckpointSpec(
+                relative_path=Path("diffusion_models/ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v3.safetensors"),
+                expected_size_bytes=25_016_398_672,
+                is_folder=False,
+                repo_id="Kijai/LTX2.3_comfy",
+                description="LTX-2.3 22B distilled FP8 input-scaled v3 (Kijai)",
+                section="kijai",
+                display_name="LTX-2.3 22B distilled FP8 (Kijai v3)",
+                variant_group="ltx-2.3-distilled-fp8",
+                remote_filename="diffusion_models/ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v3.safetensors",
+            )
+        case "ltx-2.3-22b-distilled-gguf-quantstack-q2-k":
+            return ModelCheckpointSpec(
+                relative_path=Path("gguf/QuantStack/LTX-2.3-GGUF/LTX-2.3-distilled-1.1/LTX-2.3-22B-distilled-1.1-Q2_K.gguf"),
+                expected_size_bytes=12_408_656_544,
+                is_folder=False,
+                repo_id="QuantStack/LTX-2.3-GGUF",
+                description="LTX-2.3 22B distilled 1.1 GGUF — Q2_K (QuantStack)",
+                section="gguf",
+                display_name="LTX-2.3 22B distilled 1.1 GGUF — Q2_K (QuantStack)",
+                variant_group="ltx-2.3-distilled-gguf",
+                remote_filename="LTX-2.3-distilled-1.1/LTX-2.3-22B-distilled-1.1-Q2_K.gguf",
+            )
+        case "ltx-2.3-22b-distilled-gguf-quantstack-q3-k-s":
+            return ModelCheckpointSpec(
+                relative_path=Path("gguf/QuantStack/LTX-2.3-GGUF/LTX-2.3-distilled-1.1/LTX-2.3-22B-distilled-1.1-Q3_K_S.gguf"),
+                expected_size_bytes=13_959_437_984,
+                is_folder=False,
+                repo_id="QuantStack/LTX-2.3-GGUF",
+                description="LTX-2.3 22B distilled 1.1 GGUF — Q3_K_S (QuantStack)",
+                section="gguf",
+                display_name="LTX-2.3 22B distilled 1.1 GGUF — Q3_K_S (QuantStack)",
+                variant_group="ltx-2.3-distilled-gguf",
+                remote_filename="LTX-2.3-distilled-1.1/LTX-2.3-22B-distilled-1.1-Q3_K_S.gguf",
+            )
+        case "ltx-2.3-22b-distilled-gguf-quantstack-q3-k-m":
+            return ModelCheckpointSpec(
+                relative_path=Path("gguf/QuantStack/LTX-2.3-GGUF/LTX-2.3-distilled-1.1/LTX-2.3-22B-distilled-1.1-Q3_K_M.gguf"),
+                expected_size_bytes=14_702_550_688,
+                is_folder=False,
+                repo_id="QuantStack/LTX-2.3-GGUF",
+                description="LTX-2.3 22B distilled 1.1 GGUF — Q3_K_M (QuantStack)",
+                section="gguf",
+                display_name="LTX-2.3 22B distilled 1.1 GGUF — Q3_K_M (QuantStack)",
+                variant_group="ltx-2.3-distilled-gguf",
+                remote_filename="LTX-2.3-distilled-1.1/LTX-2.3-22B-distilled-1.1-Q3_K_M.gguf",
+            )
+        case "ltx-2.3-22b-distilled-gguf-quantstack-q4-k-s":
+            return ModelCheckpointSpec(
+                relative_path=Path("gguf/QuantStack/LTX-2.3-GGUF/LTX-2.3-distilled-1.1/LTX-2.3-22B-distilled-1.1-Q4_K_S.gguf"),
+                expected_size_bytes=16_706_378_400,
+                is_folder=False,
+                repo_id="QuantStack/LTX-2.3-GGUF",
+                description="LTX-2.3 22B distilled 1.1 GGUF — Q4_K_S (QuantStack)",
+                section="gguf",
+                display_name="LTX-2.3 22B distilled 1.1 GGUF — Q4_K_S (QuantStack)",
+                variant_group="ltx-2.3-distilled-gguf",
+                remote_filename="LTX-2.3-distilled-1.1/LTX-2.3-22B-distilled-1.1-Q4_K_S.gguf",
+            )
+        case "ltx-2.3-22b-distilled-gguf-quantstack-q4-k-m":
+            return ModelCheckpointSpec(
+                relative_path=Path("gguf/QuantStack/LTX-2.3-GGUF/LTX-2.3-distilled-1.1/LTX-2.3-22B-distilled-1.1-Q4_K_M.gguf"),
+                expected_size_bytes=17_763_015_328,
+                is_folder=False,
+                repo_id="QuantStack/LTX-2.3-GGUF",
+                description="LTX-2.3 22B distilled 1.1 GGUF — Q4_K_M (QuantStack)",
+                section="gguf",
+                display_name="LTX-2.3 22B distilled 1.1 GGUF — Q4_K_M (QuantStack)",
+                variant_group="ltx-2.3-distilled-gguf",
+                remote_filename="LTX-2.3-distilled-1.1/LTX-2.3-22B-distilled-1.1-Q4_K_M.gguf",
+            )
+        case "ltx-2.3-22b-distilled-gguf-quantstack-q5-k-s":
+            return ModelCheckpointSpec(
+                relative_path=Path("gguf/QuantStack/LTX-2.3-GGUF/LTX-2.3-distilled-1.1/LTX-2.3-22B-distilled-1.1-Q5_K_S.gguf"),
+                expected_size_bytes=18_542_680_736,
+                is_folder=False,
+                repo_id="QuantStack/LTX-2.3-GGUF",
+                description="LTX-2.3 22B distilled 1.1 GGUF — Q5_K_S (QuantStack)",
+                section="gguf",
+                display_name="LTX-2.3 22B distilled 1.1 GGUF — Q5_K_S (QuantStack)",
+                variant_group="ltx-2.3-distilled-gguf",
+                remote_filename="LTX-2.3-distilled-1.1/LTX-2.3-22B-distilled-1.1-Q5_K_S.gguf",
+            )
+        case "ltx-2.3-22b-distilled-gguf-quantstack-q5-k-m":
+            return ModelCheckpointSpec(
+                relative_path=Path("gguf/QuantStack/LTX-2.3-GGUF/LTX-2.3-distilled-1.1/LTX-2.3-22B-distilled-1.1-Q5_K_M.gguf"),
+                expected_size_bytes=19_388_448_416,
+                is_folder=False,
+                repo_id="QuantStack/LTX-2.3-GGUF",
+                description="LTX-2.3 22B distilled 1.1 GGUF — Q5_K_M (QuantStack)",
+                section="gguf",
+                display_name="LTX-2.3 22B distilled 1.1 GGUF — Q5_K_M (QuantStack)",
+                variant_group="ltx-2.3-distilled-gguf",
+                remote_filename="LTX-2.3-distilled-1.1/LTX-2.3-22B-distilled-1.1-Q5_K_M.gguf",
+            )
+        case "ltx-2.3-22b-dev":
+            return ModelCheckpointSpec(
+                relative_path=Path("diffusion_models/ltx-2.3-22b-dev.safetensors"),
+                expected_size_bytes=46_149_344_974,
+                is_folder=False,
+                repo_id="Lightricks/LTX-2.3",
+                description="LTX-2.3 22B dev (full precision)",
+                section="full",
+                display_name="LTX-2.3 22B dev (full precision)",
+                variant_group="ltx-2.3-dev",
+            )
+        case "ltx-2.3-video-vae-bf16":
+            return ModelCheckpointSpec(
+                relative_path=Path("vae/LTX23_video_vae_bf16.safetensors"),
+                expected_size_bytes=1_452_258_578,
+                is_folder=False,
+                repo_id="Kijai/LTX2.3_comfy",
+                description="LTX-2.3 video VAE (BF16)",
+                section="kijai",
+                display_name="LTX-2.3 video VAE (BF16)",
+                remote_filename="vae/LTX23_video_vae_bf16.safetensors",
+            )
+        case "ltx-2.3-text-projection-bf16":
+            return ModelCheckpointSpec(
+                relative_path=Path("text_encoders/ltx-2.3_text_projection_bf16.safetensors"),
+                expected_size_bytes=2_312_149_072,
+                is_folder=False,
+                repo_id="Kijai/LTX2.3_comfy",
+                description="LTX-2.3 text projection (BF16)",
+                section="kijai",
+                display_name="LTX-2.3 text projection (BF16)",
+                remote_filename="text_encoders/ltx-2.3_text_projection_bf16.safetensors",
+            )
+        case "ltx-2.3-22b-distilled-lora-384":
+            return ModelCheckpointSpec(
+                relative_path=Path("adapters/ltx-2.3-22b-distilled-lora-384.safetensors"),
+                expected_size_bytes=7_605_507_256,
+                is_folder=False,
+                repo_id="Lightricks/LTX-2.3",
+                description="LTX-2.3 22B distilled LoRA 384",
+                section="addons",
+                display_name="Distilled LoRA 384",
+            )
+        case "ltx-2.3-22b-distilled-lora-384-1.1":
+            return ModelCheckpointSpec(
+                relative_path=Path("adapters/ltx-2.3-22b-distilled-lora-384-1.1.safetensors"),
+                expected_size_bytes=7_605_507_256,
+                is_folder=False,
+                repo_id="Lightricks/LTX-2.3",
+                description="LTX-2.3 22B distilled LoRA 384 v1.1",
+                section="addons",
+                display_name="Distilled LoRA 384 v1.1",
+            )
+        case "ltx-2.3-audio-vae-bf16":
+            return ModelCheckpointSpec(
+                relative_path=Path("vae/LTX23_audio_vae_bf16.safetensors"),
+                expected_size_bytes=364_855_188,
+                is_folder=False,
+                repo_id="Kijai/LTX2.3_comfy",
+                description="LTX-2.3 audio VAE (BF16)",
+                section="kijai",
+                display_name="LTX-2.3 audio VAE (BF16)",
+                remote_filename="vae/LTX23_audio_vae_bf16.safetensors",
+            )
+        case "gemma-3-12b-it-qat-gguf":
+            return ModelCheckpointSpec(
+                relative_path=Path("text_encoders/unsloth/gemma-3-12b-it-qat-GGUF"),
+                expected_size_bytes=7_340_000_000,
+                is_folder=True,
+                repo_id="unsloth/gemma-3-12b-it-qat-GGUF",
+                description="Gemma 3 12B IT QAT GGUF text encoder (Q4_K_M + tokenizer/processor)",
+                section="text_encoder",
+                display_name="Gemma 3 12B GGUF (Q4_K_M)",
+                variant_group="gemma-3-gguf",
+                folder_sources=(
+                    FolderSource(
+                        repo_id="unsloth/gemma-3-12b-it-qat-GGUF",
+                        allow_patterns=("gemma-3-12b-it-qat-Q4_K_M.gguf",),
+                    ),
+                    FolderSource(
+                        repo_id="Lightricks/gemma-3-12b-it-qat-q4_0-unquantized",
+                        allow_patterns=(
+                            "tokenizer.model",
+                            "tokenizer.json",
+                            "tokenizer_config.json",
+                            "special_tokens_map.json",
+                            "added_tokens.json",
+                            "preprocessor_config.json",
+                            "processor_config.json",
+                            "config.json",
+                            "generation_config.json",
+                            "chat_template.json",
+                        ),
+                    ),
+                ),
             )
         case _:
             assert_never(cp_id)
@@ -694,6 +897,8 @@ def get_ltx_model_id_for_cp(cp_id: ModelCheckpointID) -> LTXLocalModelId | None:
 
 # ponytail: explicit dict, no new class. Add entry when an adapter has a downloadable CP spec.
 ADAPTER_TO_CP_ID: dict[AdapterID, ModelCheckpointID] = {
+    "distilled_lora_384": "ltx-2.3-22b-distilled-lora-384",
+    "distilled_lora_384_1_1": "ltx-2.3-22b-distilled-lora-384-1.1",
     "union_control": "ltx-2.3-22b-ic-lora-union-control-ref0.5",
     "motion_track_control": "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5",
     "ingredients": "ltx-2.3-22b-ic-lora-ingredients-0.9",

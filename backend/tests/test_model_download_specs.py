@@ -130,23 +130,21 @@ def test_official_ic_lora_adapter_cp_specs_match_registry():
         )
 
 
-def test_adapter_to_cp_id_covers_every_non_distilled_adapter():
-    """Every non-distilled adapter has a CP entry and vice-versa."""
+def test_adapter_to_cp_id_covers_every_official_adapter():
+    """Every official adapter (incl. promoted distilled LoRAs) has a CP entry."""
     from runtime_config.model_download_specs import ADAPTER_TO_CP_ID, OFFICIAL_LTX23_ADAPTERS
 
-    assert set(ADAPTER_TO_CP_ID) == {
-        id
-        for id, adapter in OFFICIAL_LTX23_ADAPTERS.items()
-        if adapter.kind != "distilled_lora"
-    }
+    assert set(ADAPTER_TO_CP_ID) == set(OFFICIAL_LTX23_ADAPTERS)
 
 
-def test_official_ic_lora_adapter_cp_specs_reject_distilled_only():
-    """Only IC-LoRA (non-distilled) adapters get CP entries."""
-    from runtime_config.model_download_specs import ADAPTER_TO_CP_ID
+def test_distilled_lora_adapters_have_download_cp_specs():
+    """Distilled LoRA adapters are now downloadable CP-backed (promoted)."""
+    from runtime_config.model_download_specs import ADAPTER_TO_CP_ID, get_model_cp_spec
 
-    assert "distilled_lora_384" not in ADAPTER_TO_CP_ID
-    assert "distilled_lora_384_1_1" not in ADAPTER_TO_CP_ID
+    assert ADAPTER_TO_CP_ID["distilled_lora_384"] == "ltx-2.3-22b-distilled-lora-384"
+    assert ADAPTER_TO_CP_ID["distilled_lora_384_1_1"] == "ltx-2.3-22b-distilled-lora-384-1.1"
+    assert get_model_cp_spec("ltx-2.3-22b-distilled-lora-384").repo_id == "Lightricks/LTX-2.3"
+    assert get_model_cp_spec("ltx-2.3-22b-distilled-lora-384-1.1").repo_id == "Lightricks/LTX-2.3"
 
 
 def test_relative_paths_are_unique():
@@ -301,7 +299,7 @@ def test_mmproj_spec_has_canonical_path_size_and_repo():
 
 def test_mmproj_spec_carry_catalog_grouping_metadata():
     spec = get_model_cp_spec("gemma-3-12b-it-qat-gguf-mmproj")
-    assert spec.section == "gguf"
+    assert spec.section == "text_encoder"
     assert spec.variant_group == "gemma-3-gguf"
     assert spec.downloadable is True
     assert spec.display_name == "Gemma 3 mmproj BF16"

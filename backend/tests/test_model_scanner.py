@@ -431,11 +431,20 @@ class TestScannerStatuses:
 
         # Materialize every scanner-only Fast-family base-video file at its
         # canonical registry path (Kijai FP8 + seven QuantStack distilled GGUFs).
-        fast_scanner_only = [
+        fast_cp_backed = [
             e for e in iter_base_video_registry_static_entries()
-            if e.download_cp_id is None and e.pipeline_family == "fast"
+            if e.id in {
+                "ltx-2.3-22b-distilled-fp8-kijai-v3",
+                "ltx-2.3-22b-distilled-gguf-quantstack-q2-k",
+                "ltx-2.3-22b-distilled-gguf-quantstack-q3-k-s",
+                "ltx-2.3-22b-distilled-gguf-quantstack-q3-k-m",
+                "ltx-2.3-22b-distilled-gguf-quantstack-q4-k-s",
+                "ltx-2.3-22b-distilled-gguf-quantstack-q4-k-m",
+                "ltx-2.3-22b-distilled-gguf-quantstack-q5-k-s",
+                "ltx-2.3-22b-distilled-gguf-quantstack-q5-k-m",
+            }
         ]
-        assert {e.id for e in fast_scanner_only} == {
+        assert {e.id for e in fast_cp_backed} == {
             "ltx-2.3-22b-distilled-fp8-kijai-v3",
             "ltx-2.3-22b-distilled-gguf-quantstack-q2-k",
             "ltx-2.3-22b-distilled-gguf-quantstack-q3-k-s",
@@ -445,7 +454,9 @@ class TestScannerStatuses:
             "ltx-2.3-22b-distilled-gguf-quantstack-q5-k-s",
             "ltx-2.3-22b-distilled-gguf-quantstack-q5-k-m",
         }
-        for entry in fast_scanner_only:
+        # All eight are now CP-backed (downloadable), no longer scanner-only.
+        assert all(e.download_cp_id is not None for e in fast_cp_backed)
+        for entry in fast_cp_backed:
             path = models / entry.canonical_relative_path
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"\x00model")
@@ -453,7 +464,7 @@ class TestScannerStatuses:
         result = scan_models(models)
 
         # Cross-check each scanner artifact against its registry metadata.
-        for entry in fast_scanner_only:
+        for entry in fast_cp_backed:
             filename = Path(entry.canonical_relative_path).name
             art = next(
                 a for a in result.artifacts if a.filename == filename
@@ -465,14 +476,14 @@ class TestScannerStatuses:
             assert art.variant_group == entry.variant_group
             assert art.component_role == entry.component_role
             assert art.artifact_kind == entry.artifact_kind
-            assert art.downloadable is False  # scanner-only (no download CP)
+            assert art.downloadable is True  # promoted to CP-backed download
             # The canonical placement path the model-options endpoint would
             # surface matches the scanner's preferred path.
             assert art.preferred_path == str(models / entry.canonical_relative_path)
 
         # None of the Kijai/QuantStack files leak as unknown.
         unknown_names = {Path(f.relative_path).name for f in result.unknown_files}
-        for entry in fast_scanner_only:
+        for entry in fast_cp_backed:
             assert Path(entry.canonical_relative_path).name not in unknown_names
 
         # Spot-check the Kijai FP8 and a QuantStack GGUF carry the exact
@@ -524,13 +535,14 @@ class TestScannerStatuses:
         result = scan_models(models)
         by_role = {a.component_role: a for a in result.artifacts}
 
-        # Full section: base model, upscaler, gemma text encoder, video VAE,
-        # text projection.
+        # Full section: base model + upscaler (original LTX).
         assert by_role["base_diffusion_model"].section == "full"
         assert by_role["spatial_upscaler"].section == "full"
-        assert by_role["gemma"].section == "full"
-        assert by_role["video_vae"].section == "full"
-        assert by_role["text_projection_file"].section == "full"
+        # Kijai split sidecars: video VAE + text projection.
+        assert by_role["video_vae"].section == "kijai"
+        assert by_role["text_projection_file"].section == "kijai"
+        # Gemma text encoder is consolidated into its own section.
+        assert by_role["gemma"].section == "text_encoder"
 
         # Add-ons & Controls: IC-LoRAs, depth/pose/person processors, image gen.
         assert by_role["ingredients"].section == "addons"
@@ -539,10 +551,11 @@ class TestScannerStatuses:
         assert by_role["pose_processor"].section == "addons"
         assert by_role["image_gen_model"].section == "addons"
 
-        # GGUF section: dev quants + gemma GGUF folder + mmproj + distilled GGUF.
+        # GGUF section: dev quants + distilled GGUF transformers.
         assert by_role["base_diffusion_model_gguf"].section == "gguf"
-        assert by_role["gemma_gguf"].section == "gguf"
-        assert by_role["gemma_mmproj"].section == "gguf"
+        # Gemma GGUF folder + mmproj consolidated into the text_encoder section.
+        assert by_role["gemma_gguf"].section == "text_encoder"
+        assert by_role["gemma_mmproj"].section == "text_encoder"
 
     def test_gemma_mmproj_is_first_class_downloadable_artifact(self, tmp_path):
         """mmproj-BF16.gguf is a first-class downloadable CP-backed catalog
@@ -562,7 +575,7 @@ class TestScannerStatuses:
         assert mmproj.artifact_kind == "gguf"
         assert mmproj.repo_id == "unsloth/gemma-3-12b-it-qat-GGUF"
         assert mmproj.expected_size_bytes == 854_200_448
-        assert mmproj.section == "gguf"
+        assert mmproj.section == "text_encoder"
         assert mmproj.display_name == "Gemma 3 mmproj BF16"
         assert mmproj.variant_group == "gemma-3-gguf"
         # Phase 3A promotion: now downloadable and CP-backed.

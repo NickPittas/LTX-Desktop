@@ -512,7 +512,7 @@ class TestModelSelectionOptions:
         assert kijai["variant_group"] == "ltx-2.3-distilled-fp8"
         assert kijai["pipeline_family"] == "fast"
         assert kijai["repo_id"] == "Kijai/LTX2.3_comfy"
-        assert kijai["downloadable"] is False
+        assert kijai["downloadable"] is True
 
         # Spot-check a Full-family dev GGUF candidate (section=gguf).
         gguf = next(o for o in options if o["id"] == "ltx-2.3-22b-dev-gguf-q4-k-m")
@@ -831,9 +831,9 @@ class TestModelSelectionOptions:
         assert kijai["repo_id"] == "Kijai/LTX2.3_comfy"
         assert kijai["canonical_relative_path"] == kijai_rel
         assert kijai["expected_absolute_path"] == str(kijai_path)
-        # Scanner-only (not downloadable); requires sidecars → disabled here
+        # Now downloadable (promoted); still requires sidecars → disabled here
         # because no active profile provides them.
-        assert kijai["downloadable"] is False
+        assert kijai["downloadable"] is True
         assert kijai["disabled_reason"] is not None
 
         quantstack = by_id["ltx-2.3-22b-distilled-gguf-quantstack-q4-k-m"]
@@ -841,7 +841,7 @@ class TestModelSelectionOptions:
         assert quantstack["installed"] is True
         assert quantstack["repo_id"] == "QuantStack/LTX-2.3-GGUF"
         assert quantstack["canonical_relative_path"] == quantstack_rel
-        assert quantstack["downloadable"] is False
+        assert quantstack["downloadable"] is True
         assert quantstack["disabled_reason"] is not None
 
         # Full-family dev entries are present.

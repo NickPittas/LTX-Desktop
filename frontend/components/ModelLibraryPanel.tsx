@@ -52,13 +52,14 @@ const KIND_LABELS: Record<ArtifactKind, string> = {
   image_gen_model: 'Image Generation',
 }
 
-const SECTION_ORDER: CatalogSection[] = ['full', 'kijai', 'gguf', 'addons']
+const SECTION_ORDER: CatalogSection[] = ['full', 'kijai', 'gguf', 'text_encoder', 'addons']
 
 const SECTION_LABELS: Record<CatalogSection, { label: string; description: string }> = {
-  full: { label: 'Full', description: 'Core model files needed for local workflows' },
-  kijai: { label: 'Kijai', description: 'Alternative Kijai FP8 builds' },
-  gguf: { label: 'GGUF', description: 'Quantized GGUF model variants' },
-  addons: { label: 'Add-ons & Controls', description: 'Optional adapters, controls, and utility models' },
+  full: { label: 'Original LTX', description: 'Official dev + distilled transformers from Lightricks' },
+  kijai: { label: 'Kijai split', description: 'FP8 transformer plus its sidecars (video/audio VAE, text projection)' },
+  gguf: { label: 'GGUF transformers', description: 'Quantized transformers — also install the Kijai split sidecars and a Gemma text encoder to run these' },
+  text_encoder: { label: 'Text encoder — Gemma 3', description: 'Pick one: full BF16 (self-contained) or a GGUF quant. Required by Kijai and GGUF workflows' },
+  addons: { label: 'IC-LoRAs & ControlNets', description: 'IC-LoRAs, Union/Motion control, distilled LoRAs, and utility processors' },
 }
 
 function formatBytes(bytes: number | null | undefined): string {
@@ -619,6 +620,20 @@ export function ModelLibraryPanel({ isOpen }: ModelLibraryPanelProps) {
     }
   }, [])
 
+  const handleStartGroupDownload = useCallback(async (cpIds: ContentPieceId[]) => {
+    if (cpIds.length === 0) return
+    setDownloadError(null)
+    setDownloadProgress(null)
+    const result = await ApiClient.startModelDownload({ type: 'download', cp_ids: cpIds })
+    if (!result.ok) {
+      setDownloadError(result.error.message)
+      return
+    }
+    if (result.data.status === 'started') {
+      setDownloadSessionId(result.data.sessionId)
+    }
+  }, [])
+
   const handleCancelDownload = useCallback(async () => {
     setIsCancelling(true)
     const result = await ApiClient.cancelModelDownload()
@@ -853,9 +868,31 @@ export function ModelLibraryPanel({ isOpen }: ModelLibraryPanelProps) {
               (sum, list) => sum + list.length,
               0,
             )
+            const missingCpIds = Array.from(
+              new Set(
+                Array.from(sectionArtifacts.values())
+                  .flat()
+                  .map((a) =>
+                    resolveDownloadAction(a, catalog?.models_dir ?? '').disabled ? null : a.cp_id,
+                  )
+                  .filter((id): id is ContentPieceId => id != null),
+              ),
+            )
             return (
               <div key={section} className="space-y-2">
-                <SectionHeader section={section} count={sectionCount} />
+                <div className="flex items-center justify-between gap-2">
+                  <SectionHeader section={section} count={sectionCount} />
+                  {missingCpIds.length > 0 && (
+                    <button
+                      type="button"
+                      disabled={isDownloading}
+                      onClick={() => { void handleStartGroupDownload(missingCpIds) }}
+                      className="shrink-0 rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Download all missing ({missingCpIds.length})
+                    </button>
+                  )}
+                </div>
                 <div className="space-y-4">
                   {Array.from(sectionArtifacts.entries()).map(([kind, artifacts]) => (
                     <div key={`${section}-${kind}`} className="space-y-1">

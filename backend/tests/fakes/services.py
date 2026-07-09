@@ -333,6 +333,7 @@ class FakeModelDownloader:
         local_dir: str,
         token: str | None,
         on_progress: Callable[[int], None] | None = None,
+        allow_patterns: tuple[str, ...] | None = None,
     ) -> Path:
         self._raise_if_needed()
         self.calls.append(
@@ -341,6 +342,7 @@ class FakeModelDownloader:
                 "repo_id": repo_id,
                 "local_dir": local_dir,
                 "on_progress": on_progress,
+                "allow_patterns": allow_patterns,
             }
         )
 
@@ -351,7 +353,13 @@ class FakeModelDownloader:
         root = Path(local_dir)
         root.mkdir(parents=True, exist_ok=True)
 
-        (root / "model.safetensors").write_bytes(b"\x00" * 1024)
+        if allow_patterns:
+            for pattern in allow_patterns:
+                dest = root / pattern
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(b"\x00" * 1024)
+        else:
+            (root / "model.safetensors").write_bytes(b"\x00" * 1024)
 
         return root
 

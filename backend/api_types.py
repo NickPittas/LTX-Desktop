@@ -62,6 +62,22 @@ ModelCheckpointID = Literal[
     # First-class downloadable CP: lives inside the gemma GGUF text-encoder
     # folder artifact. Remote filename == local basename.
     "gemma-3-12b-it-qat-gguf-mmproj",
+    # ---- Promoted downloadable base-video + Kijai-split sidecars + distilled LoRAs ----
+    "ltx-2.3-22b-distilled-fp8-kijai-v3",
+    "ltx-2.3-22b-distilled-gguf-quantstack-q2-k",
+    "ltx-2.3-22b-distilled-gguf-quantstack-q3-k-s",
+    "ltx-2.3-22b-distilled-gguf-quantstack-q3-k-m",
+    "ltx-2.3-22b-distilled-gguf-quantstack-q4-k-s",
+    "ltx-2.3-22b-distilled-gguf-quantstack-q4-k-m",
+    "ltx-2.3-22b-distilled-gguf-quantstack-q5-k-s",
+    "ltx-2.3-22b-distilled-gguf-quantstack-q5-k-m",
+    "ltx-2.3-22b-dev",
+    "ltx-2.3-video-vae-bf16",
+    "ltx-2.3-text-projection-bf16",
+    "ltx-2.3-audio-vae-bf16",
+    "ltx-2.3-22b-distilled-lora-384",
+    "ltx-2.3-22b-distilled-lora-384-1.1",
+    "gemma-3-12b-it-qat-gguf",
 ]
 LTXLocalModelId = Literal["ltx-2.3-22b-distilled"]
 
@@ -610,7 +626,7 @@ ArtifactKind: TypeAlias = Literal[
 #: Backend-owned downloader section (plan §7). The frontend renders sections
 #: purely from this value — it must not duplicate grouping logic. Stable
 #: lowercase literals so they survive OpenAPI regen unchanged.
-CatalogSection: TypeAlias = Literal["full", "kijai", "gguf", "addons"]
+CatalogSection: TypeAlias = Literal["full", "kijai", "gguf", "addons", "text_encoder"]
 
 #: Semantic role within a profile/pipeline (e.g. adapter id, ``base_diffusion_model``).
 #: ``str`` (not Literal) because roles grow with the adapter registry.
