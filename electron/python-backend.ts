@@ -357,18 +357,19 @@ export async function startPythonBackend(): Promise<void> {
 
       if (started || probeGateStarted) return
 
-      const readyMatch = output.match(/Server running on (http:\/\/\S+)/)
+      // Capture the backend URL from EITHER uvicorn's "Uvicorn running on <url>"
+      // or our "Server running on <url>" line — whichever arrives first in the
+      // stdout stream (they can land in separate chunks). Both carry the URL.
+      // Previously only "Server running on" set backendUrl, and a separate-chunk
+      // "Uvicorn running" line flipped started=true via a URL-less fallback,
+      // leaving the renderer with no backend URL (stuck on "Loading settings").
+      // gateAliveOnProbe HTTP-probes /health, so 'alive' is still only published
+      // once the server actually answers.
+      const readyMatch = output.match(/(?:Server|Uvicorn) running on (http:\/\/\S+)/)
       if (readyMatch) {
         backendUrl = readyMatch[1]
         probeGateStarted = true
         void gateAliveOnProbe()
-      } else if (output.includes('Uvicorn running')) {
-        // Fallback for legacy/dev uvicorn output — no parseable URL, so we
-        // can't HTTP-probe. Publish alive on the log signal alone.
-        started = true
-        backendOwnership = 'managed'
-        publishBackendHealthStatus({ status: 'alive' })
-        settleResolve()
       }
     }
 
