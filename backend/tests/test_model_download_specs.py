@@ -302,7 +302,7 @@ def test_mmproj_spec_carry_catalog_grouping_metadata():
     assert spec.section == "text_encoder"
     assert spec.variant_group == "gemma-3-gguf"
     assert spec.downloadable is True
-    assert spec.display_name == "Gemma 3 mmproj BF16"
+    assert spec.display_name == "Gemma 3 mmproj (image projection helper — not the text encoder)"
     assert spec.description
 
 

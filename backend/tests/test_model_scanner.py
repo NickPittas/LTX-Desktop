@@ -576,7 +576,7 @@ class TestScannerStatuses:
         assert mmproj.repo_id == "unsloth/gemma-3-12b-it-qat-GGUF"
         assert mmproj.expected_size_bytes == 854_200_448
         assert mmproj.section == "text_encoder"
-        assert mmproj.display_name == "Gemma 3 mmproj BF16"
+        assert mmproj.display_name == "Gemma 3 mmproj (image projection helper — not the text encoder)"
         assert mmproj.variant_group == "gemma-3-gguf"
         # Phase 3A promotion: now downloadable and CP-backed.
         assert mmproj.downloadable is True

@@ -78,26 +78,6 @@ const COMPONENT_FIELDS: ComponentFieldDef[] = [
   { key: 'transformer_quantization', label: 'Transformer Quantization' },
 ]
 
-// ── prefill candidates ──────────────────────────────────────────
-// ponytail: known QuantStack/Kijai layout under a single root.
-const PREFILL_CANDIDATES: Record<string, string> = {
-  transformer: 'gguf/QuantStack/LTX-2.3-GGUF/LTX-2.3-distilled-1.1/LTX-2.3-22B-distilled-1.1-Q4_K_M.gguf',
-  text_encoder_root: 'text_encoders/unsloth/gemma-3-12b-it-qat-GGUF/gemma-3-12b-it-qat-UD-Q4_K_XL.gguf',
-  text_projection: 'text_encoders/ltx-2.3_text_projection_bf16.safetensors',
-  // Phase 3A (plan §9): mmproj projection lives inside the gemma GGUF folder.
-  mmproj: 'text_encoders/unsloth/gemma-3-12b-it-qat-GGUF/mmproj-BF16.gguf',
-  video_vae: 'vae/LTX23_video_vae_bf16.safetensors',
-  audio_vae: 'vae/LTX23_audio_vae_bf16.safetensors',
-  upsampler: 'latent_upscale_models/ltx-2.3-spatial-upscaler-x2-1.0.safetensors',
-  ic_lora_union: 'adapters/ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors',
-  ic_lora_motion_track: 'adapters/ltx-2.3-22b-ic-lora-motion-track-control-ref0.5.safetensors',
-  ic_lora_ingredients: 'adapters/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors',
-  ic_lora_hdr: 'adapters/ltx-2.3-22b-ic-lora-hdr-0.9.safetensors',
-  ic_lora_hdr_scene_embeddings: 'adapters/ltx-2.3-22b-ic-lora-hdr-scene-emb.safetensors',
-  ic_lora_lipdub: 'adapters/ltx-2.3-22b-ic-lora-lipdub-0.9.safetensors',
-  ic_lora_in_outpainting: 'adapters/ltx-2.3-22b-ic-lora-in-outpainting-0.9.safetensors',
-}
-
 // ── official IC-LoRA adapter names (from OFFICIAL_LTX23_ADAPTERS) ──
 // ponytail: all 13 IC-LoRA adapters; excludes distilled_lora_384, distilled_lora_384_1_1, hdr_scene_embeddings (non-ic_lora kind).
 const OFFICIAL_ADAPTER_FILENAMES: Record<string, string> = {
@@ -159,9 +139,12 @@ function deriveCapabilities(
   return caps
 }
 
-function fieldPickDirectory(key: keyof ModelComponentPaths, transformerFormat: string, textEncoderFormat: string): boolean {
-  if (key === 'transformer') return transformerFormat === 'split_safetensors'
+function fieldPickDirectory(key: keyof ModelComponentPaths, textEncoderFormat: string): boolean {
+  // A directory IS the artifact only for the HF-folder text encoder and the
+  // depth processor folder. The transformer (official / Kijai FP8 / GGUF), VAEs,
+  // projections, adapters, detectors and pose model are all single files.
   if (key === 'text_encoder_root') return textEncoderFormat === 'hf_folder'
+  if (key === 'depth_processor') return true
   return false
 }
 
@@ -267,57 +250,90 @@ export function ModelProfileWizard({ isOpen, onClose, onCreated, generationRunni
   }, [])
 
   const handlePrefill = useCallback(async () => {
-    const dir = await window.electronAPI.showOpenDirectoryDialog({ title: 'Select models folder' })
-    if (!dir) return
-
-    setPrefillStatus('Scanning...')
-
-    // Check standard component files
-    const stdPairs = Object.entries(PREFILL_CANDIDATES).map(([k, rel]) => [k, `${dir}/${rel}`] as const)
-    let exists: Record<string, boolean>
-    try {
-      const allPaths: string[] = stdPairs.map(([, p]) => p)
-      OFFICIAL_ADAPTER_IDS.forEach(id => allPaths.push(`${dir}/${OFFICIAL_ADAPTER_FILENAMES[id]}`))
-      exists = await window.electronAPI.checkFilesExist({
-        filePaths: allPaths,
-      })
-    } catch {
-      setPrefillStatus('Failed to check files')
+    setPrefillStatus('Scanning the configured models folder…')
+    const result = await ApiClient.getModelCatalog()
+    if (!result.ok) {
+      setPrefillStatus('Failed to scan the models folder')
       return
     }
+    const catalog = result.data
 
-    // Collect standard component paths
-    const updates: Record<string, string> = {}
-    for (const [key, absPath] of stdPairs) {
-      if (exists[absPath]) updates[key] = absPath
+    // The scanner is the single source of truth for what is installed and
+    // where, so this detects models wherever they actually live (any quant /
+    // variant / folder layout), replacing the old hardcoded exact-path guesses.
+    const roleToField: Partial<Record<string, keyof ModelComponentPaths>> = {
+      base_diffusion_model: 'transformer',
+      base_diffusion_model_fp8: 'transformer',
+      base_diffusion_model_gguf: 'transformer',
+      gemma: 'text_encoder_root',
+      gemma_gguf: 'text_encoder_root',
+      gemma_mmproj: 'mmproj',
+      text_projection_file: 'text_projection',
+      video_vae: 'video_vae',
+      audio_vae: 'audio_vae',
+      spatial_upscaler: 'upsampler',
+      depth_processor: 'depth_processor',
+      pose_processor: 'pose_processor',
+      person_detector: 'person_detector',
     }
 
-    // Collect official adapter paths
+    const updates: Record<string, unknown> = {}
     const adapterDict: Record<string, string> = {}
-    for (const id of OFFICIAL_ADAPTER_IDS) {
-      const absPath = `${dir}/${OFFICIAL_ADAPTER_FILENAMES[id]}`
-      if (exists[absPath]) adapterDict[id] = absPath
-    }
-    if (Object.keys(adapterDict).length > 0) {
-      updates['official_adapters'] = adapterDict as unknown as string
+    let transformerRole: string | null = null
+
+    for (const artifact of catalog.artifacts ?? []) {
+      if (artifact.status !== 'installed' && artifact.status !== 'wrong_folder_usable') continue
+      const path = artifact.preferred_path
+      if (!path) continue
+      if (artifact.adapter_id) {
+        if (adapterDict[artifact.adapter_id] === undefined) adapterDict[artifact.adapter_id] = path
+        continue
+      }
+      const field = roleToField[artifact.component_role]
+      if (field && updates[field] === undefined) {
+        updates[field] = path
+        if (field === 'transformer') transformerRole = artifact.component_role
+      }
     }
 
-    const n = Object.keys(updates).length
-    if (n === 0) {
-      setPrefillStatus('No known files found')
+    if (Object.keys(adapterDict).length > 0) {
+      updates['official_adapters'] = adapterDict
+    }
+
+    const componentCount = Object.keys(updates).filter((k) => k !== 'official_adapters').length
+    const adapterCount = Object.keys(adapterDict).length
+    if (componentCount === 0 && adapterCount === 0) {
+      setPrefillStatus(
+        `No known models found in ${catalog.models_dir}. Download them from the Library tab first.`,
+      )
       return
     }
 
-    setComponents(prev => ({ ...prev, ...(updates as Partial<ModelComponentPaths>) }))
+    setComponents((prev) => ({ ...prev, ...(updates as Partial<ModelComponentPaths>) }))
 
-    // Set derived formats for GGUF files
-    if (updates['transformer']) setTransformerFormat('gguf')
-    if (updates['transformer']) setSource('quantstack')
-    if (updates['text_encoder_root']) setTextEncoderFormat('gguf')
+    // Derive transformer + text-encoder format/source from what was detected.
+    if (transformerRole === 'base_diffusion_model_gguf') {
+      setSource('quantstack')
+      setTransformerFormat('gguf')
+    } else if (transformerRole === 'base_diffusion_model_fp8') {
+      setSource('kijai')
+      setTransformerFormat('split_safetensors')
+    } else if (transformerRole === 'base_diffusion_model') {
+      setSource('official')
+      setTransformerFormat('official_safetensors')
+    }
+    if (updates['text_encoder_root'] !== undefined) {
+      const isGgufTextEncoder = (catalog.artifacts ?? []).some(
+        (a) =>
+          a.component_role === 'gemma_gguf' &&
+          (a.status === 'installed' || a.status === 'wrong_folder_usable'),
+      )
+      setTextEncoderFormat(isGgufTextEncoder ? 'gguf' : 'hf_folder')
+    }
 
-    const stdCount = Object.keys(updates).filter(k => k !== 'official_adapters').length
-    const adapterCount = Object.keys(adapterDict).length
-    setPrefillStatus(`Prefilled ${stdCount} paths + ${adapterCount} adapters from ${dir}`)
+    setPrefillStatus(
+      `Prefilled ${componentCount} components + ${adapterCount} adapters from ${catalog.models_dir}`,
+    )
   }, [])
 
   // Step navigation
@@ -571,7 +587,7 @@ export function ModelProfileWizard({ isOpen, onClose, onCreated, generationRunni
 
               {/* Dynamic component fields */}
               {COMPONENT_FIELDS.filter(f => visibleKeys.includes(f.key)).map(field => {
-                const pickDir = field.pickDirectory ?? fieldPickDirectory(field.key, transformerFormat, textEncoderFormat)
+                const pickDir = field.pickDirectory ?? fieldPickDirectory(field.key, textEncoderFormat)
                 const filters = pickDir ? undefined : fieldFilters(field.key, transformerFormat, textEncoderFormat)
                 return (
                   <ModelComponentPicker

@@ -485,12 +485,22 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
         case "dpt-hybrid-midas":
             return ModelCheckpointSpec(
                 relative_path=Path("depth_processors/dpt-hybrid-midas"),
-                expected_size_bytes=500_000_000,
+                expected_size_bytes=489_660_000,
                 is_folder=True,
                 repo_id="Intel/dpt-hybrid-midas",
                 description="DPT-Hybrid MiDaS depth processor",
                 section="addons",
                 display_name="DPT-Hybrid MiDaS depth processor",
+                folder_sources=(
+                    FolderSource(
+                        repo_id="Intel/dpt-hybrid-midas",
+                        allow_patterns=(
+                            "config.json",
+                            "preprocessor_config.json",
+                            "pytorch_model.bin",
+                        ),
+                    ),
+                ),
             )
         case "yolox-l-torchscript":
             return ModelCheckpointSpec(
@@ -600,7 +610,7 @@ def get_model_cp_spec(cp_id: ModelCheckpointID) -> ModelCheckpointSpec:
                 repo_id="unsloth/gemma-3-12b-it-qat-GGUF",
                 description="Gemma 3 mmproj BF16 multimodal projection",
                 section="text_encoder",
-                display_name="Gemma 3 mmproj BF16",
+                display_name="Gemma 3 mmproj (image projection helper — not the text encoder)",
                 variant_group="gemma-3-gguf",
                 downloadable=True,
             )
