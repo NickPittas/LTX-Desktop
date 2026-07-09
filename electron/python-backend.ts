@@ -242,6 +242,88 @@ export function getPythonPath(): string {
   return 'python'
 }
 
+const BACKEND_PID_FILENAME = 'backend.pid'
+
+function backendPidFilePath(): string {
+  return path.join(getAppDataDir(), BACKEND_PID_FILENAME)
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    // EPERM = the process exists but we may not signal it → still "alive".
+    return (err as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+// Best-effort guard so we never kill an unrelated process that happens to have
+// reused a stale PID. Linux: verify /proc/<pid>/cmdline references our server.
+// Other platforms: we only ever record our own backend PID, so trust the file.
+function isOurBackendProcess(pid: number): boolean {
+  if (process.platform !== 'linux') return true
+  try {
+    const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8')
+    return cmdline.includes('ltx2_server.py')
+  } catch {
+    return false
+  }
+}
+
+function writeBackendPidFile(pid: number): void {
+  try {
+    fs.writeFileSync(backendPidFilePath(), String(pid), 'utf8')
+  } catch {
+    // Non-fatal: we just lose auto-reap for orphans left by this run.
+  }
+}
+
+function clearBackendPidFile(): void {
+  try {
+    fs.rmSync(backendPidFilePath(), { force: true })
+  } catch {
+    // Non-fatal.
+  }
+}
+
+// Terminate a backend orphaned by a previous session (unclean shutdown, crash,
+// or a session that hung before it could clean up) so it can't keep holding the
+// fixed backend port and block the new backend from binding. Only ever targets
+// a PID we recorded ourselves and (on Linux) verified is our own server.
+async function reapStaleBackend(): Promise<void> {
+  let raw: string
+  try {
+    raw = fs.readFileSync(backendPidFilePath(), 'utf8').trim()
+  } catch {
+    return // No PID file → nothing to reap.
+  }
+  const pid = Number.parseInt(raw, 10)
+  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) {
+    clearBackendPidFile()
+    return
+  }
+  if (!isProcessAlive(pid) || !isOurBackendProcess(pid)) {
+    clearBackendPidFile()
+    return
+  }
+
+  logger.warn(`Reaping orphaned backend (pid ${pid}) left by a previous session to free the port`)
+  try { process.kill(pid, 'SIGTERM') } catch { /* already gone */ }
+  const graceDeadline = Date.now() + 3000
+  while (isProcessAlive(pid) && Date.now() < graceDeadline) {
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 150))
+  }
+  if (isProcessAlive(pid)) {
+    try { process.kill(pid, 'SIGKILL') } catch { /* gone */ }
+    const killDeadline = Date.now() + 2000
+    while (isProcessAlive(pid) && Date.now() < killDeadline) {
+      await new Promise((resolveSleep) => setTimeout(resolveSleep, 100))
+    }
+  }
+  clearBackendPidFile()
+}
+
 export async function startPythonBackend(): Promise<void> {
   if (startPromise) {
     return startPromise
@@ -262,6 +344,10 @@ export async function startPythonBackend(): Promise<void> {
   }
 
   isIntentionalShutdown = false
+
+  // Clear any backend orphaned by a previous session before spawning, so it
+  // can't hold the fixed port and make the new backend fail to bind.
+  await reapStaleBackend()
 
   startPromise = new Promise((resolve, reject) => {
     const pythonPath = getPythonPath()
@@ -308,6 +394,12 @@ export async function startPythonBackend(): Promise<void> {
       },
       stdio: ['ignore', 'pipe', 'pipe']
     })
+
+    // Record the PID so a future session can reap this process if we exit
+    // uncleanly (crash / kill / hung session) without freeing the port.
+    if (pythonProcess.pid !== undefined) {
+      writeBackendPidFile(pythonProcess.pid)
+    }
 
     let started = false
     let startupSettled = false
@@ -487,6 +579,7 @@ export function stopPythonBackend(): void {
   if (pythonProcess) {
     isIntentionalShutdown = true
     stopLivenessMonitor()
+    clearBackendPidFile()
     logger.info('Stopping Python backend...')
     const pid = pythonProcess.pid
     pythonProcess.kill('SIGTERM')
