@@ -536,6 +536,28 @@ def resolve_profile_capabilities(
     """
     catalog_by_role = _index_catalog(catalog)
 
+    # The profile's transformer may be an fp8/gguf variant that the scanner
+    # catalogs under a different role (``base_diffusion_model_fp8`` /
+    # ``base_diffusion_model_gguf``). Match the explicit transformer path against
+    # the whole base-diffusion family in the FULL catalog so activation
+    # recognizes the installed variant instead of comparing it against the
+    # (missing) official distilled entry indexed under ``base_diffusion_model``.
+    _transformer_path = _get_profile_path(profile, "base_diffusion_model")
+    if _transformer_path is not None:
+        _all_artifacts = (
+            catalog.artifacts
+            if isinstance(catalog, ModelLibraryScanResponse)
+            else catalog
+        )
+        for _art in _all_artifacts:
+            if _art.component_role in (
+                "base_diffusion_model",
+                "base_diffusion_model_fp8",
+                "base_diffusion_model_gguf",
+            ) and any(_paths_equal(_transformer_path, _p) for _p in _art.absolute_paths):
+                catalog_by_role["base_diffusion_model"] = _art
+                break
+
     profile_id = profile.id if profile else None
     profile_valid = _is_profile_valid(profile)
     base_family = _infer_base_family(profile)
