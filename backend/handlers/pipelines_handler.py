@@ -245,6 +245,10 @@ class PipelinesHandler(StateHandlerBase):
             else None
         )
         if profile is not None:
+            # An adapter-only profile overlays the legacy downloaded base. It is
+            # not a model profile and must not resolve to an empty checkpoint tuple.
+            if model_selection is None and not profile.components.transformer:
+                return None
             if model_selection is None:
                 return resolve_components(profile)
             entry = self._resolve_selection(model_selection)
@@ -968,6 +972,18 @@ class PipelinesHandler(StateHandlerBase):
         # Phase 2: compute exactly one memory plan for the (standard) IC-LoRA
         # workflow and derive the cache key from it.
         components = self._resolve_active_components(model_selection)
+        base_family = components.base_family if components is not None else "distilled"
+        if base_family == "unknown":
+            raise HTTPError(
+                409,
+                (
+                    "IC-LoRA supports 'dev' and 'distilled' LTX-2.3 base models. "
+                    "The active model's base family could not be recognized "
+                    f"(base_family={base_family!r}). Choose an official LTX-2.3 "
+                    "dev or distilled transformer."
+                ),
+                code="UNSUPPORTED_MODEL_BASE_FAMILY",
+            )
         memory_plan = self._memory_plan_for_components(components, "standard")
         cache_key = (
             *self._current_cache_key(model_selection, memory_plan),

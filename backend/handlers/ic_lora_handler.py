@@ -712,6 +712,8 @@ class IcLoraHandler(StateHandlerBase):
 
         # ponytail: resolve workflow before any Path(req.video_path) so ingredients can skip
         workflow: str | None = _ADAPTER_WORKFLOW.get(req.adapter_id) if req.adapter_id else None
+        if workflow is None and req.adapter_id is None and req.conditioning_type is not None:
+            workflow = "union_control"
         if workflow in _UNAVAILABLE_WORKFLOWS:
             raise HTTPError(400, _UNAVAILABLE_MESSAGES[workflow])
 
@@ -783,6 +785,22 @@ class IcLoraHandler(StateHandlerBase):
             raise HTTPError(400, "Union Control requires conditioning_type (canny or depth)")
         if workflow == "in_outpainting" and req.mask_path is None:
             raise HTTPError(400, "In/outpainting requires a mask_path")
+        if workflow == "in_outpainting":
+            if len(req.images) > 1:
+                raise HTTPError(
+                    400,
+                    "In/outpainting accepts at most one optional first-frame anchor image",
+                )
+            if req.images and req.images[0].frame != 0:
+                raise HTTPError(
+                    400,
+                    "In/outpainting first-frame anchor image must use frame 0",
+                )
+            if req.images and not Path(req.images[0].path).is_file():
+                raise HTTPError(
+                    400,
+                    f"First-frame anchor image not found: {req.images[0].path}",
+                )
         # ponytail: in_outpainting allows empty prompt; other adapters require non-blank
         if workflow != "in_outpainting" and not (req.prompt or "").strip():
             raise HTTPError(400, "Prompt is required for this adapter")

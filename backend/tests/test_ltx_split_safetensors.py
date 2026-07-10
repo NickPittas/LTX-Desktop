@@ -600,6 +600,19 @@ class TestDevDistilledLoraRouting:
         # Pipeline construction never happened.
         assert fake_services.fast_video_pipeline.last_base_family is None
 
+    def test_unknown_family_ic_lora_raises_409_before_heavy_load(
+        self, test_state, tmp_path, fake_services
+    ):
+        _activate_unknown_profile(test_state, tmp_path)
+
+        with pytest.raises(HTTPError) as exc_info:
+            test_state.pipelines.load_ic_lora(lora_paths=[], depth_model_path=None)
+
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.code == "UNSUPPORTED_MODEL_BASE_FAMILY"
+        # IC-LoRA pipeline construction never happened.
+        assert fake_services.ic_lora_pipeline.last_components is None
+
     def test_dev_route_skips_torch_compile(
         self, test_state, tmp_path, fake_services
     ):

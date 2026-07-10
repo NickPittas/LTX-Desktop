@@ -91,6 +91,9 @@ def green_composite_preprocess(
 # ---------------------------------------------------------------------------
 
 
+_MASK_DILATION_FRAME_CHUNK = 4
+
+
 def dilate_video_mask(
     mask: torch.Tensor,
     spatial_radius: int = 5,
@@ -117,9 +120,23 @@ def dilate_video_mask(
 
     # Spatial dilation
     if s_kernel > 1:
-        mask_4d = mask.unsqueeze(1)  # (F, 1, H, W)
-        mask_4d = F.max_pool2d(mask_4d, kernel_size=s_kernel, stride=1, padding=spatial_radius)
-        mask = mask_4d.squeeze(1)  # (F, H, W)
+        spatial_chunks: list[torch.Tensor] = []
+        for start in range(0, f, _MASK_DILATION_FRAME_CHUNK):
+            chunk = mask[start : start + _MASK_DILATION_FRAME_CHUNK].unsqueeze(1)
+            chunk = F.max_pool2d(
+                chunk,
+                kernel_size=(1, s_kernel),
+                stride=1,
+                padding=(0, spatial_radius),
+            )
+            chunk = F.max_pool2d(
+                chunk,
+                kernel_size=(s_kernel, 1),
+                stride=1,
+                padding=(spatial_radius, 0),
+            )
+            spatial_chunks.append(chunk.squeeze(1))
+        mask = torch.cat(spatial_chunks, dim=0)
 
     # Temporal dilation
     if t_kernel > 1 and f > 1:

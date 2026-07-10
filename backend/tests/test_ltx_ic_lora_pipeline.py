@@ -48,11 +48,12 @@ del _VIDEO, _RESIZED
 # Full source: [0.909375, 0.725, 0.421875, 0.0]; [1:] drops 0.909375.
 
 
-def test_prompt_encoded_before_video_loaded():
-    """Prompt encoder call appears before decode_video_by_frame in generate_inpaint.
+def test_green_preprocessing_completes_before_prompt_encoding():
+    """Source/mask/green CPU preprocessing completes before model-backed prompt encoding.
 
-    Regression: OOM fix avoids GGUF Gemma + 196f video tensor VRAM overlap
-    (~31.6GB). If order reverses, peak spikes.
+    Regression invariant: video decode, mask dilation, and green composite all
+    finish on CPU before self.pipeline.prompt_encoder runs, preventing
+    preprocessing from overlapping model VRAM residency.
     """
     import os
     pipe_path = os.path.join(
@@ -63,19 +64,26 @@ def test_prompt_encoded_before_video_loaded():
     with open(pipe_path) as f:
         source = f.read()
 
-    start = source.find("def generate_inpaint")
+    start = source.find("def generate_inpaint(")
     assert start != -1, "generate_inpaint method not found"
+    end = source.find("def _encode_video_conditioning(", start)
+    assert end != -1, "generate_inpaint method end not found"
+    method_body = source[start:end]
 
-    method_body = source[start:]
-    prompt_pos = method_body.find("self.pipeline.prompt_encoder")
     video_pos = method_body.find("iter_video_frames_to_model_domain")
+    dilate_pos = method_body.find("mask_stage1_full_cpu = dilate_video_mask(")
+    green_pos = method_body.find("green_half_cpu = green_composite_preprocess(")
+    prompt_pos = method_body.find("self.pipeline.prompt_encoder")
 
-    assert prompt_pos != -1, "prompt_encoder not found in generate_inpaint"
     assert video_pos != -1, "iter_video_frames_to_model_domain not found in generate_inpaint"
-    assert prompt_pos < video_pos, (
-        f"prompt_encoder at offset {prompt_pos} must appear before "
-        f"video decode at offset {video_pos} — "
-        "prompt encoding moved before video loading to reduce peak VRAM"
+    assert dilate_pos != -1, "mask_stage1_full_cpu = dilate_video_mask( not found in generate_inpaint"
+    assert green_pos != -1, "green_half_cpu = green_composite_preprocess( not found in generate_inpaint"
+    assert prompt_pos != -1, "self.pipeline.prompt_encoder not found in generate_inpaint"
+
+    assert video_pos < dilate_pos < green_pos < prompt_pos, (
+        f"preprocessing order broken: video={video_pos}, dilation={dilate_pos}, "
+        f"green={green_pos}, prompt={prompt_pos} — "
+        "source/mask/green CPU preprocessing must complete before prompt encoding"
     )
 
 
@@ -466,6 +474,26 @@ class TestInpaintUtilities:
             f"Right (image_a=50/255) mean {mean_right:.4f} should be <0.5"
         )
         assert 0.0 < result.mean() < 1.0, f"Overall mean outside (0,1): {result.mean()}"
+
+
+def test_dilate_video_mask_chunked_spatial_matches_square_pool() -> None:
+    """Chunked separable spatial dilation must equal one unchunked square pool."""
+    from services.ic_lora_pipeline.official_inpaint import dilate_video_mask
+
+    mask = torch.zeros(9, 64, 64, dtype=torch.float32)
+    mask[0, 0, 0] = 1.0  # corner pixel, first chunk
+    mask[3, 31, 31] = 1.0  # interior, last frame of first chunk
+    mask[4, 63, 63] = 1.0  # corner pixel, first frame of second chunk
+    mask[8, 5, 60] = 1.0  # last frame, final partial chunk
+
+    actual = dilate_video_mask(mask.clone(), spatial_radius=3, temporal_radius=0)
+
+    expected = torch.nn.functional.max_pool2d(
+        mask.unsqueeze(1), kernel_size=7, stride=1, padding=3
+    ).squeeze(1)
+    expected = (expected > 0.5).float()
+
+    assert torch.equal(actual, expected)
 
 
 class TestDeriveStageRadii:
@@ -1439,14 +1467,16 @@ class TestStage1UpsampleDevicePath:
 
 
 class TestInpaintVramOffload:
-    """Source-text assertions for VRAM offload of originals before stage1/stage2 denoising.
+    """Source-order / lifecycle assertions for CPU-first inpaint preprocessing.
 
-    At 196f 1080p, original video/mask tensors (~4.7GB @ bf16) + GGUF transformer raw
-    load OOM. Offload to CPU before each denoising pass, move back only for blends.
+    No model call (prompt_encoder / image_conditioner / stage_1 / stage_2 /
+    video_decoder / audio_decoder) may run until ``green_half_cpu`` is fully
+    created from source video + dilated mask on CPU float32.
     """
 
-    def test_cpu_offload_before_stage1(self):
-        """Verify .cpu() calls on originals appear before self.pipeline.stage_1(."""
+    @staticmethod
+    def _inpaint_body() -> str:
+        """Isolate the ``generate_inpaint`` method body as source text."""
         import os
         pipe_path = os.path.join(
             os.path.dirname(__file__),
@@ -1455,156 +1485,116 @@ class TestInpaintVramOffload:
         )
         with open(pipe_path) as f:
             source = f.read()
+        start = source.find("def generate_inpaint(")
+        assert start != -1, "generate_inpaint not found"
+        end = source.find("def _encode_video_conditioning(", start)
+        assert end != -1, "next method (_encode_video_conditioning) not found"
+        return source[start:end]
 
-        stage1_pos = source.find("self.pipeline.stage_1(")
-        assert stage1_pos != -1, "stage_1 call not found"
-
-        offload_targets = ["video_half", "video_full", "mask_stage1_half", "mask_stage2_full", "mask_full_gray"]
-        for name in offload_targets:
-            cpu_call = f"{name}.cpu()"
-            pos = source.find(cpu_call)
-            assert pos != -1, f"{cpu_call} not found"
-            assert pos < stage1_pos, (
-                f"{cpu_call} at offset {pos} must appear before "
-                f"self.pipeline.stage_1( at offset {stage1_pos}"
+    def test_cpu_green_composite_precedes_all_model_calls(self):
+        """green_half_cpu = green_composite_preprocess( precedes every model call."""
+        body = self._inpaint_body()
+        green_pos = body.find("green_half_cpu = green_composite_preprocess(")
+        assert green_pos != -1, "green_half_cpu = green_composite_preprocess( not found"
+        for call in (
+            "self.pipeline.prompt_encoder(",
+            "self.pipeline.image_conditioner(",
+            "self.pipeline.stage_1(",
+            "self.pipeline.stage_2(",
+            "self.pipeline.video_decoder(",
+        ):
+            pos = body.find(call)
+            assert pos != -1, f"{call} not found"
+            assert green_pos < pos, (
+                f"green_half_cpu at {green_pos} must precede {call} at {pos}"
             )
+
+    def test_source_and_mask_preprocess_on_cpu_float32(self):
+        """Source + mask decode on cpu_device; video_preprocess calls use float32, cpu_device."""
+        body = self._inpaint_body()
+        assert "cpu_device = torch.device(\"cpu\")" in body
+        # source decode uses cpu_device
+        assert "iter_video_frames_to_model_domain(video_path, frame_cap=num_frames, device=cpu_device)" in body
+        # mask decode uses cpu_device
+        assert "decode_video_by_frame(path=mask_path, frame_cap=num_frames_vae_padded, device=cpu_device)" in body
+        # both video_preprocess calls contain torch.float32, cpu_device
+        assert "video_preprocess(video_gen, height, width, torch.float32, cpu_device)" in body
+        assert "video_preprocess(mask_gen, height, width, torch.float32, cpu_device)" in body
+
+    def test_dead_full_res_and_stage2_mask_are_not_retained(self):
+        """del video_full_cpu after video_half_cpu = and before green_half_cpu =; no mask_stage2_full."""
+        body = self._inpaint_body()
+        video_half_pos = body.find("video_half_cpu =")
+        assert video_half_pos != -1, "video_half_cpu = not found"
+        del_full_pos = body.find("del video_full_cpu")
+        assert del_full_pos != -1, "del video_full_cpu not found"
+        green_pos = body.find("green_half_cpu = green_composite_preprocess(")
+        assert green_pos != -1, "green_half_cpu = green_composite_preprocess( not found"
+        assert video_half_pos < del_full_pos < green_pos, (
+            f"del video_full_cpu ({del_full_pos}) must be between "
+            f"video_half_cpu = ({video_half_pos}) and green_half_cpu = ({green_pos})"
+        )
+        assert "mask_stage2_full" not in body, "mask_stage2_full must not appear in method body"
+
+    def test_green_gpu_copy_is_short_lived_before_stage1(self):
+        """green_half_gpu copy precedes image_conditioner; del follows conditionings, precedes stage_1."""
+        body = self._inpaint_body()
+        gpu_copy = "green_half_gpu = green_half_cpu.to(device=device, dtype=dtype)"
+        gpu_pos = body.find(gpu_copy)
+        assert gpu_pos != -1, f"{gpu_copy!r} not found"
+        ic_pos = body.find("self.pipeline.image_conditioner(")
+        assert ic_pos != -1, "image_conditioner call not found"
+        assert gpu_pos < ic_pos, "green_half_gpu copy must precede image_conditioner"
+        del_line = "del green_half_gpu, green_half_cpu"
+        del_pos = body.find(del_line)
+        assert del_pos != -1, f"{del_line!r} not found"
+        # del follows the conditionings build (image_conditioner) and precedes stage_1
+        assert ic_pos < del_pos, "del green_half_gpu/green_half_cpu must follow image_conditioner"
+        stage1_pos = body.find("self.pipeline.stage_1(")
+        assert stage1_pos != -1, "stage_1 call not found"
+        assert del_pos < stage1_pos, "del green_half_gpu/green_half_cpu must precede stage_1"
+
+    def test_stage1_blend_uses_cpu_masters_and_deletes_them(self):
+        """video_half_frames_01_cpu + mask_s1_blend_cpu passed to blend; no whole-tensor .to; deleted after."""
+        body = self._inpaint_body()
+        blend_call_pos = body.find("laplacian_pyramid_blend(")
+        assert blend_call_pos != -1, "laplacian_pyramid_blend call not found"
+        # bound the argument region to the closing paren of the blend call
+        blend_close = body.find(")", blend_call_pos)
+        assert blend_close != -1, "blend call closing paren not found"
+        blend_args = body[blend_call_pos:blend_close]
+        assert "video_half_frames_01_cpu" in blend_args, "video_half_frames_01_cpu not passed to blend"
+        assert "mask_s1_blend_cpu" in blend_args, "mask_s1_blend_cpu not passed to blend"
+        # no whole-tensor GPU reload of the CPU masters
+        assert "video_half_cpu = video_half_cpu.to(" not in body, (
+            "video_half_cpu must not be reloaded to GPU as a whole tensor"
+        )
+        assert "mask_stage1_half_cpu = mask_stage1_half_cpu.to(" not in body, (
+            "mask_stage1_half_cpu must not be reloaded to GPU as a whole tensor"
+        )
+        # delete line follows the blend call
+        del_line = "del video_half_cpu, mask_stage1_half_cpu, video_half_frames_01_cpu, mask_s1_blend_cpu"
+        del_pos = body.find(del_line)
+        assert del_pos != -1, f"{del_line!r} not found"
+        assert blend_close < del_pos, "delete of CPU masters must follow the blend call"
 
     def test_empty_cache_guarded_by_cuda_check(self):
-        """torch.cuda.empty_cache() must be inside `if device.type == "cuda":`."""
-        import os
-        pipe_path = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "services/ic_lora_pipeline/ltx_ic_lora_pipeline.py",
-        )
-        with open(pipe_path) as f:
-            source = f.read()
-
-        empty_cache_pos = source.find("torch.cuda.empty_cache()")
-        assert empty_cache_pos != -1, "torch.cuda.empty_cache() not found"
-
-        # Find the preceding if device.type == "cuda": within reasonable scope
-        preceding_block = source[max(0, empty_cache_pos - 200):empty_cache_pos]
-        assert 'if device.type == "cuda":' in preceding_block, (
-            "torch.cuda.empty_cache() must be guarded by 'if device.type == \"cuda\":'"
-        )
-
-    def test_stage1_offload_includes_del_green_half(self):
-        """del green_half must appear in the offload block before stage1."""
-        import os
-        pipe_path = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "services/ic_lora_pipeline/ltx_ic_lora_pipeline.py",
-        )
-        with open(pipe_path) as f:
-            source = f.read()
-
-        stage1_pos = source.find("self.pipeline.stage_1(")
-        assert stage1_pos != -1
-
-        del_pos = source.find("del green_half")
-        assert del_pos != -1, "del green_half not found"
-        assert del_pos < stage1_pos, (
-            f"del green_half at {del_pos} must be before stage_1 at {stage1_pos}"
-        )
-
-    def test_stage1_offload_includes_del_mask_temps(self):
-        """Combined del line including mask_video, mask_gray, mask_stage1_full."""
-        import os
-        pipe_path = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "services/ic_lora_pipeline/ltx_ic_lora_pipeline.py",
-        )
-        with open(pipe_path) as f:
-            source = f.read()
-
-        stage1_pos = source.find("self.pipeline.stage_1(")
-        assert stage1_pos != -1
-
-        del_line = "del green_half, mask_video, mask_gray, mask_stage1_full"
-        pos = source.find(del_line)
-        assert pos != -1, f"'{del_line}' not found"
-        assert pos < stage1_pos, (
-            f"del line at {pos} must be before stage_1 at {stage1_pos}"
-        )
-
-    def test_move_back_before_stage1_blend(self):
-        """video_half.to(device=...) and mask_stage1_half.to(device=...) appear before blend."""
-        import os
-        pipe_path = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "services/ic_lora_pipeline/ltx_ic_lora_pipeline.py",
-        )
-        with open(pipe_path) as f:
-            source = f.read()
-
-        blend_comment_pos = source.find("# Original video as [0, 1] pixel frames for stage 1 blend")
-        assert blend_comment_pos != -1, "blend orig comment not found"
-
-        for call in ('video_half = video_half.to(device=', 'mask_stage1_half = mask_stage1_half.to(device='):
-            pos = source.find(call)
-            assert pos != -1, f"'{call}' not found"
-            assert pos < blend_comment_pos, (
-                f"'{call}' at {pos} must be before blend comment at {blend_comment_pos}"
+        """Every torch.cuda.empty_cache() in the method is guarded by a nearby if device.type == cuda."""
+        body = self._inpaint_body()
+        needle = "torch.cuda.empty_cache()"
+        start = 0
+        count = 0
+        while True:
+            pos = body.find(needle, start)
+            if pos == -1:
+                break
+            count += 1
+            preceding = body[max(0, pos - 200):pos]
+            assert 'if device.type == "cuda":' in preceding, (
+                f"torch.cuda.empty_cache() at {pos} not guarded by 'if device.type == \"cuda\":'"
             )
-
-    def test_stage2_pre_denoising_offload(self):
-        """After stage1 blend del, video_half.cpu() and mask_stage1_half.cpu() and
-        empty_cache guard appear before stage 2 denoising."""
-        import os
-        pipe_path = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "services/ic_lora_pipeline/ltx_ic_lora_pipeline.py",
-        )
-        with open(pipe_path) as f:
-            source = f.read()
-
-        # The offload should happen after the del line and before the # 9. section header
-        del_pos = source.find("del blend_stage1, blend_stage1_bchw")
-        assert del_pos != -1, "blend del line not found"
-
-        stage2_header_pos = source.find("# 9. Stage 2:")
-        assert stage2_header_pos != -1, "Stage 2 section header not found"
-
-        for call in ('video_half = video_half.cpu()', 'mask_stage1_half = mask_stage1_half.cpu()'):
-            pos = source.find(call, del_pos)
-            assert pos != -1, f"'{call}' after del line not found"
-            assert pos < stage2_header_pos, (
-                f"'{call}' at {pos} must be before "
-                f"stage 2 header ({stage2_header_pos})"
-            )
-
-        # empty_cache guard must also be in this region
-        cuda_check_pos = source.find('if device.type == "cuda":', del_pos, stage2_header_pos)
-        assert cuda_check_pos != -1, (
-            f"empty_cache guard not found between offload and stage 2 header"
-        )
-
-    def test_move_back_before_final_blend(self):
-        """video_full, mask_stage2_full, mask_full_gray moved back before final blend."""
-        import os
-        pipe_path = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "services/ic_lora_pipeline/ltx_ic_lora_pipeline.py",
-        )
-        with open(pipe_path) as f:
-            source = f.read()
-
-        blend2_comment = source.find("# Original video as [0, 1] pixel frames for stage 2 blend")
-        assert blend2_comment != -1, "blend2 comment not found"
-
-        for name, dtype in [("video_full", True), ("mask_stage2_full", False), ("mask_full_gray", False)]:
-            call = f"{name} = {name}.to(device="
-            pos = source.find(call)
-            assert pos != -1, f"'{call}' not found"
-            assert pos < blend2_comment, (
-                f"'{call}' at {pos} must be before blend2 comment at {blend2_comment}"
-            )
+            start = pos + len(needle)
+        assert count > 0, "no torch.cuda.empty_cache() calls found in method body"
 
 
 class TestHdrVideoOnly:

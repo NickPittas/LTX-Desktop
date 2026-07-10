@@ -662,25 +662,87 @@ class LTXIcLoraPipeline:
 
         assert_resolution(height=height, width=width, is_two_stage=True)
 
-        # Derive mask dilation radii from configurable mask_grow_px
-        stage1_radius, stage2_radius = derive_stage_radii(mask_grow_px)
+        # Derive mask dilation radii from configurable mask_grow_px.
+        # Only stage1_radius is used: the full-res stage-2 mask/blend is bypassed
+        # (decoded stage-2 frames are the final output), so stage2_radius is unused.
+        stage1_radius, _stage2_radius = derive_stage_radii(mask_grow_px)
 
         half_h, half_w = height // 2, width // 2
         num_frames_vae_padded = _vae_padded_frame_count(num_frames)
         device = self.pipeline.device
         dtype = torch.bfloat16  # ponytail: matches ICLoraPipeline.dtype
+        cpu_device = torch.device("cpu")
 
         # ------------------------------------------------------------------ #
-        # 1. Encode prompt and create contexts
+        # 1. Source video + mask preprocessing entirely on CPU float32, before
+        #    any prompt/model call, so VRAM stays free for the transformer.
         # ------------------------------------------------------------------ #
-        # ponytail: encode prompt before loading full video/mask tensors to avoid
-        # GGUF Gemma + 196f video tensor VRAM overlap (~31.6GB peak). Prompt encoder
-        # builds/uses/frees, then video preprocessing allocates full tensors.
+        logger.info("[inpaint] Loading video and mask on CPU")
+
+        # Source video: iter_video_frames_to_model_domain preserves the source
+        # color-management path (CM-1c Rec.709 correction for tagged non-bt709;
+        # byte-identical passthrough for bt709/untagged). Decoded on CPU.
+        video_gen = iter_video_frames_to_model_domain(video_path, frame_cap=num_frames, device=cpu_device)
+        video_full_cpu = video_preprocess(video_gen, height, width, torch.float32, cpu_device)  # (1, 3, F, H, W) in [-1,1]
+        num_actual_frames = video_full_cpu.shape[2]
+
+        # ponytail: pad to 8n+1 by repeating last frame; crop output back after generation
+        if video_full_cpu.shape[2] < num_frames_vae_padded:
+            last_frame = video_full_cpu[:, :, -1:, :, :]
+            pad_count = num_frames_vae_padded - video_full_cpu.shape[2]
+            video_full_cpu = torch.cat([video_full_cpu, last_frame.expand(-1, -1, pad_count, -1, -1)], dim=2)
+
+        # Downscale to half res for stage 1. Final stage-2 output bypasses the
+        # full-resolution source blend, so video_full_cpu is dead after this.
+        video_half_cpu = self._resize_video_spatial(
+            video_full_cpu[:, :, :num_frames_vae_padded, :, :],
+            height=half_h,
+            width=half_w,
+            mode="bilinear",
+            align_corners=False,
+        )
+        del video_full_cpu
+
+        # Load mask frames, pad if fewer than needed (CPU float32)
+        mask_gen = decode_video_by_frame(path=mask_path, frame_cap=num_frames_vae_padded, device=cpu_device)
+        mask_video_cpu = video_preprocess(mask_gen, height, width, torch.float32, cpu_device)  # (1, 3, F, H, W) in [-1,1]
+        if mask_video_cpu.shape[2] < num_frames_vae_padded:
+            last_mask = mask_video_cpu[:, :, -1:, :, :]
+            mask_pad = num_frames_vae_padded - mask_video_cpu.shape[2]
+            mask_video_cpu = torch.cat([mask_video_cpu, last_mask.expand(-1, -1, mask_pad, -1, -1)], dim=2)
+        mask_video_cpu = mask_video_cpu[:, :, :num_frames_vae_padded, :, :]
+        mask_gray_cpu = mask_video_cpu.mean(dim=1, keepdim=True)  # (1, 1, F, H, W) grayscale in [-1,1]
+        mask_gray_cpu = (mask_gray_cpu + 1.0) / 2.0  # → [0, 1]
+        mask_full_gray_cpu = mask_gray_cpu[0, 0]  # (F, H_full, W_full)
+        del mask_video_cpu, mask_gray_cpu
+
+        # ------------------------------------------------------------------ #
+        # 2. Dilate stage-1 mask (full res → half res) on CPU float32
+        # ------------------------------------------------------------------ #
+        logger.info("[inpaint] Dilating stage-1 mask")
+        # Only the stage-1 mask is needed: the final stage-2 blend / raw-mask guard
+        # is bypassed (decoded stage-2 frames are the final output).
+        mask_stage1_full_cpu = dilate_video_mask(mask_full_gray_cpu, spatial_radius=stage1_radius, temporal_radius=0)
+        mask_stage1_half_cpu = self._resize_video_mask_spatial(mask_stage1_full_cpu, half_h, half_w)  # (F, H_half, W_half)
+        del mask_full_gray_cpu, mask_stage1_full_cpu
+
+        # ------------------------------------------------------------------ #
+        # 3. Green composite (official #66FF00) entirely on CPU before any model call
+        # ------------------------------------------------------------------ #
+        logger.info("[inpaint] Creating green composite frames on CPU")
+        green_half_cpu = green_composite_preprocess(
+            video_half_cpu[:, :, :num_frames_vae_padded],
+            mask_stage1_half_cpu,
+        )
+        memory_trace.snapshot("inpaint:green_composite_ready")
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        # ------------------------------------------------------------------ #
+        # 4. Encode prompt and create contexts (now that VRAM is free of the
+        #    GGUF Gemma + full video tensor overlap)
+        # ------------------------------------------------------------------ #
         logger.info("[inpaint] Encoding prompt")
-        # Official: stage2=seed (42), stage1=seed+1 (43)
-        generator = torch.Generator(device=device).manual_seed(seed + 1)
-        noiser = GaussianNoiser(generator=generator)
-
         _phase("encoding_text", "Encoding prompt locally")
         (ctx_p,) = self.pipeline.prompt_encoder(
             [prompt],
@@ -690,97 +752,20 @@ class LTXIcLoraPipeline:
         assert video_context is not None and audio_context is not None
 
         # ------------------------------------------------------------------ #
-        # 2. Load input video and mask
+        # 5. Green composite guide conditioning — short-lived GPU copy.
+        #    Encode green_half_cpu tensor directly inside image_conditioner using
+        #    the existing encoder; create a VideoConditionByReferenceLatent with
+        #    downscale_factor=1 (matching LTXAddVideoICLoRAGuideAdvanced
+        #    latent_downscale_factor=1 widget) and conditioning_strength.
+        #    No temp mp4 roundtrip or file decode.
         # ------------------------------------------------------------------ #
-        logger.info("[inpaint] Loading video and mask")
-
-        # Load video frames at half res (for stage 1 conditioning) and full res.
-        # Sequence files (image sequences) decode through the patched
-        # decode_video_by_frame inside iter_video_frames_to_model_domain (their
-        # color transfer happens in decode_sequence_frames). CM-1c: tagged
-        # non-bt709 VIDEO is corrected to Rec.709 here (byte-identical
-        # passthrough for bt709/untagged — the validated inpaint MP4 path is an
-        # exact no-op).
-        video_gen = iter_video_frames_to_model_domain(video_path, frame_cap=num_frames, device=device)
-        video_full = video_preprocess(video_gen, height, width, dtype, device)  # (1, 3, F, H, W) in [-1,1]
-        num_actual_frames = video_full.shape[2]
-
-        # ponytail: pad to 8n+1 by repeating last frame; crop output back after generation
-        if video_full.shape[2] < num_frames_vae_padded:
-            last_frame = video_full[:, :, -1:, :, :]
-            pad_count = num_frames_vae_padded - video_full.shape[2]
-            video_full = torch.cat([video_full, last_frame.expand(-1, -1, pad_count, -1, -1)], dim=2)
-
-        # Downscale to half res for stage 1
-        video_half = self._resize_video_spatial(
-            video_full[:, :, :num_frames_vae_padded, :, :],
-            height=half_h,
-            width=half_w,
-            mode="bilinear",
-            align_corners=False,
-        )
-
-        # Full res for stage 2
-        video_full = video_full[:, :, :num_frames_vae_padded, :, :]
-
-        # Load mask frames, pad if fewer than needed
-        mask_gen = decode_video_by_frame(path=mask_path, frame_cap=num_frames_vae_padded, device=device)
-        mask_video = video_preprocess(mask_gen, height, width, dtype, device)  # (1, 3, F, H, W) in [-1,1]
-        if mask_video.shape[2] < num_frames_vae_padded:
-            last_mask = mask_video[:, :, -1:, :, :]
-            mask_pad = num_frames_vae_padded - mask_video.shape[2]
-            mask_video = torch.cat([mask_video, last_mask.expand(-1, -1, mask_pad, -1, -1)], dim=2)
-        mask_video = mask_video[:, :, :num_frames_vae_padded, :, :]
-        mask_gray = mask_video.mean(dim=1, keepdim=True)  # (1, 1, F, H, W) grayscale in [-1,1]
-        mask_gray = (mask_gray + 1.0) / 2.0  # → [0, 1]
-        # ------------------------------------------------------------------ #
-        # 3. Dilate masks (node 5382: r=15 stage1, node 5379: r=30 stage2)
-        #    Effective runtime radii from linked workflow inputs:
-        #    - Stage1: node 5400 PrimitiveInt [15] feeds node 5382
-        #    - Stage2: node 5372 ComfyMathExpression (2*a) feeds node 5379
-        #    Node widget defaults are ignored while linked.
-        # ------------------------------------------------------------------ #
-        logger.info("[inpaint] Dilating masks")
-        # Official: dilate at full res, then downscale for half-res stage 1 uses
-        mask_full_gray = mask_gray[0, 0]  # (F, H_full, W_full)
-        mask_stage1_full = dilate_video_mask(mask_full_gray.clone(), spatial_radius=stage1_radius, temporal_radius=0)
-        mask_stage2_full = dilate_video_mask(mask_full_gray.clone(), spatial_radius=stage2_radius, temporal_radius=0)
-        # Downscale stage1 mask to half res for stage 1 (bridge blend + green prep)
-        mask_stage1_half = self._resize_video_mask_spatial(mask_stage1_full, half_h, half_w)  # (F, H_half, W_half)
-
-        # ------------------------------------------------------------------ #
-        # 4. Create green composites (official #66FF00)
-        # ------------------------------------------------------------------ #
-        logger.info("[inpaint] Creating green composite frames")
-        # Official: stage 1 green prep uses stage1 (r=15) mask at half res
-        # ponytail: only half-res green used for guide conditioning; full-res
-        # green was for official blend but we blend against original video at both stages.
         _phase("vae_encode_conditioning", "Green composite + VAE conditioning encode")
-        green_half = green_composite_preprocess(video_half[:, :, :num_frames_vae_padded], mask_stage1_half)
-
-        # ────────────────────────────────────────────────────────────────────── #
-        # 5. Green composite guide conditioning — direct tensor encode, no file I/O
-        # ────────────────────────────────────────────────────────────────────── #
-        # ponytail: encode green_half tensor directly inside image_conditioner using
-        # existing encoder; create VideoConditionByReferenceLatent with downscale_factor=1
-        # (matching LTXAddVideoICLoRAGuideAdvanced latent_downscale_factor=1 widget) and
-        # strength=conditioning_strength. No temp mp4 roundtrip or file decode.
-
-
-
-        # ------------------------------------------------------------------ #
-        # 6. Stage 1: denoising at half resolution
-        # ------------------------------------------------------------------ #
-        logger.info("[inpaint] Stage 1 denoising (half res, %d x %d)", half_w, half_h)
-
-        # Create conditionings: image (from images param) + video (green composite)
         stage1_ltx_images = [
             make_ltx_image_conditioning_input(img.path, img.frame_idx, img.strength)
             for img in images
         ]
-
-        # Encode green composite as video conditioning — direct tensor path
         tiling_config = default_tiling_config()
+        green_half_gpu = green_half_cpu.to(device=device, dtype=dtype)
         stage1_conditionings = self.pipeline.image_conditioner(
             lambda enc: (
                 combined_image_conditionings(
@@ -793,25 +778,23 @@ class LTXIcLoraPipeline:
                 )
                 + self._encode_green_guide_conditioning(
                     enc=enc,
-                    tensor=green_half,
+                    tensor=green_half_gpu,
                     strength=conditioning_strength,
                 )
             )
         )
-
-        # ponytail: offload originals to CPU before stage1 denoising — 196f 1080p originals
-        # (~4.7GB @ bf16) + GGUF transformer raw load OOMs on 8/12GB. Back for blend only.
-        memory_trace.snapshot("inpaint_stage1:before_drain")
-        del green_half, mask_video, mask_gray, mask_stage1_full
-        video_half = video_half.cpu()
-        video_full = video_full.cpu()
-        mask_stage1_half = mask_stage1_half.cpu()
-        mask_stage2_full = mask_stage2_full.cpu()
-        mask_full_gray = mask_full_gray.cpu()
+        del green_half_gpu, green_half_cpu
         if device.type == "cuda":
             memory_trace.write_event("manual_drain", "manual_drain:ic_lora")
             torch.cuda.empty_cache()
-        memory_trace.snapshot("inpaint_stage1:after_drain")
+
+        # ------------------------------------------------------------------ #
+        # 6. Stage 1: denoising at half resolution
+        # ------------------------------------------------------------------ #
+        logger.info("[inpaint] Stage 1 denoising (half res, %d x %d)", half_w, half_h)
+        # Official: stage2=seed (42), stage1=seed+1 (43)
+        generator_s1 = torch.Generator(device=device).manual_seed(seed + 1)
+        noiser_s1 = GaussianNoiser(generator=generator_s1)
 
         stage1_sigmas = DISTILLED_SIGMAS.to(dtype=torch.float32, device=device)
 
@@ -819,7 +802,7 @@ class LTXIcLoraPipeline:
         video_state_s1, audio_state_s1 = self.pipeline.stage_1(
             denoiser=SimpleDenoiser(video_context, audio_context),
             sigmas=stage1_sigmas,
-            noiser=noiser,
+            noiser=noiser_s1,
             width=half_w,
             height=half_h,
             frames=num_frames_vae_padded,
@@ -834,37 +817,35 @@ class LTXIcLoraPipeline:
         )
 
         # ------------------------------------------------------------------ #
-        # 7. Decode stage 1 and Laplacian blend at half res
+        # 7. Decode stage 1 and Laplacian blend at half res (CPU masters, no
+        #    whole-tensor GPU reload — laplacian_pyramid_blend moves bounded
+        #    chunks to the requested device internally)
         # ------------------------------------------------------------------ #
         logger.info("[inpaint] Decoding stage 1 and blending")
         assert video_state_s1 is not None
         _phase("vae_decode_tiled", "Stage 1 tiled VAE decode")
-        decoded_s1_iter = self.pipeline.video_decoder(video_state_s1.latent, tiling_config, generator)
+        decoded_s1_iter = self.pipeline.video_decoder(video_state_s1.latent, tiling_config, generator_s1)
         decoded_s1_frames = self._collect_frames(decoded_s1_iter)
         # decoded_s1_frames: (F, H_half, W_half, 3) in [0, 1]
 
-        # Move originals back to GPU for stage 1 blend
-        video_half = video_half.to(device=device, dtype=dtype)
-        mask_stage1_half = mask_stage1_half.to(device=device)
-
-        # Original video as [0, 1] pixel frames for stage 1 blend
-        # video_half is (1, 3, F, H, W) in [-1,1] → (F, H, W, 3) in [0, 1]
-        video_half_frames = video_half[0].permute(1, 2, 3, 0)  # (F, H, W, 3) in [-1, 1]
-        video_half_frames_01 = (video_half_frames + 1.0) / 2.0  # → [0, 1]
+        # Original video as [0, 1] pixel frames for stage 1 blend (CPU).
+        # video_half_cpu is (1, 3, F, H, W) in [-1,1] → (F, H, W, 3) in [0, 1]
+        video_half_frames_01_cpu = (video_half_cpu[0].permute(1, 2, 3, 0) + 1.0) / 2.0
+        mask_s1_blend_cpu = mask_stage1_half_cpu[:decoded_s1_frames.shape[0]]
 
         # Bridge blend [5266]: image_a=stage1_decoded, image_b=original video.
         # ponytail: green remains guide conditioning; Laplacian blend preserves original
         # unmasked content and avoids green bleed. Not official parity.
-        mask_s1_blend = mask_stage1_half[:decoded_s1_frames.shape[0]]
         _phase("blend_stage_1", "Laplacian blend stage 1")
         blend_stage1 = laplacian_pyramid_blend(
             decoded_s1_frames,
-            video_half_frames_01[:decoded_s1_frames.shape[0]],
-            mask_s1_blend,
+            video_half_frames_01_cpu[:decoded_s1_frames.shape[0]],
+            mask_s1_blend_cpu,
             max_level=7,
             mask_low_res_dilation=INPAINT_BLEND1_LOW_RES_DILATION,
             device=device,
         )  # (F, H_half, W_half, 3) in [0, 1]
+        del video_half_cpu, mask_stage1_half_cpu, video_half_frames_01_cpu, mask_s1_blend_cpu
 
         # Optional stage 1 preview: encode a half-res MP4 for debugging.
         stage_1_preview_path: str | None = None
@@ -913,9 +894,7 @@ class LTXIcLoraPipeline:
         # ponytail: free large intermediates before stage 2 denoising — no longer needed
         memory_trace.snapshot("inpaint_stage2:before_drain")
         del blend_stage1, blend_stage1_bchw, blend_full, blend_full_bcfhw
-        # ponytail: offload half-res originals back to CPU before stage 2 denoising
-        video_half = video_half.cpu()
-        mask_stage1_half = mask_stage1_half.cpu()
+        # ponytail: half-res CPU masters were deleted after the stage-1 blend.
         if device.type == "cuda":
             memory_trace.write_event("manual_drain", "manual_drain:ic_lora")
             torch.cuda.empty_cache()
@@ -941,7 +920,7 @@ class LTXIcLoraPipeline:
         # euler_ancestral_cfg_pp (stage2) via LTXVCFGGuider.
         # Not implemented in installed ltx_pipelines. Add when available.
         # Stage2 is guided by encoded_blend initial latent (VAE-encoded stage1 blend at full res).
-        # Do NOT inject the half-res green guide (green_half) here — it is already used in stage1
+        # Do NOT inject the half-res green guide (green_half_cpu) here — it is already used in stage1
         # conditionings and re-encoding it for stage2 at full res produces an incorrect
         # half-res embedding in the full frame.
         stage2_conditionings = self.pipeline.image_conditioner(

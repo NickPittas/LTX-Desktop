@@ -252,7 +252,7 @@ export function ICLoraPanel({
   const maskPreviewTokenRef = useRef<string | null>(null)
   const maskPathRef = useRef<string | null>(null)
   maskPathRef.current = maskPath
-  const [guidanceImagePaths, setGuidanceImagePaths] = useState<string[]>([])
+  const [firstFrameAnchorPath, setFirstFrameAnchorPath] = useState<string | null>(null)
   const [maskGrowPx, setMaskGrowPx] = useState(30)
   const [laplacianBlendGrow, setLaplacianBlendGrow] = useState(12)
   const [finalMaskBlurPx, setFinalMaskBlurPx] = useState(6)
@@ -297,6 +297,7 @@ export function ICLoraPanel({
     setMaskGrowPx(30)
     setLaplacianBlendGrow(12)
     setFinalMaskBlurPx(6)
+    setFirstFrameAnchorPath(null)
     onConditioningTypeChange?.(null)
     onConditioningStrengthChange?.(1.0)
     setConditioningPreview(null)
@@ -321,7 +322,7 @@ export function ICLoraPanel({
     const images = selectedWorkflow === 'ingredients'
       ? ingredientPaths.map(p => ({ path: p }))
       : selectedWorkflow === 'in_outpainting'
-        ? guidanceImagePaths.map(p => ({ path: p }))
+        ? firstFrameAnchorPath ? [{ path: firstFrameAnchorPath, frame: 0, strength: 1.0 }] : []
         : []
     onChange?.({
       videoPath: isNoInputWorkflow ? null : inputVideoPath,
@@ -335,7 +336,7 @@ export function ICLoraPanel({
       laplacianBlendGrow: selectedEntry?.workflow === 'in_outpainting' ? laplacianBlendGrow : 12,
       finalMaskBlurPx: selectedEntry?.workflow === 'in_outpainting' ? finalMaskBlurPx : 6,
     })
-    }, [inputVideoUrl, inputVideoPath, conditioningType, conditioningStrength, internalAdapterId, icLoraReady, maskPath, maskGrowPx, laplacianBlendGrow, finalMaskBlurPx, ingredientPaths, guidanceImagePaths, onChange])
+    }, [inputVideoUrl, inputVideoPath, conditioningType, conditioningStrength, internalAdapterId, icLoraReady, maskPath, maskGrowPx, laplacianBlendGrow, finalMaskBlurPx, ingredientPaths, firstFrameAnchorPath, onChange])
 
   const checkIcLoraAvailability = useCallback(async () => {
     setIsCheckingIcLora(true)
@@ -900,41 +901,42 @@ export function ICLoraPanel({
                   </button>
                 )}
               </div>
-              {/* Optional guidance images for inpaint */}
-              <div className="flex-none px-3 py-2 border-t border-zinc-800">
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">Guidance images</span>
-                  <button
-                    onClick={() => { void handlePickImage('Add Guidance Image').then(p => p && setGuidanceImagePaths(prev => [...prev, p])) }}
-                    disabled={isProcessing}
-                    className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] text-blue-400 hover:text-blue-300 hover:bg-blue-600/10 transition-colors disabled:opacity-50"
-                  >
-                    + Add
-                  </button>
+              {/* Optional first-frame anchor for in/outpainting */}
+              <div className="flex-none px-3 py-2 border-t border-zinc-800 space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">Optional first-frame anchor</span>
+                  {!firstFrameAnchorPath && (
+                    <button
+                      onClick={() => { void handlePickImage('Select First-Frame Image').then(p => p && setFirstFrameAnchorPath(p)) }}
+                      disabled={isProcessing}
+                      className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] text-blue-400 hover:text-blue-300 hover:bg-blue-600/10 transition-colors disabled:opacity-50"
+                    >
+                      + Select first-frame image
+                    </button>
+                  )}
                 </div>
-                <p className="text-[10px] text-zinc-500 leading-relaxed mb-1">
-                  Optional reference frame/image used with source video and mask.
+                <p className="text-[10px] text-zinc-500 leading-relaxed">
+                  Source video + mask are the in/outpainting guide. Add one image only if you want to anchor frame 0.
                 </p>
-                {guidanceImagePaths.length > 0 && (
-                  <div className="flex gap-2 flex-wrap">
-                    {guidanceImagePaths.map((path, idx) => (
-                      <div key={idx} className="relative group rounded-lg border border-zinc-700 bg-zinc-900 overflow-hidden w-20 h-20">
-                        <div className="w-full h-full bg-black flex items-center justify-center">
-                          <img
-                            src={pathToFileUrl(path)}
-                            alt={`Guidance ${idx + 1}`}
-                            className="w-full h-full object-contain"
-                          />
-                        </div>
-                        <button
-                          onClick={() => setGuidanceImagePaths(prev => prev.filter((_, i) => i !== idx))}
-                          className="absolute top-0.5 right-0.5 p-0.5 rounded bg-black/60 text-red-400 opacity-0 group-hover:opacity-100 hover:text-red-300 transition-opacity"
-                          title="Remove guidance image"
-                        >
-                          <Trash2 className="h-3 w-3" />
-                        </button>
+                {firstFrameAnchorPath && (
+                  <div className="flex items-center gap-2">
+                    <div className="relative group rounded-lg border border-zinc-700 bg-zinc-900 overflow-hidden w-20 h-20 shrink-0">
+                      <div className="w-full h-full bg-black flex items-center justify-center">
+                        <img
+                          src={pathToFileUrl(firstFrameAnchorPath)}
+                          alt="First-frame anchor"
+                          className="w-full h-full object-contain"
+                        />
                       </div>
-                    ))}
+                      <button
+                        onClick={() => setFirstFrameAnchorPath(null)}
+                        className="absolute top-0.5 right-0.5 p-0.5 rounded bg-black/60 text-red-400 opacity-0 group-hover:opacity-100 hover:text-red-300 transition-opacity"
+                        title="Remove first-frame anchor"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </button>
+                    </div>
+                    <p className="text-zinc-400 text-[10px] truncate max-w-[140px]">{firstFrameAnchorPath.split(/[\\/]/).pop()}</p>
                   </div>
                 )}
               </div>
@@ -1014,7 +1016,7 @@ export function ICLoraPanel({
     setMaskPreviewTranscoding(false)
     setMaskPreviewProgress(0)
     maskPreviewTokenRef.current = null
-    setGuidanceImagePaths([])
+    setFirstFrameAnchorPath(null)
     setIngredientPaths([])
                 }}
                 className="bg-zinc-800 text-[10px] text-zinc-300 border border-zinc-700 rounded px-1.5 py-1 max-w-[140px] cursor-pointer focus:outline-none focus:border-zinc-500"

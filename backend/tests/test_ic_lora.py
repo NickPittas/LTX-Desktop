@@ -147,6 +147,11 @@ class TestIcLoraGenerate:
         assert response.json()["status"] == "complete"
         # Verify adapter path was routed to pipeline create()
         assert fake_services.ic_lora_pipeline.last_lora_path == str(adapter_file)
+        # Adapter-only profile must fall back to the legacy downloaded official
+        # checkpoint (a real path string), not an empty checkpoint tuple.
+        assert fake_services.ic_lora_pipeline.last_components is None
+        assert isinstance(fake_services.ic_lora_pipeline.last_checkpoint_path, str)
+        assert fake_services.ic_lora_pipeline.last_checkpoint_path
 
     def test_multiple_images_forwarded(
         self, client, test_state, create_fake_model_files, create_fake_ic_lora_files, fake_services
@@ -471,18 +476,18 @@ class TestIcLoraGenerate:
         adapter_file.write_bytes(b"\x00" * 1024)
 
         profile = ModelProfilePayload(
-            id="gguf-profile",
-            name="GGUF Profile",
+            id="distilled-profile",
+            name="Distilled Profile",
             source="official",
             components=ModelComponentPaths(
-                transformer="/fake/path/model.safetensors",
+                transformer="/fake/path/ltx-2.3-22b-distilled.safetensors",
                 text_encoder_root="/fake/text/encoder",
                 text_encoder_format="hf_folder",
                 official_adapters={"water_simulation": str(adapter_file)},
             ),
         )
         test_state.state.model_profiles = [profile]
-        test_state.state.active_model_profile_id = "gguf-profile"
+        test_state.state.active_model_profile_id = "distilled-profile"
 
         video_path = test_state.config.outputs_dir / "test_video.mp4"
         video_path.write_bytes(b"\x00" * 100)
@@ -1087,13 +1092,38 @@ class TestIcLoraWorkflowGating:
         assert fake_services.ic_lora_pipeline.generate_calls == []
         assert len(fake_services.hdr_ic_lora_pipeline.generate_calls) == 1
 
-    def test_hdr_rejects_model_selection_for_non_hdr(
-        self, client, test_state, create_fake_model_files, create_fake_ic_lora_files
+    def test_union_control_accepts_model_selection(
+        self, client, test_state, fake_services, create_fake_model_files,
+        create_fake_ic_lora_files, tmp_path,
     ):
-        """Non-HDR IC-LoRA must reject model_selection with HTTP 400."""
+        """Union Control (conditioning-only canny) accepts live model_selection.
+
+        A request with ``conditioning_type='canny'`` and no ``adapter_id``
+        classifies as the ``union_control`` workflow, so live model_selection is
+        accepted (not rejected). The fake IC-LoRA pipeline receives
+        ``ResolvedLtxComponents`` carrying the selection — ``model_selection``
+        and the selected ID appear in its cache key.
+        """
         create_fake_model_files()
         create_fake_ic_lora_files()
         test_state.state.app_settings.use_local_text_encoder = True
+
+        # Active profile so _resolve_active_components(model_selection) returns
+        # a non-None ResolvedLtxComponents carrying the selection metadata.
+        transformer = tmp_path / "ltx-2.3-22b-distilled.safetensors"
+        transformer.write_bytes(b"\x00" * 1024)
+        profile = ModelProfilePayload(
+            id="union-sel-profile",
+            name="Union Control Selection Profile",
+            source="official",
+            components=ModelComponentPaths(
+                transformer=str(transformer),
+                transformer_format="official_safetensors",
+                text_encoder_format="api",
+            ),
+        )
+        test_state.state.model_profiles = [profile]
+        test_state.state.active_model_profile_id = "union-sel-profile"
 
         video_path = test_state.config.outputs_dir / "src.mp4"
         video_path.write_bytes(b"\x00" * 100)
@@ -1111,10 +1141,11 @@ class TestIcLoraWorkflowGating:
                 "model_selection": "ltx-2.3-22b-distilled",
             },
         )
-        assert_http_error(
-            response, status_code=400, code="HTTP_400",
-            message="model_selection is supported only for HDR IC-LoRA",
-        )
+        assert response.status_code == 200, response.text
+        components = fake_services.ic_lora_pipeline.last_components
+        assert components is not None
+        assert "model_selection" in components.cache_key
+        assert "ltx-2.3-22b-distilled" in components.cache_key
 
     def test_hdr_rejects_sequence_input(self, client, test_state, create_fake_model_files, tmp_path):
         """HDR sequence inputs are gated: official load_video_conditioning_hdr decodes
@@ -2032,6 +2063,160 @@ class TestIcLoraEmptyPromptWorkflow:
         )
         # Should route to generate_inpaint (not return 400)
         assert response.status_code != 400, f"Unexpected 400: {response.json()}"
+
+    def test_in_outpainting_accepts_one_frame_zero_anchor(self, client, test_state,
+                                                            create_fake_model_files, create_fake_ic_lora_files,
+                                                            fake_services):
+        """One optional first-frame anchor (frame 0) forwards to generate_inpaint as a single ImageConditioningInput."""
+        create_fake_model_files()
+        create_fake_ic_lora_files()
+        from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
+        adapter = OFFICIAL_LTX23_ADAPTERS["in_outpainting"]
+        adapter_path = test_state.config.default_models_dir / "adapters" / adapter.filename
+        adapter_path.parent.mkdir(parents=True, exist_ok=True)
+        adapter_path.write_bytes(b"\x00" * 1024)
+
+        test_state.state.app_settings.use_local_text_encoder = True
+        fake_services.ic_lora_pipeline.bind_singleton(fake_services.ic_lora_pipeline)
+
+        video_path = test_state.config.outputs_dir / "test_video.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(str(video_path), FakeCapture(frames=["frame-a", "frame-b"]))
+
+        mask_path = test_state.config.outputs_dir / "test_mask.mp4"
+        mask_path.write_bytes(b"\x00" * 100)
+
+        anchor_path = test_state.config.outputs_dir / "anchor.png"
+        anchor_path.write_bytes(b"\x00" * 100)
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "prompt": "test prompt",
+                "images": [{"path": str(anchor_path), "frame": 0, "strength": 1.0}],
+                "adapter_id": "in_outpainting",
+                "mask_path": str(mask_path),
+            },
+        )
+        assert response.status_code == 200, f"Unexpected status: {response.json()}"
+        recorded_images = fake_services.ic_lora_pipeline.generate_calls[0]["images"]
+        assert len(recorded_images) == 1
+        assert recorded_images[0].path == str(anchor_path)
+        assert recorded_images[0].frame_idx == 0
+        assert recorded_images[0].strength == 1.0
+
+    def test_in_outpainting_rejects_multiple_anchor_images(self, client, test_state,
+                                                             create_fake_model_files, create_fake_ic_lora_files):
+        """Two anchor images rejected with 400."""
+        create_fake_model_files()
+        create_fake_ic_lora_files()
+        from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
+        adapter = OFFICIAL_LTX23_ADAPTERS["in_outpainting"]
+        adapter_path = test_state.config.default_models_dir / "adapters" / adapter.filename
+        adapter_path.parent.mkdir(parents=True, exist_ok=True)
+        adapter_path.write_bytes(b"\x00" * 1024)
+
+        test_state.state.app_settings.use_local_text_encoder = True
+
+        video_path = test_state.config.outputs_dir / "test_video.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(str(video_path), FakeCapture(frames=["frame-a", "frame-b"]))
+
+        mask_path = test_state.config.outputs_dir / "test_mask.mp4"
+        mask_path.write_bytes(b"\x00" * 100)
+
+        anchor1 = test_state.config.outputs_dir / "anchor1.png"
+        anchor1.write_bytes(b"\x00" * 100)
+        anchor2 = test_state.config.outputs_dir / "anchor2.png"
+        anchor2.write_bytes(b"\x00" * 100)
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "prompt": "test prompt",
+                "images": [
+                    {"path": str(anchor1), "frame": 0, "strength": 1.0},
+                    {"path": str(anchor2), "frame": 0, "strength": 1.0},
+                ],
+                "adapter_id": "in_outpainting",
+                "mask_path": str(mask_path),
+            },
+        )
+        assert_http_error(response, status_code=400, code="HTTP_400",
+                          message="In/outpainting accepts at most one optional first-frame anchor image")
+
+    def test_in_outpainting_rejects_nonzero_anchor_frame(self, client, test_state,
+                                                          create_fake_model_files, create_fake_ic_lora_files):
+        """Non-zero anchor frame rejected with 400."""
+        create_fake_model_files()
+        create_fake_ic_lora_files()
+        from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
+        adapter = OFFICIAL_LTX23_ADAPTERS["in_outpainting"]
+        adapter_path = test_state.config.default_models_dir / "adapters" / adapter.filename
+        adapter_path.parent.mkdir(parents=True, exist_ok=True)
+        adapter_path.write_bytes(b"\x00" * 1024)
+
+        test_state.state.app_settings.use_local_text_encoder = True
+
+        video_path = test_state.config.outputs_dir / "test_video.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(str(video_path), FakeCapture(frames=["frame-a", "frame-b"]))
+
+        mask_path = test_state.config.outputs_dir / "test_mask.mp4"
+        mask_path.write_bytes(b"\x00" * 100)
+
+        anchor = test_state.config.outputs_dir / "anchor.png"
+        anchor.write_bytes(b"\x00" * 100)
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "prompt": "test prompt",
+                "images": [{"path": str(anchor), "frame": 8, "strength": 1.0}],
+                "adapter_id": "in_outpainting",
+                "mask_path": str(mask_path),
+            },
+        )
+        assert_http_error(response, status_code=400, code="HTTP_400",
+                          message="In/outpainting first-frame anchor image must use frame 0")
+
+    def test_in_outpainting_rejects_missing_anchor_file(self, client, test_state,
+                                                         create_fake_model_files, create_fake_ic_lora_files):
+        """Nonexistent anchor file rejected with 400."""
+        create_fake_model_files()
+        create_fake_ic_lora_files()
+        from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
+        adapter = OFFICIAL_LTX23_ADAPTERS["in_outpainting"]
+        adapter_path = test_state.config.default_models_dir / "adapters" / adapter.filename
+        adapter_path.parent.mkdir(parents=True, exist_ok=True)
+        adapter_path.write_bytes(b"\x00" * 1024)
+
+        test_state.state.app_settings.use_local_text_encoder = True
+
+        video_path = test_state.config.outputs_dir / "test_video.mp4"
+        video_path.write_bytes(b"\x00" * 100)
+        test_state.video_processor.register_video(str(video_path), FakeCapture(frames=["frame-a", "frame-b"]))
+
+        mask_path = test_state.config.outputs_dir / "test_mask.mp4"
+        mask_path.write_bytes(b"\x00" * 100)
+
+        missing_anchor = "/nonexistent/anchor.png"
+
+        response = client.post(
+            "/api/ic-lora/generate",
+            json={
+                "video_path": str(video_path),
+                "prompt": "test prompt",
+                "images": [{"path": missing_anchor, "frame": 0, "strength": 1.0}],
+                "adapter_id": "in_outpainting",
+                "mask_path": str(mask_path),
+            },
+        )
+        assert_http_error(response, status_code=400, code="HTTP_400",
+                          message=f"First-frame anchor image not found: {missing_anchor}")
 
     def test_standard_video_adapter_without_conditioning_loads_only_adapter(
         self, client, test_state, fake_services, create_fake_model_files,
