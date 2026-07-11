@@ -58,9 +58,6 @@ class FastVideoPipeline(Protocol):
     ) -> None:
         ...
 
-    def warmup(self, output_path: str) -> None:
-        ...
-
     def compile_transformer(self) -> None:
         ...
 

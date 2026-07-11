@@ -81,7 +81,6 @@ export interface EditorUiState {
   showExportModal: boolean
   showSourceMonitor: boolean
   showPropertiesPanel: boolean
-  showEffectsBrowser: boolean
   activeFocusArea: 'source' | 'timeline'
   sourceSplitPercent: number
   hasSourceAsset: boolean
@@ -209,7 +208,6 @@ export interface MenuState {
   tracks: Track[]
   subtitles: SubtitleClip[]
   snapEnabled: boolean
-  showEffectsBrowser: boolean
   showSourceMonitor: boolean
   showPropertiesPanel: boolean
   hasSourceAsset: boolean
@@ -268,7 +266,6 @@ export function createInitialEditorState(
         showExportModal: false,
         showSourceMonitor: false,
         showPropertiesPanel: false,
-        showEffectsBrowser: false,
         activeFocusArea: 'timeline',
         sourceSplitPercent: 50,
         hasSourceAsset: false,

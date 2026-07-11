@@ -380,10 +380,6 @@ export function selectShowPropertiesPanel(state: EditorState): boolean {
   return state.session.ui.showPropertiesPanel
 }
 
-export function selectShowEffectsBrowser(state: EditorState): boolean {
-  return state.session.ui.showEffectsBrowser
-}
-
 export function selectActiveFocusArea(state: EditorState): 'source' | 'timeline' {
   return state.session.ui.activeFocusArea
 }
@@ -685,7 +681,6 @@ export function selectMenuState(state: EditorState): MenuState {
     tracks: selectTracks(state),
     subtitles: selectSubtitles(state),
     snapEnabled: selectSnapEnabled(state),
-    showEffectsBrowser: selectShowEffectsBrowser(state),
     showSourceMonitor: selectShowSourceMonitor(state),
     showPropertiesPanel: selectShowPropertiesPanel(state),
     hasSourceAsset: selectHasSourceAsset(state),

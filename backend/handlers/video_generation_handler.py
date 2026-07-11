@@ -45,7 +45,7 @@ from services.interfaces import LTXAPIClient, VideoPipelineModelType
 from services.ltx_api_client.ltx_api_client import LTXAPIClientError
 from services.ltx_pipeline_common import make_encode_progress_callback, make_primary_output_path, make_proxy_output_path
 from services.media_encoder.media_encoder import MediaEncoder
-from state.app_state_types import AppState
+from state.app_state_types import AppState, VideoPipelineState
 from state.app_settings import should_video_generate_with_ltx_api
 
 if TYPE_CHECKING:
@@ -226,10 +226,13 @@ class VideoGenerationHandler(StateHandlerBase):
             # (model_selection + effective distilled LoRA path) differentiates the
             # distilled vs dev builds.
             pipeline_family = _local_video_pipeline_family(req.model)
-            self._pipelines.load_gpu_pipeline(pipeline_family, model_selection=req.model_selection)
+            pipeline_state = self._pipelines.load_gpu_pipeline(
+                pipeline_family, model_selection=req.model_selection
+            )
             self._generation.start_generation(generation_id)
 
             output_path = self.generate_video(
+                pipeline_state=pipeline_state,
                 prompt=req.prompt,
                 image=image,
                 height=height,
@@ -263,6 +266,7 @@ class VideoGenerationHandler(StateHandlerBase):
 
     def generate_video(
         self,
+        pipeline_state: VideoPipelineState,
         prompt: str,
         image: Image.Image | None,
         height: int,
@@ -286,10 +290,6 @@ class VideoGenerationHandler(StateHandlerBase):
         total_steps = 8
 
         self._generation.update_progress("loading_model", 5, 0, total_steps)
-        t_load_start = time.perf_counter()
-        pipeline_state = self._pipelines.load_gpu_pipeline(model_family, model_selection=model_selection)
-        t_load_end = time.perf_counter()
-        logger.info("[%s] Pipeline load: %.2fs", gen_mode, t_load_end - t_load_start)
 
         self._generation.update_progress("encoding_text", 10, 0, total_steps)
 
@@ -350,9 +350,9 @@ class VideoGenerationHandler(StateHandlerBase):
                 raise RuntimeError("Generation was cancelled")
 
             t_total_end = time.perf_counter()
-            logger.info("[%s] Total generation: %.2fs (load=%.2fs, text=%.2fs, inference=%.2fs)",
+            logger.info("[%s] Total generation: %.2fs (text=%.2fs, inference=%.2fs)",
                         gen_mode, t_total_end - t_total_start,
-                        t_load_end - t_load_start, t_text_end - t_text_start, t_inference_end - t_inference_start)
+                        t_text_end - t_text_start, t_inference_end - t_inference_start)
 
             self._generation.update_progress("complete", 100, total_steps, total_steps)
             return str(output_path)

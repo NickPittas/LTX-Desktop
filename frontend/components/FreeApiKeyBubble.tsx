@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { X } from 'lucide-react'
+import { useModelProfiles } from '../hooks/use-model-profiles'
 
 const SHOW_DELAY_MS = 2500
 
@@ -18,9 +19,16 @@ export function FreeApiKeyBubble({
   const [dismissed, setDismissed] = useState(() => dismissedThisSession)
   const [visible, setVisible] = useState(false)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const profiles = useModelProfiles(!forceApiGenerations && !hasLtxApiKey)
+  const activeProfileId = profiles.data?.active_model_profile_id
+  const activeProfile = activeProfileId
+    ? profiles.data?.profiles?.find(profile => profile.id === activeProfileId)
+    : null
+  const hasLocalTextEncoder = !!activeProfile?.components?.text_encoder_root
+    && activeProfile?.components?.text_encoder_format !== 'api'
 
   useEffect(() => {
-    if (isGenerating && !dismissed && !forceApiGenerations && !hasLtxApiKey) {
+    if (isGenerating && !dismissed && !forceApiGenerations && !hasLtxApiKey && !hasLocalTextEncoder) {
       timerRef.current = setTimeout(() => setVisible(true), SHOW_DELAY_MS)
     } else {
       if (timerRef.current) clearTimeout(timerRef.current)
@@ -30,7 +38,7 @@ export function FreeApiKeyBubble({
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current)
     }
-  }, [isGenerating, dismissed, forceApiGenerations, hasLtxApiKey])
+  }, [isGenerating, dismissed, forceApiGenerations, hasLtxApiKey, hasLocalTextEncoder])
 
   if (!visible) return null
 

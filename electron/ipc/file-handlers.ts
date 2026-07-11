@@ -10,6 +10,7 @@ import { validatePath, approvePath } from '../path-validation'
 import { getProjectAssetsPath, setProjectAssetsPath } from '../app-state'
 import { extractVideoFrameToFile, findFfmpegPath, getMediaDurationSeconds, getVideoDimensions, runFfmpeg } from '../export/ffmpeg-utils'
 import { createDownsampledThumbnail, getImageDimensions, getThumbnailPaths } from './image-utils'
+import { trashManagedProjectFiles } from './managed-file-trash'
 import { handle } from './typed-handle'
 
 /** A labeled phase of an asset-import job with a relative weight (0..N). */
@@ -240,23 +241,33 @@ function createVideoBigThumbnail(videoPath: string, bigThumbnailPath: string): v
 }
 
 /**
- * Transcode a project video copy to H.264/AAC for reliable browser playback.
+ * Create a browser-playable sidecar for a project-local primary video.
  *
- * Runs ffmpeg in ISOLATED mode (not registered in `activeExportProcess`, so
- * export-cancel cannot kill it) and streams progress via `onProgress` (0..1)
- * derived from the input's probed duration. The caller owns progress
- * aggregation/blending.
+ * The primary is never touched. ffmpeg writes to an operation-owned temporary
+ * file, which is copied exclusively to a collision-safe persistent proxy path.
  */
-async function transcodeVideoInPlace(videoPath: string, onProgress?: (pct: number) => void): Promise<void> {
+async function createPersistentVideoProxy(primaryPath: string, onProgress?: (pct: number) => void): Promise<string> {
   const ffmpegPath = findFfmpegPath()
   if (!ffmpegPath) {
     throw new Error('ffmpeg not found for video transcoding')
   }
 
-  const tmpPath = videoPath + '.tmp_transcode.mp4'
+  const { dir, name } = path.parse(primaryPath)
+  let tmpPath: string
+  while (true) {
+    tmpPath = path.join(dir, `${name}_proxy_${randomUUID()}.tmp.mp4`)
+    try {
+      const tempFile = fs.openSync(tmpPath, 'wx')
+      fs.closeSync(tempFile)
+      break
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    }
+  }
+
   const args = [
     '-y',
-    '-i', videoPath,
+    '-i', primaryPath,
     '-map', '0:v:0',
     '-map', '0:a?',
     '-c:v', 'libx264',
@@ -270,26 +281,35 @@ async function transcodeVideoInPlace(videoPath: string, onProgress?: (pct: numbe
   ]
 
   // Probe input duration so `out_time_us` can be converted into a 0..1 fraction.
-  const durationSec = getMediaDurationSeconds(videoPath)
+  const durationSec = getMediaDurationSeconds(primaryPath)
   const durationUs = durationSec != null && durationSec > 0
     ? Math.round(durationSec * 1_000_000)
     : undefined
 
-  // Isolated: import transcodes must NOT be killable by the global export-cancel.
-  const result = await runFfmpeg(ffmpegPath, args, { onProgress, isolated: true, durationUs })
-  if (!result.success) {
-    try { fs.unlinkSync(tmpPath) } catch { /* best-effort cleanup */ }
-    throw new Error(`Video transcoding failed for ${videoPath}: ${result.error}`)
-  }
+  try {
+    // Isolated: import transcodes must NOT be killable by the global export-cancel.
+    const result = await runFfmpeg(ffmpegPath, args, { onProgress, isolated: true, durationUs })
+    if (!result.success) {
+      throw new Error(`Video transcoding failed for ${primaryPath}: ${result.error}`)
+    }
 
-  // Replace original with transcoded copy
-  fs.unlinkSync(videoPath)
-  fs.renameSync(tmpPath, videoPath)
+    while (true) {
+      const proxyPath = path.join(dir, `${name}_proxy_${randomUUID()}.mp4`)
+      try {
+        fs.copyFileSync(tmpPath, proxyPath, fs.constants.COPYFILE_EXCL)
+        return proxyPath
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      }
+    }
+  } finally {
+    try { fs.unlinkSync(tmpPath) } catch { /* remove only this operation's temporary proxy */ }
+  }
 }
 
 /**
  * Transcode a user-selected source video to a browser-playable H.264/AAC MP4
- * for preview ONLY. Unlike `transcodeVideoInPlace`, the source is NEVER
+ * for preview ONLY. The source is NEVER
  * mutated: nothing is deleted/renamed/overwritten. The preview MP4 is written
  * to a unique file under the OS temp dir and its path is returned. Progress
  * (0..1) is derived from the input's probed duration and forwarded to
@@ -412,10 +432,8 @@ async function transcodeExrForPreviewImpl(
   return previewPath
 }
 
-// The copied project asset doubles as playback proxy for the legacy MP4 path
-// (transcode-in-place). When a proxyPath is supplied (ProRes/EXR primary), the
-// primary is preserved verbatim and the proxy is copied alongside — the primary
-// is NEVER transcoded/destroyed.
+// Every video primary is preserved verbatim. A supplied proxy is copied
+// alongside; otherwise a persistent H.264/AAC sidecar is generated locally.
 
 function createVisualThumbnails(assetPath: string, type: 'video' | 'image'): { bigThumbnailPath: string; smallThumbnailPath: string } {
   const { bigThumbnailPath: generatedBigThumbnailPath, smallThumbnailPath } = getThumbnailPaths(assetPath)
@@ -608,7 +626,7 @@ export function registerFileHandlers(): void {
         phases.push({ label: 'Importing preview…', weight: 50, indeterminate: true })
         phases.push({ label: 'Finalizing…', weight: 10, indeterminate: true })
       } else if (type === 'video') {
-        // Legacy / no-proxy path: copy + in-place H.264 transcode (the slow op).
+        // No-proxy path: primary copied unchanged + persistent H.264 proxy sidecar generated.
         phases.push({ label: 'Importing asset…', weight: 5, indeterminate: !srcIsDir })
         phases.push({ label: 'Transcoding preview…', weight: 90 })
         phases.push({ label: 'Finalizing…', weight: 5, indeterminate: true })
@@ -637,9 +655,10 @@ export function registerFileHandlers(): void {
         projectProxyPath = copyVisualAssetWithProgress(resolvedProxy, projectId)
         thumbnailSourcePath = projectProxyPath
       } else if (type === 'video') {
-        // Phase 2 (legacy video path): in-place transcode (isolated, progress).
+        // Phase 2 (no-proxy video path): generate a persistent H.264 proxy sidecar.
         tracker.startNext()
-        await transcodeVideoInPlace(destPath, (pct) => tracker.report(pct))
+        projectProxyPath = await createPersistentVideoProxy(destPath, (pct) => tracker.report(pct))
+        thumbnailSourcePath = projectProxyPath
       }
 
       // Final phase: thumbnails + dimensions from the browser-playable source.
@@ -672,6 +691,16 @@ export function registerFileHandlers(): void {
       logger.error(`Error copying file to project assets: ${error}`)
       return { success: false, error: String(error) }
     }
+  })
+
+  handle('trashManagedProjectFiles', async ({ projectId, filePaths }) => {
+    const { shell } = await import('electron')
+    const projectAssetsRoot = getProjectAssetsPath()
+    const generationRoot = path.join(projectAssetsRoot, '.ltx-generations')
+    return trashManagedProjectFiles(
+      { projectId, filePaths },
+      { projectAssetsRoot, generationRoot, trashItem: shell.trashItem },
+    )
   })
 
   handle('makeThumbnailsForProjectAsset', ({ path: assetPath, type }) => {

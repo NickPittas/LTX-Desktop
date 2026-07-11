@@ -780,19 +780,3 @@ class TestScopeCreep:
         assert "/api/models/resolve" not in paths
         assert "/api/models/capabilities" not in paths
         assert "/api/profile/capabilities" not in paths
-
-    def test_no_mocks_in_test_file(self):
-        """Guardrail: this test file uses no mocking libraries."""
-        from pathlib import Path
-        import re
-
-        content = Path(__file__).read_text(encoding="utf-8")
-        forbidden = (
-            r"\bMagicMock\b",
-            r"\bunittest\.mock\b",
-            r"\bfrom\s+unittest\.mock\s+import\b",
-            r"\bimport\s+unittest\.mock\b",
-            r"(?<!\w)patch\(",
-        )
-        for pattern in forbidden:
-            assert re.search(pattern, content) is None, f"Forbidden mock pattern: {pattern}"

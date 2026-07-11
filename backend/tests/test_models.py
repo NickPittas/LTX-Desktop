@@ -460,12 +460,69 @@ _FAST_FAMILY_IDS: frozenset[str] = frozenset(_EXPECTED_MODEL_SELECTION_IDS[:9])
 _FULL_FAMILY_IDS: frozenset[str] = frozenset(_EXPECTED_MODEL_SELECTION_IDS[9:])
 _UNSUPPORTED_WORKFLOW_REASON = (
     "Live model selection is currently available for text-to-video, "
-    "image-to-video, and HDR IC-LoRA only"
+    "image-to-video, HDR IC-LoRA, and IC-LoRA only"
 )
 _NOT_INSTALLED_REASON = "Model checkpoint is not installed"
 
 
 class TestModelSelectionOptions:
+    def test_compatible_profile_ids_include_activation_admissible_profile(
+        self, client, test_state, tmp_path, create_fake_model_files
+    ):
+        create_fake_model_files()
+        selection_id = "ltx-2.3-22b-dev-gguf-q4-k-m"
+        transformer = resolve_model_path(test_state.config.default_models_dir, selection_id)
+        transformer.parent.mkdir(parents=True, exist_ok=True)
+        transformer.write_bytes(b"GGUF")
+        for filename in ("text-projection", "video-vae", "audio-vae"):
+            (tmp_path / filename).write_bytes(b"x")
+        lora = test_state.config.default_models_dir / "adapters" / "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
+        lora.parent.mkdir(parents=True, exist_ok=True)
+        lora.write_bytes(b"LORA")
+        test_state.state.model_profiles = [ModelProfilePayload(
+            id="admissible", name="Admissible", components=ModelComponentPaths(
+                transformer=str(transformer), transformer_format="gguf",
+                text_projection=str(tmp_path / "text-projection"),
+                video_vae=str(tmp_path / "video-vae"), audio_vae=str(tmp_path / "audio-vae"),
+            ),
+        )]
+
+        response = client.get("/api/models/model-options", params={"workflow": "ic-lora"}, headers=_ADMIN_HEADERS)
+        option = next(item for item in response.json()["options"] if item["id"] == selection_id)
+        assert option["compatible_profile_ids"] == ["admissible"]
+        assert option["disabled_reason"] is None
+
+    def test_compatible_profile_ids_empty_when_no_profile_is_runtime_compatible(
+        self, client, test_state, tmp_path, create_fake_model_files
+    ):
+        create_fake_model_files()
+        selection_id = "ltx-2.3-22b-dev-gguf-q4-k-m"
+        transformer = resolve_model_path(test_state.config.default_models_dir, selection_id)
+        transformer.parent.mkdir(parents=True, exist_ok=True)
+        transformer.write_bytes(b"GGUF")
+        for filename in ("text-projection", "video-vae", "audio-vae"):
+            (tmp_path / filename).write_bytes(b"x")
+        test_state.state.model_profiles = [ModelProfilePayload(
+            id="unresolvable", name="Unresolvable", components=ModelComponentPaths(
+                transformer=str(tmp_path / "missing-dev.gguf"), transformer_format="gguf",
+                text_projection=str(tmp_path / "text-projection"),
+                video_vae=str(tmp_path / "video-vae"), audio_vae=str(tmp_path / "audio-vae"),
+            ),
+        )]
+
+        response = client.get("/api/models/model-options", params={"workflow": "ic-lora"}, headers=_ADMIN_HEADERS)
+        option = next(item for item in response.json()["options"] if item["id"] == selection_id)
+        assert option["compatible_profile_ids"] == []
+        assert "no compatible" in option["disabled_reason"].lower()
+
+    def test_profile_independent_option_needs_no_compatible_profile(self, client, create_fake_model_files):
+        create_fake_model_files()
+
+        response = client.get("/api/models/model-options", params={"workflow": "ic-lora"}, headers=_ADMIN_HEADERS)
+        option = next(item for item in response.json()["options"] if item["id"] == "ltx-2.3-22b-distilled")
+        assert option["compatible_profile_ids"] == []
+        assert option["disabled_reason"] is None
+
     def test_endpoint_requires_admin_token(self, client):
         # Valid workflow so param validation passes; guard rejects without token.
         response = client.get(
@@ -598,8 +655,8 @@ class TestModelSelectionOptions:
     def test_installed_gguf_disabled_without_active_profile(
         self, client, test_state, create_fake_model_files
     ):
-        # GGUF installed + canonical distilled LoRA + canonical upscaler, but NO
-        # active profile → the dev/GGUF selection cannot run (no split sidecars).
+        # GGUF installed + canonical distilled LoRA + canonical upscaler, but no
+        # compatible profile → the dev/GGUF selection cannot run.
         create_fake_model_files()
         gguf_cp = "ltx-2.3-22b-dev-gguf-q4-k-m"
         gguf_path = resolve_model_path(test_state.config.default_models_dir, gguf_cp)
@@ -623,7 +680,8 @@ class TestModelSelectionOptions:
         gguf = by_id[gguf_cp]
         assert gguf["installed"] is True
         assert gguf["disabled_reason"] is not None
-        assert "active model profile" in gguf["disabled_reason"].lower()
+        assert "compatible model profile" in gguf["disabled_reason"].lower()
+        assert gguf["compatible_profile_ids"] == []
 
     def test_installed_gguf_enabled_with_suitable_active_profile(
         self, client, test_state, tmp_path, create_fake_model_files
@@ -631,6 +689,10 @@ class TestModelSelectionOptions:
         # Active split-component profile + installed GGUF + canonical distilled
         # LoRA → the dev/GGUF selection is runtime-ready and enabled.
         create_fake_model_files()  # canonical upscaler + text encoder
+        gguf_cp = "ltx-2.3-22b-dev-gguf-q4-k-m"
+        gguf_path = resolve_model_path(test_state.config.default_models_dir, gguf_cp)
+        gguf_path.parent.mkdir(parents=True, exist_ok=True)
+        gguf_path.write_bytes(b"GGUF")
         sidecars: dict[str, str] = {}
         for name in ("tp", "ec", "vvae", "avae", "ups"):
             p = tmp_path / f"{name}.safetensors"
@@ -641,7 +703,7 @@ class TestModelSelectionOptions:
             name="Dev Split",
             source="kijai",
             components=ModelComponentPaths(
-                transformer="/placeholder-dev.gguf",
+                transformer=str(gguf_path),
                 transformer_format="gguf",
                 text_projection=sidecars["tp"],
                 embeddings_connector=sidecars["ec"],
@@ -655,10 +717,6 @@ class TestModelSelectionOptions:
         test_state.state.model_profiles = [profile]
         test_state.state.active_model_profile_id = "dev-split"
 
-        gguf_cp = "ltx-2.3-22b-dev-gguf-q4-k-m"
-        gguf_path = resolve_model_path(test_state.config.default_models_dir, gguf_cp)
-        gguf_path.parent.mkdir(parents=True, exist_ok=True)
-        gguf_path.write_bytes(b"GGUF")
         lora = (
             test_state.config.default_models_dir
             / "adapters"
@@ -677,6 +735,7 @@ class TestModelSelectionOptions:
         gguf = by_id[gguf_cp]
         assert gguf["installed"] is True
         assert gguf["disabled_reason"] is None
+        assert gguf["compatible_profile_ids"] == ["dev-split"]
 
     def test_installed_gguf_enabled_when_embeddings_connector_optional(
         self, client, test_state, tmp_path, create_fake_model_files
@@ -686,6 +745,10 @@ class TestModelSelectionOptions:
         # when the required sidecars (text projection, VAEs) + upscaler +
         # distilled LoRA are available.
         create_fake_model_files()  # canonical upscaler + text encoder
+        gguf_cp = "ltx-2.3-22b-dev-gguf-q4-k-m"
+        gguf_path = resolve_model_path(test_state.config.default_models_dir, gguf_cp)
+        gguf_path.parent.mkdir(parents=True, exist_ok=True)
+        gguf_path.write_bytes(b"GGUF")
         sidecars: dict[str, str] = {}
         for name in ("tp", "vvae", "avae", "ups"):
             p = tmp_path / f"{name}.safetensors"
@@ -696,7 +759,7 @@ class TestModelSelectionOptions:
             name="QuantStack-like",
             source="quantstack",
             components=ModelComponentPaths(
-                transformer="/placeholder-dev.gguf",
+                transformer=str(gguf_path),
                 transformer_format="gguf",
                 text_projection=sidecars["tp"],
                 embeddings_connector=None,  # optional — must not disable
@@ -710,10 +773,6 @@ class TestModelSelectionOptions:
         test_state.state.model_profiles = [profile]
         test_state.state.active_model_profile_id = "quantstack-like"
 
-        gguf_cp = "ltx-2.3-22b-dev-gguf-q4-k-m"
-        gguf_path = resolve_model_path(test_state.config.default_models_dir, gguf_cp)
-        gguf_path.parent.mkdir(parents=True, exist_ok=True)
-        gguf_path.write_bytes(b"GGUF")
         lora = (
             test_state.config.default_models_dir
             / "adapters"
@@ -733,30 +792,30 @@ class TestModelSelectionOptions:
         assert gguf["installed"] is True
         # embeddings_connector absent must NOT disable the option.
         assert gguf["disabled_reason"] is None
+        assert gguf["compatible_profile_ids"] == ["quantstack-like"]
 
     def test_installed_gguf_disabled_when_profile_missing_sidecars(
         self, client, test_state, tmp_path, create_fake_model_files
     ):
-        # Active profile exists but lacks the split sidecars → dev/GGUF disabled
-        # with a clear reason naming the missing components.
+        # Active profile exists but lacks the split sidecars → no compatible
+        # profile can enable the dev/GGUF selection.
         create_fake_model_files()
+        gguf_cp = "ltx-2.3-22b-dev-gguf-q4-k-m"
+        gguf_path = resolve_model_path(test_state.config.default_models_dir, gguf_cp)
+        gguf_path.parent.mkdir(parents=True, exist_ok=True)
+        gguf_path.write_bytes(b"GGUF")
         profile = ModelProfilePayload(
             id="incomplete",
             name="Incomplete",
             source="kijai",
             components=ModelComponentPaths(
-                transformer="/placeholder-dev.gguf",
+                transformer=str(gguf_path),
                 transformer_format="gguf",
                 # No text_projection / embeddings_connector / VAEs.
             ),
         )
         test_state.state.model_profiles = [profile]
         test_state.state.active_model_profile_id = "incomplete"
-
-        gguf_cp = "ltx-2.3-22b-dev-gguf-q4-k-m"
-        gguf_path = resolve_model_path(test_state.config.default_models_dir, gguf_cp)
-        gguf_path.parent.mkdir(parents=True, exist_ok=True)
-        gguf_path.write_bytes(b"GGUF")
 
         response = client.get(
             "/api/models/model-options",
@@ -768,7 +827,8 @@ class TestModelSelectionOptions:
         gguf = by_id[gguf_cp]
         assert gguf["installed"] is True
         assert gguf["disabled_reason"] is not None
-        assert "split components" in gguf["disabled_reason"].lower()
+        assert "compatible model profile" in gguf["disabled_reason"].lower()
+        assert gguf["compatible_profile_ids"] == []
 
     def test_model_options_use_base_video_registry_fast_and_full_families(
         self, client, test_state, create_fake_model_files
@@ -909,12 +969,7 @@ class TestModelSelectionOptions:
     def test_generic_ic_lora_model_options_remain_unsupported(
         self, client, create_fake_model_files
     ):
-        """``workflow=ic-lora`` stays unsupported for live model selection.
-
-        Generic IC-LoRA has no live base-model selection path. Every candidate
-        enumerates but is uniformly disabled with the unsupported-workflow
-        reason (now mentioning text-to-video, image-to-video, and HDR IC-LoRA).
-        """
+        """Generic IC-LoRA uses the same installed/readiness gating as HDR."""
         create_fake_model_files()
 
         response = client.get(
@@ -926,12 +981,18 @@ class TestModelSelectionOptions:
         data = response.json()
         assert data["workflow"] == "ic-lora"
 
-        # Same candidate catalog, but every option is unsupported-disabled.
+        # Same candidate catalog, gated by installation and runtime readiness
+        # rather than workflow support.
         assert [o["id"] for o in data["options"]] == _EXPECTED_MODEL_SELECTION_IDS
         for opt in data["options"]:
-            assert opt["disabled_reason"] == _UNSUPPORTED_WORKFLOW_REASON, (
-                f"{opt['id']} must be unsupported under generic ic-lora"
+            assert opt["disabled_reason"] != _UNSUPPORTED_WORKFLOW_REASON, (
+                f"{opt['id']} must use readiness gating under generic ic-lora"
             )
 
-        # Reason text mentions HDR IC-LoRA (updated gating copy).
-        assert "HDR IC-LoRA" in _UNSUPPORTED_WORKFLOW_REASON
+        distilled = next(o for o in data["options"] if o["id"] == "ltx-2.3-22b-distilled")
+        assert distilled["installed"] is True
+        assert distilled["disabled_reason"] is None
+
+        gguf = next(o for o in data["options"] if o["id"] == "ltx-2.3-22b-dev-gguf-q4-k-m")
+        assert gguf["installed"] is False
+        assert gguf["disabled_reason"] == _NOT_INSTALLED_REASON

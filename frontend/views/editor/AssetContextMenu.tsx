@@ -7,6 +7,7 @@ import type { Asset } from '../../types/project-model'
 import { COLOR_LABELS } from './video-editor-utils'
 import { equalAssetBins, selectAssetBins, selectAssets, selectRegenerationState } from './editor-selectors'
 import { useEditorActions, useEditorStore } from './editor-store'
+import type { DeletionTarget } from '@/hooks/use-managed-asset-deletion'
 
 export interface AssetContextMenuProps {
   asset: Asset
@@ -21,6 +22,7 @@ export interface AssetContextMenuProps {
   setAssetContextMenu: React.Dispatch<React.SetStateAction<{ assetId: string; x: number; y: number } | null>>
   createAssetFromTake: (asset: Asset, take: NonNullable<Asset['takes']>[number]) => Asset
   openCreateBinEditor: (assetIds: string[]) => void
+  requestManagedDeletion: (targets: DeletionTarget[]) => Promise<void>
 }
 
 export function AssetContextMenu({
@@ -36,6 +38,7 @@ export function AssetContextMenu({
   setAssetContextMenu,
   createAssetFromTake,
   openCreateBinEditor,
+  requestManagedDeletion,
 }: AssetContextMenuProps) {
   const actions = useEditorActions()
   const assets = useEditorStore(selectAssets)
@@ -66,7 +69,7 @@ export function AssetContextMenu({
   }
 
   const deleteTargetAssets = () => {
-    actions.deleteAssets(targetIds)
+    void requestManagedDeletion(targetIds.map(assetId => ({ assetId })))
     clearSelection()
     closeMenu()
   }
@@ -190,10 +193,15 @@ export function AssetContextMenu({
                 takes: [firstTake],
                 activeTakeIndex: 0,
                 path: firstTake.path,
+                origin: firstTake.origin,
+                managedSourcePaths: firstTake.managedSourcePaths,
+                proxyPath: firstTake.proxyPath,
                 bigThumbnailPath: firstTake.bigThumbnailPath,
                 smallThumbnailPath: firstTake.smallThumbnailPath,
                 width: firstTake.width,
                 height: firstTake.height,
+                generationElapsedSeconds: firstTake.generationElapsedSeconds,
+                createdAt: firstTake.createdAt,
               })
               closeMenu()
             }}
@@ -205,9 +213,7 @@ export function AssetContextMenu({
           <button
             onClick={() => {
               const activeIdx = asset.activeTakeIndex ?? 0
-              if (confirm(`Delete take ${activeIdx + 1}?`)) {
-                actions.deleteAssetTake(asset.id, activeIdx)
-              }
+              void requestManagedDeletion([{ assetId: asset.id, takeIndex: activeIdx }])
               closeMenu()
             }}
             className="w-full text-left px-3 py-1.5 text-red-400 hover:bg-red-900/30 flex items-center gap-3"
@@ -288,20 +294,28 @@ export function AssetContextMenu({
               const primary = selectedAssets[0]
               const newTakes = selectedAssets.map(a => ({
                 path: a.path,
+                origin: a.origin,
+                managedSourcePaths: a.managedSourcePaths,
+                proxyPath: a.proxyPath,
                 bigThumbnailPath: a.bigThumbnailPath,
                 smallThumbnailPath: a.smallThumbnailPath,
                 width: a.width,
                 height: a.height,
                 createdAt: a.createdAt,
+                generationElapsedSeconds: a.generationElapsedSeconds,
               }))
               actions.updateAsset(primary.id, {
                 takes: newTakes,
                 activeTakeIndex: 0,
                 path: newTakes[0].path,
+                origin: newTakes[0].origin,
+                managedSourcePaths: newTakes[0].managedSourcePaths,
+                proxyPath: newTakes[0].proxyPath,
                 bigThumbnailPath: newTakes[0].bigThumbnailPath,
                 smallThumbnailPath: newTakes[0].smallThumbnailPath,
                 width: newTakes[0].width,
                 height: newTakes[0].height,
+                generationElapsedSeconds: newTakes[0].generationElapsedSeconds,
               })
               actions.deleteAssets(selectedAssets.slice(1).map(a => a.id))
               clearSelection()

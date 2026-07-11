@@ -779,6 +779,7 @@ class ModelSelectionOption(BaseModel):
     # registry (:mod:`services.base_video_model_registry`).
     pipeline_family: LTXVideoGenPipelineFamily
     disabled_reason: str | None = None
+    compatible_profile_ids: list[str]
     repo_id: str
     source_url: str
     canonical_relative_path: str
@@ -1005,8 +1006,6 @@ class IcLoraGenerateRequest(BaseModel):
     model_selection: ModelSelectionID | None = None
     mask_path: str | None = None
     mask_grow_px: int = Field(default=30, ge=0, le=128, description="Mask dilation radius in pixels. Controls LTXVDilateVideoMask radii. 0=no dilation, default=30 matches official full-res (stage2) radius")
-    laplacian_blend_grow: int = Field(default=12, ge=0, le=64, description="Controls Laplacian pyramid blend mask_low_res_dilation for inpaint. Larger values expand blend region at low-res level. Separate from mask_grow_px (dilation radii) and final_mask_blur_px (raw mask feather).")
-    final_mask_blur_px: int = Field(default=6, ge=0, le=64, description="Blur radius for final raw-mask guard feather. Smoothens inpaint edge. 0=no feather. Separate from laplacian_blend_grow (pyramid blend level) and mask_grow_px (model context dilation).")
     lora_strength: float = Field(default=1.0, ge=0.0, le=2.0)
     save_stage_1_preview: bool = False
     width: int = Field(default=704, ge=64, description="T2V output width (ingredients/no-video only)")

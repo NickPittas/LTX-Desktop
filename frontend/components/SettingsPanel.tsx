@@ -7,7 +7,7 @@ import {
   type VideoGenerationModelSpecItem,
 } from '../lib/video-generation-model-specs'
 import type { OutputFormat } from '../lib/output-formats'
-import type { ModelCheckpointID } from '../lib/model-selection'
+import type { ModelSelectionID } from '../lib/model-selection'
 
 export type GenerationMode = 'text-to-video' | 'image-to-video' | 'text-to-image'
 
@@ -20,7 +20,7 @@ export interface GenerationSettings {
   cameraMotion: string
   aspectRatio?: string
   outputFormat?: OutputFormat
-  modelSelection?: ModelCheckpointID | null
+  modelSelection?: ModelSelectionID | null
   // Image-specific settings
   imageResolution: string
   imageAspectRatio: string

@@ -271,9 +271,20 @@ class MediaEncoderImpl:
         # Temp path for the external (untagged) encode — remuxed into primary_path.
         temp_path = str(out_file.with_suffix(out_file.suffix + ".untagged.mp4"))
 
+        if isinstance(video, torch.Tensor):
+            normalized_video: torch.Tensor | Iterator[torch.Tensor] = (
+                video.float().div(255.0) if video.dtype == torch.uint8 else video
+            )
+        else:
+            def _normalized_chunks() -> Iterator[torch.Tensor]:
+                for chunk in video:
+                    yield chunk.float().div(255.0) if chunk.dtype == torch.uint8 else chunk
+
+            normalized_video = _normalized_chunks()
+
         try:
             encode_video(
-                video=video,
+                video=normalized_video,
                 fps=fps,
                 audio=audio,
                 output_path=temp_path,

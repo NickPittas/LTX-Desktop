@@ -12,6 +12,17 @@ import pytest
 from state.app_state_types import HfAuthenticated, HfNotAuthenticated, HfOAuthPending
 
 
+@dataclass
+class FakeTokenResponse:
+    access_token: str
+    expires_in: int
+    status_code: int = 200
+    text: str = ""
+
+    def json(self) -> dict[str, object]:
+        return {"access_token": self.access_token, "expires_in": self.expires_in}
+
+
 class TestStartLogin:
     def test_returns_correct_fields(self, test_state) -> None:
         resp = test_state.hf_auth.start_login()
@@ -75,15 +86,8 @@ class TestHandleCallback:
         """Full callback flow with a faked HF token response."""
         resp = test_state.hf_auth.start_login()
 
-        @dataclass
-        class FakeTokenResponse:
-            status_code: int = 200
-            text: str = ""
-            def json(self) -> dict[str, object]:
-                return {"access_token": "hf_test_token_123", "expires_in": 3600}
-
         import handlers.hf_auth_handler as handler_module
-        monkeypatch.setattr(handler_module.requests, "post", lambda *_args, **_kwargs: FakeTokenResponse())
+        monkeypatch.setattr(handler_module.requests, "post", lambda *_args, **_kwargs: FakeTokenResponse("hf_test_token_123", 3600))
 
         html = test_state.hf_auth.handle_callback(code="valid-code", state_param=resp.state, error="")
         assert "Authentication Successful" in html
@@ -165,15 +169,8 @@ class TestTokenPersistence:
     def test_authenticated_state_writes_token_file(self, test_state, monkeypatch) -> None:
         resp = test_state.hf_auth.start_login()
 
-        @dataclass
-        class FakeTokenResponse:
-            status_code: int = 200
-            text: str = ""
-            def json(self) -> dict[str, object]:
-                return {"access_token": "persist_me", "expires_in": 7200}
-
         import handlers.hf_auth_handler as handler_module
-        monkeypatch.setattr(handler_module.requests, "post", lambda *_args, **_kwargs: FakeTokenResponse())
+        monkeypatch.setattr(handler_module.requests, "post", lambda *_args, **_kwargs: FakeTokenResponse("persist_me", 7200))
 
         test_state.hf_auth.handle_callback(code="code", state_param=resp.state, error="")
 
@@ -186,15 +183,8 @@ class TestTokenPersistence:
     def test_logout_clears_token_file(self, test_state, monkeypatch) -> None:
         resp = test_state.hf_auth.start_login()
 
-        @dataclass
-        class FakeTokenResponse:
-            status_code: int = 200
-            text: str = ""
-            def json(self) -> dict[str, object]:
-                return {"access_token": "to_be_cleared", "expires_in": 7200}
-
         import handlers.hf_auth_handler as handler_module
-        monkeypatch.setattr(handler_module.requests, "post", lambda *_args, **_kwargs: FakeTokenResponse())
+        monkeypatch.setattr(handler_module.requests, "post", lambda *_args, **_kwargs: FakeTokenResponse("to_be_cleared", 7200))
 
         test_state.hf_auth.handle_callback(code="code", state_param=resp.state, error="")
         assert self._token_file(test_state).exists()
@@ -248,15 +238,8 @@ class TestTokenPersistence:
         """When get_auth_status detects expiry, the token file should also be cleared."""
         resp = test_state.hf_auth.start_login()
 
-        @dataclass
-        class FakeTokenResponse:
-            status_code: int = 200
-            text: str = ""
-            def json(self) -> dict[str, object]:
-                return {"access_token": "short_lived", "expires_in": 1}
-
         import handlers.hf_auth_handler as handler_module
-        monkeypatch.setattr(handler_module.requests, "post", lambda *_args, **_kwargs: FakeTokenResponse())
+        monkeypatch.setattr(handler_module.requests, "post", lambda *_args, **_kwargs: FakeTokenResponse("short_lived", 1))
 
         test_state.hf_auth.handle_callback(code="code", state_param=resp.state, error="")
         assert self._token_file(test_state).exists()

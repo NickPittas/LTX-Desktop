@@ -27,10 +27,3 @@ export async function backendAdminFetch(path: string, init?: RequestInit): Promi
   })
   return new Response(result.body, { status: result.status, statusText: result.statusText })
 }
-
-export async function backendWsUrl(path: string): Promise<string> {
-  const { url, token } = await getBackendCredentials()
-  const ws = url.replace('http://', 'ws://')
-  const sep = path.includes('?') ? '&' : '?'
-  return `${ws}${path}${sep}token=${token}`
-}

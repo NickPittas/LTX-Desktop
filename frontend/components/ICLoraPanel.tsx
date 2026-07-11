@@ -38,8 +38,6 @@ interface ICLoraPanelProps {
     images: { path: string; frame?: number; strength?: number }[]
     ready: boolean
     maskGrowPx: number
-    laplacianBlendGrow: number
-    finalMaskBlurPx: number
   }) => void
 }
 
@@ -254,13 +252,12 @@ export function ICLoraPanel({
   maskPathRef.current = maskPath
   const [firstFrameAnchorPath, setFirstFrameAnchorPath] = useState<string | null>(null)
   const [maskGrowPx, setMaskGrowPx] = useState(30)
-  const [laplacianBlendGrow, setLaplacianBlendGrow] = useState(12)
-  const [finalMaskBlurPx, setFinalMaskBlurPx] = useState(6)
   const [ingredientPaths, setIngredientPaths] = useState<string[]>([])
 
   const showConditioning = internalCondType !== null
   const selectedWorkflow = getAdapterEntry(internalAdapterId)?.workflow
   const isHdrWorkflow = selectedWorkflow === 'hdr'
+  const nonHdrOutputPath = _outputProxyPath ?? _outputVideoPath
   const depthCpId = 'dpt-hybrid-midas' as ModelCheckpointID
   const needsDepthCp = showConditioning && conditioningType === 'depth'
   const [requiredIcLoraCpIds, setRequiredIcLoraCpIds] = useState<ModelCheckpointID[]>([])
@@ -295,8 +292,6 @@ export function ICLoraPanel({
     setMaskPath(null)
     setIngredientPaths([])
     setMaskGrowPx(30)
-    setLaplacianBlendGrow(12)
-    setFinalMaskBlurPx(6)
     setFirstFrameAnchorPath(null)
     onConditioningTypeChange?.(null)
     onConditioningStrengthChange?.(1.0)
@@ -333,10 +328,8 @@ export function ICLoraPanel({
       images,
       ready,
       maskGrowPx: selectedEntry?.workflow === 'in_outpainting' ? maskGrowPx : 30,
-      laplacianBlendGrow: selectedEntry?.workflow === 'in_outpainting' ? laplacianBlendGrow : 12,
-      finalMaskBlurPx: selectedEntry?.workflow === 'in_outpainting' ? finalMaskBlurPx : 6,
     })
-    }, [inputVideoUrl, inputVideoPath, conditioningType, conditioningStrength, internalAdapterId, icLoraReady, maskPath, maskGrowPx, laplacianBlendGrow, finalMaskBlurPx, ingredientPaths, firstFrameAnchorPath, onChange])
+    }, [inputVideoUrl, inputVideoPath, conditioningType, conditioningStrength, internalAdapterId, icLoraReady, maskPath, maskGrowPx, ingredientPaths, firstFrameAnchorPath, onChange])
 
   const checkIcLoraAvailability = useCallback(async () => {
     setIsCheckingIcLora(true)
@@ -1091,12 +1084,12 @@ export function ICLoraPanel({
                     </p>
                   </div>
                 </>
-              ) : _outputVideoPath ? (
+              ) : nonHdrOutputPath ? (
                 <video
-                  src={pathToFileUrl(_outputVideoPath)}
+                  src={pathToFileUrl(nonHdrOutputPath)}
                   className="w-full h-full object-contain"
                   controls
-                  onError={(e) => console.error('[ICLoraPanel] Output video failed to load:', _outputVideoPath, (e.target as HTMLVideoElement)?.error)}
+                  onError={(e) => console.error('[ICLoraPanel] Output video failed to load:', nonHdrOutputPath, (e.target as HTMLVideoElement)?.error)}
                 />
               ) : isProcessing ? (
                 <div className="text-center p-4">

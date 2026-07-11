@@ -2261,133 +2261,12 @@ class TestIcLoraEmptyPromptWorkflow:
         assert fake_services.ic_lora_pipeline.last_lora_paths == [str(adapter_file)]
 
 
-class TestIcLoraLaplacianBlendGrow:
-    """laplacian_blend_grow separate field forwarded to pipeline for inpaint final blend."""
+class TestIcLoraInpaintRemovedControls:
 
-    def test_default_forwards_12(self, client, test_state,
+    def test_removed_controls_are_not_forwarded(self, client, test_state,
                                  create_fake_model_files, create_fake_ic_lora_files,
                                  fake_services):
-        """Default laplacian_blend_grow=12 and final_mask_blur_px=6 forwarded."""
-        create_fake_model_files()
-        from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
-        adapter = OFFICIAL_LTX23_ADAPTERS["in_outpainting"]
-        adapter_path = test_state.config.default_models_dir / "adapters" / adapter.filename
-        adapter_path.parent.mkdir(parents=True, exist_ok=True)
-        adapter_path.write_bytes(b"\x00" * 1024)
-
-        test_state.state.app_settings.use_local_text_encoder = True
-        fake_services.ic_lora_pipeline.bind_singleton(fake_services.ic_lora_pipeline)
-
-        video_path = test_state.config.outputs_dir / "test_video.mp4"
-        video_path.write_bytes(b"\x00" * 100)
-        test_state.video_processor.register_video(str(video_path),
-                                                   FakeCapture(frames=["frame-a", "frame-b"]))
-
-        mask_path = test_state.config.outputs_dir / "test_mask.mp4"
-        mask_path.write_bytes(b"\x00" * 100)
-
-        response = client.post(
-            "/api/ic-lora/generate",
-            json={
-                "video_path": str(video_path),
-                "prompt": "add a car",
-                "images": [],
-                "adapter_id": "in_outpainting",
-                "mask_path": str(mask_path),
-            },
-        )
-        assert response.status_code == 200, f"Unexpected status: {response.json()}"
-        kwargs = fake_services.ic_lora_pipeline.generate_calls[0]
-        assert kwargs.get("laplacian_blend_grow") == 12, (
-            f"Expected default laplacian_blend_grow=12, got {kwargs.get('laplacian_blend_grow')!r}"
-        )
-        assert kwargs.get("final_mask_blur_px") == 6, (
-            f"Expected default final_mask_blur_px=6, got {kwargs.get('final_mask_blur_px')!r}"
-        )
-
-    def test_custom_laplacian_blend_grow(self, client, test_state,
-                                         create_fake_model_files, fake_services):
-        """Custom laplacian_blend_grow forwarded to pipeline."""
-        create_fake_model_files()
-        from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
-        adapter = OFFICIAL_LTX23_ADAPTERS["in_outpainting"]
-        adapter_path = test_state.config.default_models_dir / "adapters" / adapter.filename
-        adapter_path.parent.mkdir(parents=True, exist_ok=True)
-        adapter_path.write_bytes(b"\x00" * 1024)
-
-        test_state.state.app_settings.use_local_text_encoder = True
-        fake_services.ic_lora_pipeline.bind_singleton(fake_services.ic_lora_pipeline)
-
-        video_path = test_state.config.outputs_dir / "test_video.mp4"
-        video_path.write_bytes(b"\x00" * 100)
-        test_state.video_processor.register_video(str(video_path),
-                                                   FakeCapture(frames=["frame-a", "frame-b"]))
-
-        mask_path = test_state.config.outputs_dir / "test_mask.mp4"
-        mask_path.write_bytes(b"\x00" * 100)
-
-        response = client.post(
-            "/api/ic-lora/generate",
-            json={
-                "video_path": str(video_path),
-                "prompt": "add a car",
-                "images": [],
-                "adapter_id": "in_outpainting",
-                "mask_path": str(mask_path),
-                "laplacian_blend_grow": 3,
-                "mask_grow_px": 10,
-            },
-        )
-        assert response.status_code == 200, f"Unexpected status: {response.json()}"
-        kwargs = fake_services.ic_lora_pipeline.generate_calls[0]
-        assert kwargs.get("laplacian_blend_grow") == 3, (
-            f"Expected laplacian_blend_grow=3, got {kwargs.get('laplacian_blend_grow')!r}"
-        )
-
-    def test_independent_of_mask_grow_px(self, client, test_state,
-                                         create_fake_model_files, fake_services):
-        """laplacian_blend_grow does not affect mask_grow_px."""
-        create_fake_model_files()
-        from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
-        adapter = OFFICIAL_LTX23_ADAPTERS["in_outpainting"]
-        adapter_path = test_state.config.default_models_dir / "adapters" / adapter.filename
-        adapter_path.parent.mkdir(parents=True, exist_ok=True)
-        adapter_path.write_bytes(b"\x00" * 1024)
-
-        test_state.state.app_settings.use_local_text_encoder = True
-        fake_services.ic_lora_pipeline.bind_singleton(fake_services.ic_lora_pipeline)
-
-        video_path = test_state.config.outputs_dir / "test_video.mp4"
-        video_path.write_bytes(b"\x00" * 100)
-        test_state.video_processor.register_video(str(video_path),
-                                                   FakeCapture(frames=["frame-a", "frame-b"]))
-
-        mask_path = test_state.config.outputs_dir / "test_mask.mp4"
-        mask_path.write_bytes(b"\x00" * 100)
-
-        response = client.post(
-            "/api/ic-lora/generate",
-            json={
-                "video_path": str(video_path),
-                "prompt": "add a car",
-                "images": [],
-                "adapter_id": "in_outpainting",
-                "mask_path": str(mask_path),
-                "laplacian_blend_grow": 10,
-            },
-        )
-        assert response.status_code == 200, f"Unexpected status: {response.json()}"
-        kwargs = fake_services.ic_lora_pipeline.generate_calls[0]
-        assert kwargs.get("laplacian_blend_grow") == 10, (
-            f"Expected laplacian_blend_grow=10, got {kwargs.get('laplacian_blend_grow')!r}"
-        )
-        assert kwargs.get("mask_grow_px") == 30, (
-            f"mask_grow_px should still default to 30, got {kwargs.get('mask_grow_px')!r}"
-        )
-
-    def test_custom_final_mask_blur_px(self, client, test_state,
-                                        create_fake_model_files, fake_services):
-        """Custom final_mask_blur_px=14 forwarded independently of laplacian_blend_grow."""
+        """Removed request controls are not forwarded to the inpaint pipeline."""
         create_fake_model_files()
         from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
         adapter = OFFICIAL_LTX23_ADAPTERS["in_outpainting"]
@@ -2420,12 +2299,8 @@ class TestIcLoraLaplacianBlendGrow:
         )
         assert response.status_code == 200, f"Unexpected status: {response.json()}"
         kwargs = fake_services.ic_lora_pipeline.generate_calls[0]
-        assert kwargs.get("laplacian_blend_grow") == 20, (
-            f"Expected laplacian_blend_grow=20, got {kwargs.get('laplacian_blend_grow')!r}"
-        )
-        assert kwargs.get("final_mask_blur_px") == 14, (
-            f"Expected final_mask_blur_px=14, got {kwargs.get('final_mask_blur_px')!r}"
-        )
+        assert "laplacian_blend_grow" not in kwargs
+        assert "final_mask_blur_px" not in kwargs
 
 
 class TestIcLoraResolution:

@@ -80,6 +80,7 @@ export interface UseRegenerationParams {
   regenGenerate: (prompt: string, imagePath: string | null, settings: GenerationSettings) => Promise<void>
   regenGenerateImage: (prompt: string, settings: GenerationSettings) => Promise<void>
   regenVideoPath: string | null
+  regenProxyPath: string | null
   regenImagePath: string | null
   isRegenerating: boolean
   regenCancel: () => void
@@ -94,6 +95,7 @@ export function useRegeneration(params: UseRegenerationParams) {
     regenGenerate,
     regenGenerateImage,
     regenVideoPath,
+    regenProxyPath,
     regenImagePath,
     isRegenerating,
     regenCancel,
@@ -250,13 +252,14 @@ export function useRegeneration(params: UseRegenerationParams) {
 
   const persistGeneratedTake = useCallback(async (
     generatedPath: string,
+    proxyPath: string | null,
     type: 'video' | 'image',
     assetId: string,
     clipId: string | null,
   ) => {
     if (!projectId) return
 
-    const copied = await addVisualAssetToProject(generatedPath, projectId, type)
+    const copied = await addVisualAssetToProject(generatedPath, projectId, type, proxyPath || undefined)
     if (!copied) {
       logger.error(`Failed to persist regenerated ${type}: ${generatedPath}`)
       cancelClipRegeneration()
@@ -266,6 +269,9 @@ export function useRegeneration(params: UseRegenerationParams) {
 
     applyGeneratedTake(assetId, {
       path: copied.path,
+      origin: 'generated',
+      managedSourcePaths: [...new Set([generatedPath, proxyPath].filter((path): path is string => Boolean(path)))],
+      proxyPath: copied.proxyPath ?? undefined,
       bigThumbnailPath: copied.bigThumbnailPath,
       smallThumbnailPath: copied.smallThumbnailPath,
       width: copied.width,
@@ -277,7 +283,7 @@ export function useRegeneration(params: UseRegenerationParams) {
 
   useEffect(() => {
     if (!regenVideoPath || !regeneratingAssetId || !projectId || isRegenerating) return
-    void persistGeneratedTake(regenVideoPath, 'video', regeneratingAssetId, regeneratingClipId)
+    void persistGeneratedTake(regenVideoPath, regenProxyPath, 'video', regeneratingAssetId, regeneratingClipId)
   }, [
     isRegenerating,
     persistGeneratedTake,
@@ -285,11 +291,12 @@ export function useRegeneration(params: UseRegenerationParams) {
     regeneratingAssetId,
     regeneratingClipId,
     regenVideoPath,
+    regenProxyPath,
   ])
 
   useEffect(() => {
     if (!regenImagePath || !regeneratingAssetId || !projectId || isRegenerating) return
-    void persistGeneratedTake(regenImagePath, 'image', regeneratingAssetId, regeneratingClipId)
+    void persistGeneratedTake(regenImagePath, null, 'image', regeneratingAssetId, regeneratingClipId)
   }, [
     isRegenerating,
     persistGeneratedTake,

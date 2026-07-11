@@ -10,6 +10,7 @@ export const generationModeValues = [
 ] as const
 
 export const assetTypeValues = ['image', 'video', 'audio', 'adjustment'] as const
+export const assetOriginValues = ['generated', 'imported', 'unknown'] as const
 export const timelineClipTypeValues = [...assetTypeValues, 'text'] as const
 export const transitionTypeValues = [
   'none',
@@ -74,6 +75,8 @@ export const generationParamsSchema = z.object({
 
 export const assetTakeSchema = z.object({
   path: z.string(),
+  origin: z.enum(assetOriginValues).optional(),
+  managedSourcePaths: z.array(z.string()).optional(),
   proxyPath: z.string().optional(),
   bigThumbnailPath: z.string().optional(),
   smallThumbnailPath: z.string().optional(),
@@ -266,6 +269,8 @@ export const assetSchema = z.object({
   id: z.string(),
   type: z.enum(assetTypeValues),
   path: z.string(),
+  origin: z.enum(assetOriginValues).optional(),
+  managedSourcePaths: z.array(z.string()).optional(),
   proxyPath: z.string().optional(),
   bigThumbnailPath: z.string().optional(),
   smallThumbnailPath: z.string().optional(),

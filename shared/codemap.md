@@ -29,10 +29,10 @@ This folder defines types only — no runtime control flow. The data flow it ena
 - **First-run/license:** `checkFirstRun` (`{needsSetup, needsLicense}`), `acceptLicense`, `completeSetup`, `fetchLicenseText`, `getNoticesText`.
 - **External links:** `openLtxApiKeyPage`, `openLtxBillingPage`, `openFalApiKeyPage`, `openHuggingFaceRepo({repoId})`, `openHuggingFaceAuth({clientId, redirectUri, scope, state, codeChallenge, codeChallengeMethod})`, `openParentFolderOfFile({filePath})`, `showItemInFolder({filePath})`.
 - **Logs:** `getLogs`, `getLogPath` (`{logPath, logDir}`), `openLogFolder`.
-- **Paths:** `getResourcePath`, `getDownloadsPath`.
+- **Paths:** `getResourcePath`.
 - **Project assets:** `addVisualAssetToProject` (optional `proxyPath` + `jobId`; returns optional `proxyPath` — when `proxyPath` is supplied the primary is preserved and the proxy copied), `addGenericAssetToProject`, `makeThumbnailsForProjectAsset`, `makeDimensionsForProjectAsset`, `getProjectAssetsPath`, `openProjectAssetsPathChangeDialog` (all `ipcResult`-shaped), `transcodeVideoForPreview` (`{srcPath, jobId?}` → `{path}` preview MP4; source is never mutated, progress streamed on `asset:importProgress`).
 - **File dialogs/save:** `showSaveDialog`, `saveFile`, `saveBinaryFile` (`ArrayBuffer`), `showOpenDirectoryDialog`, `searchDirectoryForFiles` (`Record<filename, path>`), `checkFilesExist`, `showOpenFileDialog`.
-- **Export:** `exportNative` (clips + codec + letterbox + subtitles), `exportCancel` (`{sessionId}` — accepted but unused by current impl).
+- **Export:** `exportNative` (clips + codec + letterbox + subtitles), zero-argument `exportCancel`.
 - **Python lifecycle:** `checkPythonReady`, `startPythonSetup`, `startPythonBackend`, `getBackendHealthStatus` (`BackendHealthStatus | null`).
 - **Video processing:** `extractVideoFrame` (`{videoPath, seekTime, width?, quality?}` → `{path}`).
 - **Logging:** `writeLog` (`{level, message}`).

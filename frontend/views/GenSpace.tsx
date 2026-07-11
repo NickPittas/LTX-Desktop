@@ -14,8 +14,10 @@ import { createLocalGenerationError, type GenerationError } from '../lib/generat
 import { useRetake } from '../hooks/use-retake'
 import { useIcLora } from '../hooks/use-ic-lora'
 import { useModelSelectionOptions } from '../hooks/use-model-selection-options'
+import { useModelProfiles } from '../hooks/use-model-profiles'
 import type { ModelSelectionID, ModelSelectionOption, ModelSelectionWorkflow } from '../lib/model-selection'
 import { findModelOption, groupModelOptions, isModelOptionSelectable } from '../lib/model-selection'
+import type { ModelProfileActivateResponse, ModelProfileActivationErrorCode, ModelProfilePayload } from '../types/model-profile'
 import type { ICLoraConditioningType } from '../components/ICLoraPanel'
 import type { Asset } from '../types/project-model'
 import { GenerationErrorDialog } from '../components/GenerationErrorDialog'
@@ -38,6 +40,8 @@ import { logger } from '../lib/logger'
 import { RetakePanel } from '../components/RetakePanel'
 import { ICLoraPanel, CONDITIONING_TYPES } from '../components/ICLoraPanel'
 import { FreeApiKeyBubble } from '../components/FreeApiKeyBubble'
+import { useManagedAssetDeletion } from '../hooks/use-managed-asset-deletion'
+import { ManagedAssetDeletionDialog } from '../components/ManagedAssetDeletionDialog'
 
 // Asset card with hover overlays
 function AssetCard({
@@ -375,6 +379,13 @@ function ModelSelectionPopover({
   disabled,
   isLoading,
   errorMessage,
+  profileAware,
+  activeProfileId: _activeProfileId,
+  profiles,
+  activateProfileSafe,
+  refreshProfiles,
+  refreshOptions,
+  activationScope,
 }: {
   options: ModelSelectionOption[]
   selectedId: ModelSelectionID | null
@@ -382,13 +393,31 @@ function ModelSelectionPopover({
   disabled?: boolean
   isLoading?: boolean
   errorMessage?: string | null
+  profileAware?: boolean
+  activeProfileId?: string | null
+  profiles?: ModelProfilePayload[]
+  activateProfileSafe?: (profileId: string) => Promise<
+    | { ok: true; data: ModelProfileActivateResponse }
+    | { ok: false; error: { code: ModelProfileActivationErrorCode; message: string } }
+  >
+  refreshProfiles?: () => Promise<void>
+  refreshOptions?: () => Promise<ModelSelectionOption[]>
+  activationScope?: string | null
 }) {
   const [isOpen, setIsOpen] = useState(false)
   const popoverRef = useRef<HTMLDivElement>(null)
+  const [pendingOption, setPendingOption] = useState<ModelSelectionOption | null>(null)
+  const [activationError, setActivationError] = useState<string | null>(null)
+  const [isActivating, setIsActivating] = useState(false)
+  const activationTokenRef = useRef(0)
+  const mountedRef = useRef(true)
+  useEffect(() => () => { mountedRef.current = false; activationTokenRef.current += 1 }, [])
+  useEffect(() => { activationTokenRef.current += 1 }, [profileAware, activationScope])
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        activationTokenRef.current += 1
         setIsOpen(false)
       }
     }
@@ -402,10 +431,75 @@ function ModelSelectionPopover({
   const triggerLabel = selectedOption ? selectedOption.label : 'Auto'
   const grouped = groupModelOptions(options)
 
+  const activateAndCommit = useCallback(async (option: ModelSelectionOption, profileId: string) => {
+    if (!activateProfileSafe || !refreshProfiles || !refreshOptions) return
+    const token = ++activationTokenRef.current
+    setIsActivating(true)
+    setActivationError(null)
+
+    const result = await activateProfileSafe(profileId)
+    if (!mountedRef.current || token !== activationTokenRef.current) return
+    if (!result.ok) {
+      setIsActivating(false)
+      setActivationError(result.error.message)
+      return
+    }
+
+    await refreshProfiles()
+    const freshOptions = await refreshOptions()
+    if (!mountedRef.current || token !== activationTokenRef.current) return
+    const freshOption = findModelOption(freshOptions, option.id)
+    if (!freshOption || !isModelOptionSelectable(freshOption)) {
+      setIsActivating(false)
+      setActivationError('This model is no longer available after refreshing profiles.')
+      return
+    }
+    if (!freshOption.compatible_profile_ids.includes(profileId)) {
+      setIsActivating(false)
+      setActivationError('The activated profile is no longer compatible with this model after refresh.')
+      return
+    }
+
+    onChange(option.id)
+    setIsActivating(false)
+    setPendingOption(null)
+    setActivationError(null)
+    setIsOpen(false)
+  }, [activateProfileSafe, refreshProfiles, refreshOptions, onChange])
+
+  const handleOptionClick = useCallback((option: ModelSelectionOption) => {
+    if (option.disabled_reason || isActivating) return
+    if (!profileAware || option.compatible_profile_ids.length === 0) {
+      onChange(option.id)
+      setIsOpen(false)
+      return
+    }
+    if (option.compatible_profile_ids.length > 1) {
+      setPendingOption(option)
+      setActivationError(null)
+      return
+    }
+    const [profileId] = option.compatible_profile_ids
+    void activateAndCommit(option, profileId)
+  }, [profileAware, onChange, activateAndCommit, isActivating])
+
+  const handleTriggerClick = () => {
+    if (disabled) return
+    if (!isOpen) {
+      setPendingOption(null)
+      setActivationError(null)
+      setIsActivating(false)
+    }
+    if (isOpen) activationTokenRef.current += 1
+    setIsOpen(!isOpen)
+  }
+
+  const inlineError = activationError || errorMessage
+
   return (
     <div ref={popoverRef} className="relative">
       <button
-        onClick={() => !disabled && setIsOpen(!isOpen)}
+        onClick={handleTriggerClick}
         disabled={disabled}
         className={`flex min-w-0 max-w-[12rem] items-center gap-1 px-2 py-1.5 rounded-md transition-colors ${
           disabled
@@ -426,107 +520,166 @@ function ModelSelectionPopover({
 
       {isOpen && !disabled && (
         <div className="absolute bottom-full left-0 mb-2 bg-zinc-800 border border-zinc-700 rounded-md p-2 min-w-[260px] max-w-[320px] shadow-xl z-[9999]">
-          <div className="flex items-center justify-between text-[10px] text-zinc-500 uppercase tracking-wider mb-2">
-            <span>Select checkpoint</span>
-            <span className="text-zinc-600">Current profile when Auto</span>
-          </div>
-
-          <p className="mb-2 px-1 text-[10px] leading-snug text-zinc-400">
-            Auto uses the active model profile. Pick an installed option to override it for this generation.
-          </p>
-          <p className="mb-2 px-1 text-[10px] leading-snug text-zinc-500">
-            The Fast pipeline setting controls generation speed and quality, not your model profile.
-          </p>
-
-          {errorMessage && (
-            <div className="mb-2 px-2 py-1.5 rounded bg-red-500/10 text-[11px] text-red-400">
-              {errorMessage}
+          {isActivating && (
+            <div className="absolute inset-0 bg-zinc-800/80 flex items-center justify-center rounded-md z-10">
+              <div className="w-5 h-5 border-2 border-zinc-600 border-t-zinc-400 rounded-full animate-spin" />
             </div>
           )}
 
-          <div className="space-y-2 max-h-[320px] overflow-y-auto [scrollbar-gutter:stable]">
-            <button
-              onClick={() => { onChange(null); setIsOpen(false) }}
-              className={`w-full flex items-center justify-between px-2 py-2 rounded-md transition-colors text-left ${
-                selectedId === null ? 'bg-white/20 hover:bg-white/25' : 'hover:bg-zinc-700'
-              }`}
-            >
-              <span className={`text-sm ${selectedId === null ? 'text-white font-medium' : 'text-zinc-300'}`}>
-                Auto
-              </span>
-              <span className="text-[10px] text-zinc-500">Current profile</span>
-              {selectedId === null && (
-                <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                </svg>
-              )}
-            </button>
-
-            <div className="h-px bg-zinc-700/60 my-1" />
-
-            {grouped.map((section) => (
-              <div key={section.section}>
-                <div className="px-2 pt-1 pb-1 text-[10px] font-semibold text-zinc-500 uppercase tracking-wider">
-                  {section.sectionLabel}
-                </div>
-                {section.groups.map((group) => (
-                  <div key={`${section.section}-${group.variantGroup}-${group.group}`}>
-                    {group.variantGroup && group.variantGroup !== group.group && (
-                      <div className="px-2 pt-1.5 pb-0.5 text-[10px] text-zinc-600">
-                        {group.variantGroup}
-                      </div>
-                    )}
-                    <div className="space-y-0.5">
-                      {group.options.map((option) => {
-                        const isSelected = option.id === selectedId
-                        const isDisabled = Boolean(option.disabled_reason)
-                        return (
-                          <button
-                            key={option.id}
-                            onClick={() => {
-                              if (isDisabled) return
-                              onChange(option.id)
-                              setIsOpen(false)
-                            }}
-                            disabled={isDisabled}
-                            className={`w-full flex flex-col px-2 py-1.5 rounded-md transition-colors text-left ${
-                              isDisabled
-                                ? 'cursor-not-allowed opacity-60'
-                                : isSelected
-                                  ? 'bg-white/20 hover:bg-white/25'
-                                  : 'hover:bg-zinc-700'
-                            }`}
-                          >
-                            <div className="flex items-center justify-between">
-                              <span className={`text-sm ${isSelected ? 'text-white font-medium' : 'text-zinc-300'}`}>
-                                {option.label}
-                              </span>
-                              {isSelected && !isDisabled && (
-                                <svg className="w-4 h-4 text-white shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                                </svg>
-                              )}
-                            </div>
-                            <span className="text-[10px] text-zinc-500 leading-tight">
-                              {isDisabled
-                                ? option.disabled_reason
-                                : option.downloadable && !option.installed
-                                  ? `${option.repo_id} • place at ${option.canonical_relative_path}`
-                                  : !option.installed
-                                    ? `Missing • ${option.canonical_relative_path}`
-                                    : option.group !== option.label
-                                      ? option.group
-                                      : ''}
-                            </span>
-                          </button>
-                        )
-                      })}
-                    </div>
-                  </div>
-                ))}
+          {pendingOption ? (
+            <div className="space-y-2 max-h-[320px] overflow-y-auto [scrollbar-gutter:stable]">
+              <div className="flex items-center justify-between text-[10px] text-zinc-500 uppercase tracking-wider mb-2">
+                <span>Choose a profile</span>
               </div>
-            ))}
-          </div>
+              <p className="mb-2 px-1 text-[10px] leading-snug text-zinc-400">
+                {pendingOption.label} needs a compatible profile. Activating a profile changes the model used for this generation.
+              </p>
+              {inlineError && (
+                <div className="mb-2 px-2 py-1.5 rounded bg-red-500/10 text-[11px] text-red-400">
+                  {inlineError}
+                </div>
+              )}
+              <div className="space-y-0.5">
+                {pendingOption.compatible_profile_ids.map((profileId) => {
+                  const profile = profiles?.find((p) => p.id === profileId)
+                  return (
+                    <button
+                      key={profileId}
+                      onClick={() => void activateAndCommit(pendingOption, profileId)}
+                      disabled={isActivating}
+                      className={`w-full flex items-center justify-between px-2 py-2 rounded-md transition-colors text-left ${
+                        isActivating ? 'cursor-not-allowed opacity-60' : 'hover:bg-zinc-700'
+                      }`}
+                    >
+                      <span className="text-sm text-zinc-300">{profile?.name ?? profileId}</span>
+                      {isActivating && (
+                        <span className="w-3 h-3 border-2 border-zinc-600 border-t-zinc-400 rounded-full animate-spin" />
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
+              <button
+                onClick={() => { setPendingOption(null); setActivationError(null) }}
+                disabled={isActivating}
+                className="w-full px-2 py-1.5 text-[11px] text-zinc-500 hover:text-zinc-300 text-left transition-colors disabled:opacity-60"
+              >
+                Back to models
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-2 max-h-[320px] overflow-y-auto [scrollbar-gutter:stable]">
+              <div className="flex items-center justify-between text-[10px] text-zinc-500 uppercase tracking-wider mb-2">
+                <span>Select checkpoint</span>
+                <span className="text-zinc-600">Current profile when Auto</span>
+              </div>
+
+              <p className="mb-2 px-1 text-[10px] leading-snug text-zinc-400">
+                Auto uses the active model profile. Pick an installed option to override it for this generation.
+              </p>
+              <p className="mb-2 px-1 text-[10px] leading-snug text-zinc-500">
+                The Fast pipeline setting controls generation speed and quality, not your model profile.
+              </p>
+
+              {inlineError && (
+                <div className="mb-2 px-2 py-1.5 rounded bg-red-500/10 text-[11px] text-red-400">
+                  {inlineError}
+                </div>
+              )}
+
+              <button
+                onClick={() => { onChange(null); setIsOpen(false) }}
+                className={`w-full flex items-center justify-between px-2 py-2 rounded-md transition-colors text-left ${
+                  selectedId === null ? 'bg-white/20 hover:bg-white/25' : 'hover:bg-zinc-700'
+                }`}
+              >
+                <span className={`text-sm ${selectedId === null ? 'text-white font-medium' : 'text-zinc-300'}`}>
+                  Auto
+                </span>
+                <span className="text-[10px] text-zinc-500">Current profile</span>
+                {selectedId === null && (
+                  <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                )}
+              </button>
+
+              <div className="h-px bg-zinc-700/60 my-1" />
+
+              {grouped.map((section) => (
+                <div key={section.section}>
+                  <div className="px-2 pt-1 pb-1 text-[10px] font-semibold text-zinc-500 uppercase tracking-wider">
+                    {section.sectionLabel}
+                  </div>
+                  {section.groups.map((group) => (
+                    <div key={`${section.section}-${group.variantGroup}-${group.group}`}>
+                      {group.variantGroup && group.variantGroup !== group.group && (
+                        <div className="px-2 pt-1.5 pb-0.5 text-[10px] text-zinc-600">
+                          {group.variantGroup}
+                        </div>
+                      )}
+                      <div className="space-y-0.5">
+                        {group.options.map((option) => {
+                          const isSelected = option.id === selectedId
+                          const isDisabled = Boolean(option.disabled_reason)
+                          return (
+                            <button
+                              key={option.id}
+                              onClick={() => handleOptionClick(option)}
+                              disabled={isDisabled}
+                              className={`w-full flex flex-col px-2 py-1.5 rounded-md transition-colors text-left ${
+                                isDisabled
+                                  ? 'cursor-not-allowed opacity-60'
+                                  : isSelected
+                                    ? 'bg-white/20 hover:bg-white/25'
+                                    : 'hover:bg-zinc-700'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-1.5 min-w-0">
+                                  <span className={`text-sm truncate ${isSelected ? 'text-white font-medium' : 'text-zinc-300'}`}>
+                                    {option.label}
+                                  </span>
+                                  {profileAware && option.pipeline_family && (
+                                    <span
+                                      className={`shrink-0 px-1 py-0.5 rounded text-[9px] font-medium uppercase tracking-wide ${
+                                        option.pipeline_family === 'fast'
+                                          ? 'bg-amber-500/10 text-amber-400'
+                                          : 'bg-cyan-500/10 text-cyan-400'
+                                      }`}
+                                      aria-label={`${option.pipeline_family} pipeline`}
+                                    >
+                                      {option.pipeline_family}
+                                    </span>
+                                  )}
+                                </div>
+                                {isSelected && !isDisabled && (
+                                  <svg className="w-4 h-4 text-white shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                  </svg>
+                                )}
+                              </div>
+                              <span className="text-[10px] text-zinc-500 leading-tight">
+                                {isDisabled
+                                  ? option.disabled_reason
+                                  : option.downloadable && !option.installed
+                                    ? `${option.repo_id} • place at ${option.canonical_relative_path}`
+                                    : !option.installed
+                                      ? `Missing • ${option.canonical_relative_path}`
+                                      : option.group !== option.label
+                                        ? option.group
+                                        : ''}
+                              </span>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -619,7 +772,7 @@ function PromptBar({
     modelSelection?: ModelSelectionID | null
     saveStage1Preview?: boolean
   }
-  onSettingsChange: (settings: any) => void
+  onSettingsChange: (settings: any | ((previous: any) => any)) => void
   videoModelSpecs: VideoGenerationModelSpecItem[]
   videoSettingsMessage?: string | null
   icLoraCondType?: ICLoraConditioningType
@@ -665,11 +818,20 @@ function PromptBar({
     if (inputAudio) return null
     return inputImage ? 'image-to-video' : 'text-to-video'
   })()
+  const isIcLoraUnifiedSelection = modelSelectionWorkflow === 'ic-lora' || modelSelectionWorkflow === 'hdr-ic-lora'
+
   const {
     options: modelSelectionOptions,
     isLoading: isLoadingModelSelectionOptions,
     errorMessage: modelSelectionErrorMessage,
+    refresh: refreshModelSelectionOptions,
   } = useModelSelectionOptions(modelSelectionWorkflow)
+
+  const {
+    data: modelProfilesData,
+    activateProfileSafe,
+    refresh: refreshModelProfiles,
+  } = useModelProfiles(isIcLoraUnifiedSelection)
 
   useEffect(() => {
     if (!modelSelectionWorkflow && settings.modelSelection) {
@@ -679,29 +841,34 @@ function PromptBar({
     if (!modelSelectionWorkflow || !settings.modelSelection) return
     const selected = findModelOption(modelSelectionOptions, settings.modelSelection)
     if (!selected) return
-    // Clear the selection if it is unselectable OR if its pipeline family no
-    // longer matches the active model dropdown family (e.g. user switched from
-    // "LTX 2.3 Full" back to "LTX 2.3 Fast" while a dev/full GGUF was selected).
+    if (!isModelOptionSelectable(selected)) {
+      onSettingsChange({ ...settings, modelSelection: null })
+      return
+    }
+    // IC-LoRA/HDR model selection is profile-driven; skip family-mismatch clearing
+    // so a Fast/Full grouped list can be used without silently dropping a selection.
+    if (isIcLoraUnifiedSelection) return
     const activeFamily = settings.model
     const familyMismatch =
       (activeFamily === 'fast' || activeFamily === 'full') &&
       selected.pipeline_family !== activeFamily
-    if (!isModelOptionSelectable(selected) || familyMismatch) {
+    if (familyMismatch) {
       onSettingsChange({ ...settings, modelSelection: null })
     }
-  }, [modelSelectionOptions, modelSelectionWorkflow, settings, settings.modelSelection, onSettingsChange])
+  }, [modelSelectionOptions, modelSelectionWorkflow, settings, settings.modelSelection, onSettingsChange, isIcLoraUnifiedSelection])
 
-  // Filter the model-selection popover to only options whose pipeline family
-  // matches the active model dropdown family, so a "LTX 2.3 Fast" selection can
-  // never offer a dev/full GGUF (and vice versa). The backend rejects mismatches
-  // defensively; this prevents the confusing UI state up-front.
+  // For IC-LoRA/HDR, show one grouped list across Fast/Full families so users can
+  // pick a profile-dependent base transformer directly. Other workflows keep the
+  // family filter tied to the active model dropdown.
   const activeModelFamily = resolvedVideoOptions?.selectedModel ?? settings.model
   const visibleModelSelectionOptions = modelSelectionOptions
     .filter((option) => option.installed === true)
     .filter((option) =>
-      activeModelFamily === 'fast' || activeModelFamily === 'full'
-        ? option.pipeline_family === activeModelFamily
-        : true,
+      isIcLoraUnifiedSelection
+        ? true
+        : activeModelFamily === 'fast' || activeModelFamily === 'full'
+          ? option.pipeline_family === activeModelFamily
+          : true,
     )
 
   const formatValue = settings.outputFormat || 'mp4'
@@ -919,10 +1086,11 @@ function PromptBar({
             <ModelSelectionPopover
               options={visibleModelSelectionOptions}
               selectedId={settings.modelSelection ?? null}
-              onChange={(id) => onSettingsChange({ ...settings, modelSelection: id })}
+              onChange={(id) => onSettingsChange((previous: typeof settings) => ({ ...previous, modelSelection: id }))}
               disabled={!modelSelectionWorkflow || isLoadingModelSelectionOptions}
               isLoading={isLoadingModelSelectionOptions}
               errorMessage={modelSelectionErrorMessage}
+              activationScope={`${modelSelectionWorkflow ?? ''}:${icLoraAdapterId ?? ''}`}
             />
             <div className="w-px h-4 bg-zinc-700 mx-0.5" />
             {formatDropdown}
@@ -1028,10 +1196,17 @@ function PromptBar({
                 <ModelSelectionPopover
                   options={visibleModelSelectionOptions}
                   selectedId={settings.modelSelection ?? null}
-                  onChange={(id) => onSettingsChange({ ...settings, modelSelection: id })}
+                  onChange={(id) => onSettingsChange((previous: typeof settings) => ({ ...previous, modelSelection: id }))}
                   disabled={!modelSelectionWorkflow || isLoadingModelSelectionOptions}
                   isLoading={isLoadingModelSelectionOptions}
                   errorMessage={modelSelectionErrorMessage}
+                  activationScope={`${modelSelectionWorkflow ?? ''}:${icLoraAdapterId ?? ''}`}
+                  profileAware={isIcLoraUnifiedSelection}
+                  activeProfileId={modelProfilesData?.active_model_profile_id ?? null}
+                  profiles={modelProfilesData?.profiles ?? []}
+                  activateProfileSafe={activateProfileSafe}
+                  refreshProfiles={refreshModelProfiles}
+                  refreshOptions={refreshModelSelectionOptions}
                 />
               </>
             )}
@@ -1178,10 +1353,11 @@ function PromptBar({
             <ModelSelectionPopover
               options={visibleModelSelectionOptions}
               selectedId={settings.modelSelection ?? null}
-              onChange={(id) => onSettingsChange({ ...settings, modelSelection: id })}
+              onChange={(id) => onSettingsChange((previous: typeof settings) => ({ ...previous, modelSelection: id }))}
               disabled={!modelSelectionWorkflow || isLoadingModelSelectionOptions}
               isLoading={isLoadingModelSelectionOptions}
               errorMessage={modelSelectionErrorMessage}
+              activationScope={`${modelSelectionWorkflow ?? ''}:${icLoraAdapterId ?? ''}`}
             />
 
             <div className="w-px h-4 bg-zinc-700 mx-0.5" />
@@ -1342,6 +1518,10 @@ const DEFAULT_VIDEO_SETTINGS = {
   saveStage1Preview: false,
 }
 
+function generatedSourcePaths(primaryPath: string, proxyPath?: string | null): string[] {
+  return [...new Set([primaryPath, proxyPath].filter((path): path is string => Boolean(path)))]
+}
+
 export function GenSpace() {
   const {
     activeProject,
@@ -1381,6 +1561,21 @@ export function GenSpace() {
   const sizeMenuRef = useRef<HTMLDivElement>(null)
   const persistedVideoKeyRef = useRef<string | null>(null)
   const [settings, setSettings] = useState(() => ({ ...DEFAULT_VIDEO_SETTINGS }))
+  const managedDeletion = useManagedAssetDeletion({
+    projectId: currentProjectId ?? '',
+    store: {
+      kind: 'project',
+      project: activeProject as NonNullable<typeof activeProject>,
+      removeTargets: targets => {
+        if (targets.some(({ assetId, takeIndex }) => assetId === selectedAsset?.id && takeIndex === undefined)) {
+          setSelectedAsset(null)
+        }
+        for (const { assetId, takeIndex } of targets) {
+          if (takeIndex === undefined) deleteAsset(currentProjectId!, assetId)
+        }
+      },
+    },
+  })
   const videoModelSpecs = getVideoGenerationModelSpecs(videoGenerationModelSpecsResponse, {
     useApiSpecs: shouldVideoGenerateWithLtxApi,
   })
@@ -1462,8 +1657,6 @@ export function GenSpace() {
     images: [] as { path: string; frame?: number; strength?: number }[],
     ready: false,
     maskGrowPx: 30,
-    laplacianBlendGrow: 12,
-    finalMaskBlurPx: 6,
   })
   const [icLoraPanelKey, setIcLoraPanelKey] = useState(0)
   const [icLoraCondType, setIcLoraCondType] = useState<ICLoraConditioningType>(null)
@@ -1604,6 +1797,8 @@ export function GenSpace() {
         addAsset(currentProjectId, {
           type: 'video',
           path: copied.path,
+          origin: 'generated',
+          managedSourcePaths: generatedSourcePaths(videoPath, proxyPath),
           proxyPath: copied.proxyPath ?? undefined,
           bigThumbnailPath: copied.bigThumbnailPath,
           smallThumbnailPath: copied.smallThumbnailPath,
@@ -1629,6 +1824,8 @@ export function GenSpace() {
           },
           takes: [{
             path: copied.path,
+            origin: 'generated',
+            managedSourcePaths: generatedSourcePaths(videoPath, proxyPath),
             proxyPath: copied.proxyPath ?? undefined,
             bigThumbnailPath: copied.bigThumbnailPath,
             smallThumbnailPath: copied.smallThumbnailPath,
@@ -1664,6 +1861,8 @@ export function GenSpace() {
             addAsset(currentProjectId, {
               type: 'image',
               path: copied.path,
+              origin: 'generated',
+              managedSourcePaths: generatedSourcePaths(imgPath),
               bigThumbnailPath: copied.bigThumbnailPath,
               smallThumbnailPath: copied.smallThumbnailPath,
               width: copied.width,
@@ -1684,6 +1883,8 @@ export function GenSpace() {
               },
               takes: [{
                 path: copied.path,
+                origin: 'generated',
+                managedSourcePaths: generatedSourcePaths(imgPath),
                 bigThumbnailPath: copied.bigThumbnailPath,
                 smallThumbnailPath: copied.smallThumbnailPath,
                 width: copied.width,
@@ -1732,8 +1933,6 @@ export function GenSpace() {
         images: isHdr ? [] : icLoraInput.images,
         prompt: resolvedPrompt,
         maskGrowPx: icLoraInput.maskGrowPx,
-        laplacianBlendGrow: icLoraInput.laplacianBlendGrow,
-        finalMaskBlurPx: icLoraInput.finalMaskBlurPx,
         frameRate: isIngredients ? fpsForIcLora : undefined,
         outputFormat: settings.outputFormat,
         modelSelection: settings.modelSelection ?? null,
@@ -1761,6 +1960,8 @@ export function GenSpace() {
             const newTakeIndex = sourceAsset.takes ? sourceAsset.takes.length : 1
             addTakeToAsset(currentProjectId!, sourceAsset.id, {
               path: copied.path,
+              origin: 'generated',
+              managedSourcePaths: generatedSourcePaths(result.videoPath, result.proxyPath),
               proxyPath: copied.proxyPath ?? undefined,
               bigThumbnailPath: copied.bigThumbnailPath,
               smallThumbnailPath: copied.smallThumbnailPath,
@@ -1781,6 +1982,8 @@ export function GenSpace() {
           addAsset(currentProjectId!, {
             type: 'video',
             path: copied.path,
+            origin: 'generated',
+            managedSourcePaths: generatedSourcePaths(result.videoPath, result.proxyPath),
             proxyPath: copied.proxyPath ?? undefined,
             bigThumbnailPath: copied.bigThumbnailPath,
             smallThumbnailPath: copied.smallThumbnailPath,
@@ -1804,6 +2007,8 @@ export function GenSpace() {
             },
             takes: [{
               path: copied.path,
+              origin: 'generated',
+              managedSourcePaths: generatedSourcePaths(result.videoPath, result.proxyPath),
               proxyPath: copied.proxyPath ?? undefined,
               bigThumbnailPath: copied.bigThumbnailPath,
               smallThumbnailPath: copied.smallThumbnailPath,
@@ -1822,6 +2027,8 @@ export function GenSpace() {
             addAsset(currentProjectId!, {
               type: 'video',
               path: previewCopied.path,
+              origin: 'generated',
+              managedSourcePaths: generatedSourcePaths(result.stage1PreviewPath),
               proxyPath: previewCopied.proxyPath ?? undefined,
               bigThumbnailPath: previewCopied.bigThumbnailPath,
               smallThumbnailPath: previewCopied.smallThumbnailPath,
@@ -1832,6 +2039,8 @@ export function GenSpace() {
               duration: 0,
               takes: [{
                 path: previewCopied.path,
+                origin: 'generated',
+                managedSourcePaths: generatedSourcePaths(result.stage1PreviewPath),
                 proxyPath: previewCopied.proxyPath ?? undefined,
                 bigThumbnailPath: previewCopied.bigThumbnailPath,
                 smallThumbnailPath: previewCopied.smallThumbnailPath,
@@ -1888,6 +2097,8 @@ export function GenSpace() {
             const newTakeIndex = sourceAsset.takes ? sourceAsset.takes.length : 1
             addTakeToAsset(currentProjectId!, sourceAsset.id, {
               path: copied.path,
+              origin: 'generated',
+              managedSourcePaths: generatedSourcePaths(result.videoPath, result.proxyPath),
               proxyPath: copied.proxyPath ?? undefined,
               bigThumbnailPath: copied.bigThumbnailPath,
               smallThumbnailPath: copied.smallThumbnailPath,
@@ -1908,6 +2119,8 @@ export function GenSpace() {
           addAsset(currentProjectId!, {
             type: 'video',
             path: copied.path,
+            origin: 'generated',
+            managedSourcePaths: generatedSourcePaths(result.videoPath, result.proxyPath),
             proxyPath: copied.proxyPath ?? undefined,
             bigThumbnailPath: copied.bigThumbnailPath,
             smallThumbnailPath: copied.smallThumbnailPath,
@@ -1933,6 +2146,8 @@ export function GenSpace() {
             },
             takes: [{
               path: copied.path,
+              origin: 'generated',
+              managedSourcePaths: generatedSourcePaths(result.videoPath, result.proxyPath),
               proxyPath: copied.proxyPath ?? undefined,
               bigThumbnailPath: copied.bigThumbnailPath,
               smallThumbnailPath: copied.smallThumbnailPath,
@@ -2001,9 +2216,7 @@ export function GenSpace() {
   }
   
   const handleDelete = (assetId: string) => {
-    if (currentProjectId) {
-      deleteAsset(currentProjectId, assetId)
-    }
+    void managedDeletion.requestDeletion([{ assetId }])
   }
   
   const handleDragStart = (e: React.DragEvent, asset: Asset) => {
@@ -2389,7 +2602,9 @@ export function GenSpace() {
           inputAudio={inputAudio}
           onInputAudioChange={setInputAudio}
           settings={settings}
-          onSettingsChange={(nextSettings) => setSettings(sanitizeVideoSettings(nextSettings))}
+          onSettingsChange={(nextSettings) => setSettings(previous => sanitizeVideoSettings(
+            typeof nextSettings === 'function' ? nextSettings(previous) : nextSettings,
+          ))}
           videoModelSpecs={videoModelSpecs}
           videoSettingsMessage={videoSettingsMessage}
           icLoraCondType={icLoraCondType}
@@ -2402,6 +2617,12 @@ export function GenSpace() {
           onFpsChange={(fps) => setSettings((prev) => ({ ...prev, fps }))}
           isApiMode={shouldVideoGenerateWithLtxApi}
           icLoraAdapterId={icLoraInput.adapterId}
+        />
+        <ManagedAssetDeletionDialog
+          dialogState={managedDeletion.dialogState}
+          onProjectOnly={managedDeletion.confirmProjectOnly}
+          onTrash={managedDeletion.confirmTrash}
+          onCancel={managedDeletion.cancelDeletion}
         />
       </div>
       

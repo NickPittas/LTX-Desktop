@@ -124,6 +124,15 @@ class ProfileCapabilityResult:
     problems: list[ModelProfileProblem] = field(default_factory=_default_problems)
 
 
+def is_profile_base_diffusion_resolvable(capabilities: ProfileCapabilityResult) -> bool:
+    """Whether a profile explicitly names a scanner-resolvable transformer."""
+    base = next(
+        (artifact for artifact in capabilities.artifacts if artifact.component_role == "base_diffusion_model"),
+        None,
+    )
+    return base is not None and base.source == "profile" and base.status in ("available", "duplicate")
+
+
 # ============================================================
 # Role / field mapping tables
 # ============================================================

@@ -35,7 +35,7 @@ Stateless utilities, the typed backend client, storage/migration helpers, and pa
 
 ### Per-file surface
 - **`api-client.ts`:** `makeEndpointClient`, `EndpointResult`, `ApiClient` (static endpoints: `getHealth`, `getModelDownloadProgress`, model-profile CRUD + `validate`/`activate`, adapter `getAdapterStatus`/`getAdapterRecommendation`, `getLtxRecommendation`/`getImgGenRecommendation`/`getLtxIcLoraRecommendation`/`getTextEncoderRecommendation`, `startModelDownload`/`deleteModels`, `getRuntimePolicy`, `getSettings`/`updateSettings`, `suggestGapPrompt` (401/403), `generateVideo` (402), `getGenerateVideoModelSpecs`, `cancelGeneration`, `getGenerationProgress`, `generateImage`, `retake`, HF auth `startHuggingFaceLogin`/`getHuggingFaceAuthStatus`/`huggingFaceLogout`, `checkModelAccess`, `generateIcLora`, `extractIcLoraConditioning`); type helpers `ApiSuccessOf`/`ApiRequestBodyOf`/`ApiErrorsOf`/`ApiSuccess`/`ApiErrors`.
-- **`backend.ts`:** `getBackendCredentials`, `resetBackendCredentials`, `backendFetch`, `backendAdminFetch`, `backendWsUrl`.
+- **`backend.ts`:** `getBackendCredentials`, `resetBackendCredentials`, `backendFetch`, `backendAdminFetch`.
 - **`file-url.ts`:** `pathToFileUrl`.
 - **`generation-errors.ts`:** `LocalGenerationError`, `GenerationError`, `createLocalGenerationError`.
 - **`keyboard-shortcuts.ts`:** `ActionId`, `KeyCombo`, `ActionDefinition`, `ACTION_REGISTRY`, `KeyboardLayout`, `KeyboardPreset`, `LTX_DEFAULT_LAYOUT`/`PREMIERE_LAYOUT`/`DAVINCI_LAYOUT`/`AVID_LAYOUT`, `BUILT_IN_PRESETS`, `formatKeyCombo`, `eventMatchesCombo`, `resolveAction`, `findConflicts`, `cloneLayout`.

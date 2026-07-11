@@ -5,7 +5,7 @@
 Wraps `ltx_pipelines.distilled.DistilledPipeline` to provide the "fast" distilled text/image-to-video generation path (single-stage distilled sigma schedule, optional spatial upsampler, optional audio). Exposes a thin Protocol (`FastVideoPipeline`) and the concrete `LTXFastVideoPipeline` implementation that owns model lifecycle, GGUF/split-safetensors patch installation, FP8 quantization policy selection, and frame-to-file output encoding.
 
 Files:
-- `fast_video_pipeline.py` — `FastVideoPipeline` Protocol (`pipeline_kind: ClassVar[Literal["fast"]]`, `create`, `generate`, `warmup`, `compile_transformer`).
+- `fast_video_pipeline.py` — `FastVideoPipeline` Protocol (`pipeline_kind: ClassVar[Literal["fast"]]`, `create`, `generate`, `compile_transformer`).
 - `ltx_fast_video_pipeline.py` — `LTXFastVideoPipeline` implementation.
 
 ## Design Patterns
@@ -16,7 +16,7 @@ Files:
 - **Quantization policy selection**: GGUF → `None`; split + cuda → `kijai_fp8_quantization_policy()`; otherwise `QuantizationPolicy.fp8_cast()` if `device_supports_fp8(device)` else `None`.
 - **Streaming prefetch defaulting**: split 22B on ≤32 GB GPUs defaults `streaming_prefetch_count` to 2 layers unless caller overrides.
 - **Patch installation** (via `services.patches.gguf_loader_fix`): `install_gguf_t2v_conditioning_patch()` (always), `install_gguf_prompt_encoder_patch()` (gguf or gemma_root), `install_gguf_loader` + `install_gguf_component_paths` (gguf), `install_kijai_transformer_config_patch` + `install_gguf_component_paths` (split).
-- **`@torch.inference_mode()`** on `generate` and `warmup`.
+- **`@torch.inference_mode()`** on `generate`.
 
 ## Data & Control Flow
 
@@ -44,11 +44,9 @@ encode_video_output(
 
 `encode_video_output` is imported from `services.ltx_pipeline_common` and forwards unchanged to `ltx_pipelines.utils.media_io.encode_video(video=, fps=, audio=, output_path=, video_chunks_number=)`.
 
-`warmup(output_path)` (line 182) runs the same path with fixed 256×384×9f@8fps dummy inputs, calls `encode_video_output` at line 200, then `os.unlink(output_path)` in the `finally` block — the warmup artifact is never kept.
-
 ### Output path hardcoding (c)
 
-`output_path` is a caller-supplied `str`; the wrapper does not enforce or rewrite the extension. Callers (backend handlers) currently always pass a `.mp4` path, and the downstream `ltx_pipelines.utils.media_io.encode_video` hardcodes H.264 / yuv420p regardless of the extension. To add MOV ProRes / EXR as primary output, the routing point is this single `encode_video_output(...)` call (line 180) — swap the encoder service while keeping `video`/`audio`/`fps`/`output_path`/`chunks` arguments identical. `warmup` (line 200) needs the same swap if warmup should exercise the new encoder.
+`output_path` is a caller-supplied `str`; the wrapper does not enforce or rewrite the extension. Callers (backend handlers) currently always pass a `.mp4` path, and the downstream `ltx_pipelines.utils.media_io.encode_video` hardcodes H.264 / yuv420p regardless of the extension. To add MOV ProRes / EXR as primary output, the routing point is this single `encode_video_output(...)` call (line 180) — swap the encoder service while keeping `video`/`audio`/`fps`/`output_path`/`chunks` arguments identical.
 
 ## Integration Points
 

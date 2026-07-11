@@ -274,7 +274,3 @@ class LTXTextEncoder:
         except Exception as exc:
             logger.warning("LTX API encoding failed: %s", exc, exc_info=True)
             return None
-
-
-class DummyTextEncoder:
-    pass

@@ -37,6 +37,7 @@ from services.base_video_model_registry import (
     iter_base_video_model_entries,
 )
 from services.model_scanner import scan_models
+from services.model_resolver import is_profile_base_diffusion_resolvable, resolve_profile_capabilities
 from runtime_config.model_download_specs import (
     ADAPTER_TO_CP_ID,
     ALL_MODEL_CP_IDS,
@@ -109,10 +110,7 @@ _LIVE_MODEL_SELECTION_NOT_INSTALLED_REASON: str = "Model checkpoint is not insta
 # Dev/GGUF selections need an active split-component profile (the runtime loads
 # the GGUF transformer plus profile-provided sidecars). Used by the model-
 # options endpoint to disable dev/GGUF candidates that cannot actually run yet.
-_LIVE_MODEL_SELECTION_DEV_REQUIRES_PROFILE_REASON: str = (
-    "Requires an active model profile with split components "
-    "(text projection, VAEs), a usable upscaler, and a distilled LoRA"
-)
+_LIVE_MODEL_SELECTION_NO_COMPATIBLE_PROFILE_REASON: str = "No compatible model profile is available for this model"
 
 # Semantic grouping label shared by every Phase 1 candidate (all are base video
 # transformer choices). Kept as a constant so the frontend renders a single
@@ -446,12 +444,6 @@ class ModelsHandler(StateHandlerBase):
             models_dir = self.models_dir
         return scan_models(models_dir)
 
-    def _active_profile(self) -> ModelProfilePayload | None:
-        profile_id = self.state.active_model_profile_id
-        if profile_id is None:
-            return None
-        return next((p for p in self.state.model_profiles if p.id == profile_id), None)
-
     def _canonical_distilled_lora_exists(self, models_dir: Path) -> bool:
         """True if any official canonical distilled LoRA is installed (read-only)."""
         for role in ("distilled_lora_384_1_1", "distilled_lora_384"):
@@ -460,70 +452,54 @@ class ModelsHandler(StateHandlerBase):
                 return True
         return False
 
-    def _dev_option_disabled_reason(
-        self, base_family: str, models_dir: Path
-    ) -> str | None:
-        """Read-only runtime-readiness check for a ``requires_active_profile_sidecars``
-        selection.
+    def _compatible_profile_ids_for_entry(
+        self,
+        base_family: str,
+        models_dir: Path,
+        profiles: list[ModelProfilePayload],
+        catalog: ModelLibraryScanResponse,
+    ) -> list[str]:
+        """Return profile IDs that can supply a sidecar-dependent selection."""
+        compatible_ids: list[str] = []
+        canonical_upsampler_available = is_cp_downloaded(models_dir, UPSAMPLER_CP_ID)
+        canonical_distilled_lora_available = self._canonical_distilled_lora_exists(models_dir)
 
-        Returns ``None`` when the selection is runnable, else a clear disabled
-        reason. Mirrors the hard requirements the fast-pipeline load path
-        enforces: an active split-component profile providing the sidecars the
-        build needs (text projection, video VAE, audio VAE — the embeddings
-        connector is optional and treated as falsey/omitted by the builder) and
-        a usable spatial upscaler. The distilled LoRA requirement applies ONLY
-        to ``base_family == "dev"`` (the dev two-stages route uses it as a
-        guider); Fast-family distilled entries (Kijai FP8, QuantStack distilled
-        GGUF) run via the DistilledPipeline and must NOT be gated on a
-        distilled LoRA. Text-encoder availability is intentionally NOT gated
-        here — it is a global requirement shared with the distilled route and
-        handled separately. Never mutates the filesystem.
-        """
-        profile = self._active_profile()
-        if profile is None:
-            return _LIVE_MODEL_SELECTION_DEV_REQUIRES_PROFILE_REASON
-        c = profile.components
-        # Embeddings connector is intentionally optional: the runtime
-        # ``builder_paths`` filters falsey values and the GGUF component install
-        # path does not require it (e.g. QuantStack profiles set it to null).
-        missing_sidecars = [
-            label
-            for label, val in (
-                ("text projection", c.text_projection),
-                ("video VAE", c.video_vae),
-                ("audio VAE", c.audio_vae),
-            )
-            if not (val and Path(val).is_file())
-        ]
-        if missing_sidecars:
-            return "Active profile is missing split components: " + ", ".join(missing_sidecars)
-        upsampler_ok = bool(c.upsampler and Path(c.upsampler).is_file()) or is_cp_downloaded(
-            models_dir, UPSAMPLER_CP_ID
-        )
-        if not upsampler_ok:
-            return (
-                "No usable spatial upscaler (profile upsampler missing and "
-                "canonical upscaler not installed)"
-            )
-        # Distilled LoRA is required ONLY by the dev route. Fast-family
-        # distilled selections (Kijai FP8, QuantStack GGUF) use the
-        # DistilledPipeline and must not be blocked by a missing distilled LoRA.
-        if base_family == "dev":
-            explicit_lora_ok = False
-            for role in ("distilled_lora_384_1_1", "distilled_lora_384"):
-                candidate = c.official_adapters.get(role)
-                if candidate and Path(candidate).is_file():
-                    explicit_lora_ok = True
-                    break
-            if not explicit_lora_ok and not self._canonical_distilled_lora_exists(models_dir):
-                return "Dev base model requires a distilled LoRA adapter (none installed)"
+        for profile in profiles:
+            if not is_profile_base_diffusion_resolvable(resolve_profile_capabilities(profile, catalog)):
+                continue
+            components = profile.components
+            if not all(
+                path and Path(path).is_file()
+                for path in (components.text_projection, components.video_vae, components.audio_vae)
+            ):
+                continue
+            if not (components.upsampler and Path(components.upsampler).is_file()) and not canonical_upsampler_available:
+                continue
+            if base_family == "dev":
+                profile_lora_available = any(
+                    path and Path(path).is_file()
+                    for path in (
+                        components.official_adapters.get("distilled_lora_384_1_1"),
+                        components.official_adapters.get("distilled_lora_384"),
+                    )
+                )
+                if not profile_lora_available and not canonical_distilled_lora_available:
+                    continue
+            compatible_ids.append(profile.id)
+
+        return sorted(compatible_ids)
+
+    def _sidecar_option_disabled_reason(self, compatible_profile_ids: list[str]) -> str | None:
+        """Disable sidecar-dependent selections without a compatible profile."""
+        if not compatible_profile_ids:
+            return _LIVE_MODEL_SELECTION_NO_COMPATIBLE_PROFILE_REASON
         return None
 
     def _disabled_reason_for_entry(
         self,
         entry: BaseVideoModelRegistryEntry,
         workflow_supported: bool,
-        models_dir: Path,
+        compatible_profile_ids: list[str],
     ) -> str | None:
         """Compute the model-options disabled reason for a single registry entry.
 
@@ -533,16 +509,14 @@ class ModelsHandler(StateHandlerBase):
         - ``runtime_readiness == "none"`` (only the official distilled monolith)
           → enabled when installed.
         - ``runtime_readiness == "requires_active_profile_sidecars"`` → enabled
-          iff an active split-component profile provides the sidecars the
-          selected base needs. The distilled-LoRA sub-check applies only to
-          ``base_family == "dev"``. Never fake support.
+          iff a compatible profile provides the selected base's sidecars.
         """
         if not workflow_supported:
             return _LIVE_MODEL_SELECTION_UNSUPPORTED_REASON
         if not entry.installed:
             return _LIVE_MODEL_SELECTION_NOT_INSTALLED_REASON
         if entry.runtime_readiness == "requires_active_profile_sidecars":
-            return self._dev_option_disabled_reason(entry.base_family, models_dir)
+            return self._sidecar_option_disabled_reason(compatible_profile_ids)
         return None
 
     def get_model_selection_options(
@@ -563,17 +537,24 @@ class ModelsHandler(StateHandlerBase):
         - All other workflows enumerate the same candidates but disable every
           option with ``_LIVE_MODEL_SELECTION_UNSUPPORTED_REASON``.
         """
-        # Snapshot the effective models dir under lock (matches scan_model_library);
-        # filesystem presence checks are read-only and run outside the lock.
+        # Snapshot state under lock; all scanner and path IO runs outside it.
         with self._lock:
             models_dir = self.models_dir
+            profiles = [profile.model_copy(deep=True) for profile in self.state.model_profiles]
 
         workflow_supported = workflow in _LIVE_MODEL_SELECTION_SUPPORTED_WORKFLOWS
+        entries = iter_base_video_model_entries(models_dir)
+        catalog = scan_models(models_dir)
 
         options: list[ModelSelectionOption] = []
-        for entry in iter_base_video_model_entries(models_dir):
+        for entry in entries:
+            compatible_profile_ids = (
+                self._compatible_profile_ids_for_entry(entry.base_family, models_dir, profiles, catalog)
+                if entry.installed and entry.runtime_readiness == "requires_active_profile_sidecars"
+                else []
+            )
             disabled_reason = self._disabled_reason_for_entry(
-                entry, workflow_supported, models_dir
+                entry, workflow_supported, compatible_profile_ids
             )
             options.append(
                 ModelSelectionOption(
@@ -585,6 +566,7 @@ class ModelsHandler(StateHandlerBase):
                     installed=entry.installed,
                     pipeline_family=entry.pipeline_family,
                     disabled_reason=disabled_reason,
+                    compatible_profile_ids=compatible_profile_ids,
                     repo_id=entry.repo_id,
                     source_url=entry.source_url,
                     canonical_relative_path=entry.canonical_relative_path,

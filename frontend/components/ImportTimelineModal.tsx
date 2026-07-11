@@ -298,6 +298,7 @@ export function ImportTimelineModal({ projectId }: ImportTimelineModalProps) {
     const refsToImport = mediaRefs.map(ref => ({ ...ref }))
     const copiedAssetBySource = new Map<string, {
       path: string
+      proxyPath?: string
       bigThumbnailPath?: string
       smallThumbnailPath?: string
       width?: number
@@ -338,6 +339,7 @@ export function ImportTimelineModal({ projectId }: ImportTimelineModalProps) {
         const existingCopiedAsset = copiedAssetBySource.get(sourcePath)
         if (existingCopiedAsset) {
           ref.path = existingCopiedAsset.path
+          ref.proxyPath = existingCopiedAsset.proxyPath
           ref.bigThumbnailPath = existingCopiedAsset.bigThumbnailPath
           ref.smallThumbnailPath = existingCopiedAsset.smallThumbnailPath
           ref.width = existingCopiedAsset.width
@@ -368,18 +370,19 @@ export function ImportTimelineModal({ projectId }: ImportTimelineModalProps) {
         setMediaStatus(prev => ({ ...prev, [ref.id]: 'copying' }))
         let copiedAsset: {
           path: string
+          proxyPath?: string
           bigThumbnailPath?: string
           smallThumbnailPath?: string
           width?: number
           height?: number
         } | null = null
         if (ref.type === 'video' || ref.type === 'image') {
-          const copied = await addVisualAssetToProject(sourcePath, projectId, ref.type)
+          const copied = await addVisualAssetToProject(sourcePath, projectId, ref.type, ref.proxyPath)
           if (!copied) {
             setMediaStatus(prev => ({ ...prev, [ref.id]: 'error' }))
             throw new Error(`Failed to copy media into project assets: ${displayName}`)
           }
-          copiedAsset = copied
+          copiedAsset = { ...copied, proxyPath: copied.proxyPath ?? undefined }
         } else {
           const copied = await addGenericAssetToProject(sourcePath, projectId)
           if (!copied?.path) {
@@ -390,6 +393,7 @@ export function ImportTimelineModal({ projectId }: ImportTimelineModalProps) {
         }
 
         ref.path = copiedAsset.path
+        ref.proxyPath = copiedAsset.proxyPath
         ref.bigThumbnailPath = copiedAsset.bigThumbnailPath
         ref.smallThumbnailPath = copiedAsset.smallThumbnailPath
         ref.width = copiedAsset.width

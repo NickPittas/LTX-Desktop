@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 import logging
-import os
 from typing import TYPE_CHECKING, Final
 
 import torch
@@ -322,29 +321,6 @@ class LTXFastVideoPipeline:
             on_progress=on_progress,
             input_colorspace=input_colorspace, total_frames=num_frames,
         )
-
-    @torch.inference_mode()
-    def warmup(self, output_path: str) -> None:
-        warmup_frames = 9
-        tiling_config = default_tiling_config()
-
-        try:
-            video, audio = self._run_inference(
-                prompt="test warmup",
-                seed=42,
-                height=256,
-                width=384,
-                num_frames=warmup_frames,
-                frame_rate=8,
-                images=[],
-                tiling_config=tiling_config,
-                enhance_prompt=False,
-            )
-            chunks = video_chunks_number(warmup_frames, tiling_config)
-            encode_video_output(video=video, audio=audio, fps=8, output_path=output_path, video_chunks_number_value=chunks)
-        finally:
-            if os.path.exists(output_path):
-                os.unlink(output_path)
 
     def compile_transformer(self) -> None:
         if not self.supports_torch_compile():

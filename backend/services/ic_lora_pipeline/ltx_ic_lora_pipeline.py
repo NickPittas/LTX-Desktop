@@ -31,7 +31,6 @@ if TYPE_CHECKING:
 
 # ponytail: mask_grow_px controls LTXVDilateVideoMask radii only (derive_stage_radii).
 # INPAINT_BLEND1_LOW_RES_DILATION=5 for bridge blend (stage1, node 5266, linked input) to soften edge ghosting at stage1.
-# Stage2 blend uses user-controlled laplacian_blend_grow param directly.
 INPAINT_BLEND1_LOW_RES_DILATION = 5
 
 
@@ -617,8 +616,6 @@ class LTXIcLoraPipeline:
         output_path: str,
         conditioning_strength: float = 1.0,
         mask_grow_px: int = 30,
-        laplacian_blend_grow: int = 12,
-        final_mask_blur_px: int = 6,
         output_format: OutputFormat = OutputFormat.MP4,
         encoder: MediaEncoder | None = None,
         proxy_path: str | None = None,

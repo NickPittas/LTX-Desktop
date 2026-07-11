@@ -34,6 +34,7 @@ export function useEditorMediaImport(params: UseEditorMediaImportParams) {
 
       const electronFilePath = window.electronAPI?.getPathForFile(file)
       let persistentPath = electronFilePath || file.name
+      let proxyPath: string | undefined
       let bigThumbnailPath: string | undefined
       let smallThumbnailPath: string | undefined
       let width: number | undefined
@@ -50,6 +51,7 @@ export function useEditorMediaImport(params: UseEditorMediaImportParams) {
           const copied = await addVisualAssetToProject(electronFilePath, currentProjectId, isVideo ? 'video' : 'image')
           if (!copied) continue
           persistentPath = copied.path
+          proxyPath = copied.proxyPath ?? undefined
           bigThumbnailPath = copied.bigThumbnailPath
           smallThumbnailPath = copied.smallThumbnailPath
           width = copied.width
@@ -64,6 +66,8 @@ export function useEditorMediaImport(params: UseEditorMediaImportParams) {
         id: `asset-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
         type: isVideo ? 'video' : isAudio ? 'audio' : 'image',
         path: persistentPath,
+        ...(isVideo || isImage ? { origin: 'imported' as const } : {}),
+        proxyPath,
         bigThumbnailPath,
         smallThumbnailPath,
         width,

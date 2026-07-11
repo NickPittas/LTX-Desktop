@@ -38,3 +38,4 @@ Reusable renderer data hooks. Two families: (1) backend-data hooks wrapping `Api
 - **`contexts/ProjectContext`:** `useProjects().reloadProjectIds` (`useProjectReferencesMigration`); `use-ic-lora`/`use-retake` results flow back to `ProjectContext` via caller-supplied `onComplete`.
 - **`components/SettingsPanel`:** `use-generation` imports the `GenerationSettings` type from `components/SettingsPanel` (cross-folder type coupling).
 - **`window.electronAPI`:** `onBackendHealthStatus`, `getBackendHealthStatus` (`use-backend`); `hfGatingEnabled`, `openHuggingFaceAuth` (`use-hf-auth`); `hfGatingEnabled` (`use-hf-model-access`).
+- **`use-managed-asset-deletion.ts`** coordinates fail-closed reference analysis, reconfirmed guarded Trash IPC, one store mutation, editor history clearing, and partial/post-Trash recovery states.

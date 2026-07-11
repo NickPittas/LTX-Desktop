@@ -96,6 +96,7 @@ interface GapGenerationApi {
   generate: (prompt: string, imagePath: string | null, settings: GenerationSettings) => Promise<void>
   generateImage: (prompt: string, settings: GenerationSettings) => Promise<void>
   videoPath: string | null
+  proxyPath: string | null
   imagePath: string | null
   isGenerating: boolean
   progress: number
@@ -934,12 +935,20 @@ export function VideoEditorTimelineEditingPanel(props: VideoEditorTimelineEditin
         endTime: generatingGap.endTime,
       }
       const assetType = isImageResult ? 'image' : 'video'
-      const copied = await addVisualAssetToProject(sourcePath, currentProjectId, assetType)
+      const copied = await addVisualAssetToProject(
+        sourcePath,
+        currentProjectId,
+        assetType,
+        isImageResult ? undefined : gapGenerationApi.proxyPath || undefined,
+      )
       if (copied) {
         const asset: Asset = {
           id: `asset-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
           type: assetType,
           path: copied.path,
+          origin: 'generated',
+          managedSourcePaths: [...new Set([sourcePath, gapGenerationApi.proxyPath].filter((path): path is string => Boolean(path)))],
+          proxyPath: copied.proxyPath ?? undefined,
           bigThumbnailPath: copied.bigThumbnailPath,
           smallThumbnailPath: copied.smallThumbnailPath,
           width: copied.width,
@@ -961,6 +970,9 @@ export function VideoEditorTimelineEditingPanel(props: VideoEditorTimelineEditin
           },
           takes: [{
             path: copied.path,
+            origin: 'generated',
+            managedSourcePaths: [...new Set([sourcePath, gapGenerationApi.proxyPath].filter((path): path is string => Boolean(path)))],
+            proxyPath: copied.proxyPath ?? undefined,
             bigThumbnailPath: copied.bigThumbnailPath,
             smallThumbnailPath: copied.smallThumbnailPath,
             width: copied.width,

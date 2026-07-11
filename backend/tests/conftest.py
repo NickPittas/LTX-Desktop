@@ -9,7 +9,6 @@ import pytest
 import torch
 
 from app_factory import create_app
-from app_handler import ServiceBundle
 from runtime_config.model_download_specs import (
     DEPTH_PROCESSOR_CP_ID,
     IMG_GEN_MODEL_CP_ID,
@@ -23,7 +22,7 @@ from state import RuntimeConfig, build_initial_state, set_state_service_for_test
 from state.app_settings import AppSettings
 from state.app_state_types import HfAuthenticated
 from tests.fake_camera_motion_prompts import FAKE_CAMERA_MOTION_PROMPTS
-from tests.fakes.services import FakeServices
+from tests.fakes.services import FakeServices, make_service_bundle
 
 DEFAULT_NEGATIVE_PROMPT = (
     "blurry, out of focus, overexposed, underexposed, low contrast, washed out colors, "
@@ -64,27 +63,7 @@ def test_state(tmp_path: Path, fake_services: FakeServices):
         backend_port=PORT,
     )
 
-    bundle = ServiceBundle(
-        http=fake_services.http,
-        gpu_cleaner=fake_services.gpu_cleaner,
-        model_downloader=fake_services.model_downloader,
-        gpu_info=fake_services.gpu_info,
-        video_processor=fake_services.video_processor,
-        text_encoder=fake_services.text_encoder,
-        task_runner=fake_services.task_runner,
-        ltx_api_client=fake_services.ltx_api_client,
-        zit_api_client=fake_services.zit_api_client,
-        fast_video_pipeline_class=type(fake_services.fast_video_pipeline),
-        image_generation_pipeline_class=type(fake_services.image_generation_pipeline),
-        ic_lora_pipeline_class=type(fake_services.ic_lora_pipeline),
-        hdr_ic_lora_pipeline_class=type(fake_services.hdr_ic_lora_pipeline),
-        depth_processor_pipeline_class=type(fake_services.depth_processor_pipeline),
-        pose_processor_pipeline_class=type(fake_services.pose_processor_pipeline),
-        a2v_pipeline_class=type(fake_services.a2v_pipeline),
-        retake_pipeline_class=type(fake_services.retake_pipeline),
-        media_encoder=fake_services.media_encoder,
-        system_info=fake_services.system_info,
-    )
+    bundle = make_service_bundle(fake_services)
 
     handler = build_initial_state(
         config,

@@ -19,33 +19,11 @@ Forward-looking notes (see color_management.py for the full ColorManager):
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-import numpy as np
-
 from services.color_management import (
     ADOPTED_NEUTRAL_D65,
     BT709_CHROMATICITIES,
     bt709_eotf,
     bt709_oetf,
-)
-
-if TYPE_CHECKING:
-    from numpy.typing import NDArray
-
-
-# BT.709 primary xy arrays (kept for backward-compat with existing consumers).
-BT709_RED_XY: NDArray[np.float32] = np.array(
-    [BT709_CHROMATICITIES[0], BT709_CHROMATICITIES[1]], dtype=np.float32
-)
-BT709_GREEN_XY: NDArray[np.float32] = np.array(
-    [BT709_CHROMATICITIES[2], BT709_CHROMATICITIES[3]], dtype=np.float32
-)
-BT709_BLUE_XY: NDArray[np.float32] = np.array(
-    [BT709_CHROMATICITIES[4], BT709_CHROMATICITIES[5]], dtype=np.float32
-)
-BT709_WHITE_XY: NDArray[np.float32] = np.array(
-    [BT709_CHROMATICITIES[6], BT709_CHROMATICITIES[7]], dtype=np.float32
 )
 
 # OIIO/Nuke colorSpace label written as a descriptive header attribute.
@@ -96,11 +74,7 @@ def ffmpeg_bt709_matrix_filter() -> str:
 
 __all__ = [
     "ADOPTED_NEUTRAL_D65",
-    "BT709_BLUE_XY",
     "BT709_CHROMATICITIES",
-    "BT709_GREEN_XY",
-    "BT709_RED_XY",
-    "BT709_WHITE_XY",
     "LINEAR_REC709_SCENE_COLORSPACE",
     "bt709_eotf",
     "bt709_oetf",

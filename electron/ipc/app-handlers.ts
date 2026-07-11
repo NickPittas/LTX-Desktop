@@ -57,7 +57,7 @@ function getSetupStatus(settingsPath: string): { needsSetup: boolean; needsLicen
   }
 }
 
-function markSetupComplete(settingsPath: string): void {
+function markSetupAndLicenseAccepted(settingsPath: string): void {
   let settings: Record<string, unknown> = {}
 
   try {
@@ -70,25 +70,6 @@ function markSetupComplete(settingsPath: string): void {
 
   settings.setupComplete = true
   settings.licenseAccepted = true
-  settings.licenseAcceptedDate = new Date().toISOString()
-  settings.setupDate = new Date().toISOString()
-
-  writeSettingsFile(settingsPath, settings)
-}
-
-function markLicenseAccepted(settingsPath: string): void {
-  let settings: Record<string, unknown> = {}
-
-  try {
-    if (fs.existsSync(settingsPath)) {
-      settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'))
-    }
-  } catch {
-    settings = {}
-  }
-
-  settings.licenseAccepted = true
-  settings.setupComplete = true
   settings.licenseAcceptedDate = new Date().toISOString()
   settings.setupDate = new Date().toISOString()
 
@@ -146,10 +127,6 @@ export function registerAppHandlers(): void {
     }
   })
 
-  handle('getDownloadsPath', () => {
-    return app.getPath('downloads')
-  })
-
   handle('checkFirstRun', () => {
     const settingsPath = path.join(app.getPath('userData'), 'app_state.json')
     return getSetupStatus(settingsPath)
@@ -157,13 +134,13 @@ export function registerAppHandlers(): void {
 
   handle('acceptLicense', () => {
     const settingsPath = path.join(app.getPath('userData'), 'app_state.json')
-    markLicenseAccepted(settingsPath)
+    markSetupAndLicenseAccepted(settingsPath)
     return true
   })
 
   handle('completeSetup', () => {
     const settingsPath = path.join(app.getPath('userData'), 'app_state.json')
-    markSetupComplete(settingsPath)
+    markSetupAndLicenseAccepted(settingsPath)
     return true
   })
 

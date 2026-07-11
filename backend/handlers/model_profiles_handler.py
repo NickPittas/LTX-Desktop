@@ -20,7 +20,7 @@ from api_types import (
 )
 from handlers.base import StateHandlerBase, with_state_lock
 from runtime_config.model_download_specs import UPSAMPLER_CP_ID, resolve_model_path
-from services.model_resolver import ProfileCapabilityResult, resolve_profile_capabilities
+from services.model_resolver import is_profile_base_diffusion_resolvable, resolve_profile_capabilities
 from services.model_scanner import scan_models
 from state.app_state_types import ApiGeneration, GenerationRunning, GpuGeneration
 
@@ -78,31 +78,6 @@ def _activation_fingerprint(profile: ModelProfilePayload) -> tuple[object, ...]:
         c.transformer_format,
         c.transformer_quantization,
     )
-
-
-def _base_diffusion_resolvable(capabilities: ProfileCapabilityResult) -> bool:
-    """Phase 5 activation gate: the base diffusion model (transformer) must be
-    explicitly named by the profile AND scanner-recognized.
-
-    Catalog fallback alone is NOT accepted — ``normal_status == "supported"``
-    can be true even when ``components.transformer`` is empty (catalog
-    installed/duplicate fills in). Instead the resolved base artifact must:
-
-    - originate from the profile explicit path (``source == "profile"``), and
-    - have a scanned-and-usable status (``available`` or ``duplicate``).
-
-    This admits a wrong-folder transformer the profile explicitly points at
-    (the resolver marks it ``available`` / source ``profile``) and rejects a
-    bare catalog-installed artifact when the profile omits the path, an
-    unverified profile-only path, and any non-usable status.
-    """
-    base = next(
-        (a for a in capabilities.artifacts if a.component_role == "base_diffusion_model"),
-        None,
-    )
-    if base is None:
-        return False
-    return base.source == "profile" and base.status in ("available", "duplicate")
 
 
 def _migrate_raw_profile_dict(raw: dict[str, Any]) -> dict[str, Any]:
@@ -319,7 +294,7 @@ class ModelProfilesHandler(StateHandlerBase):
         # Phase 2 — scan + resolve outside the lock (disk IO).
         catalog = scan_models(models_dir)
         capabilities = resolve_profile_capabilities(profile_snapshot, catalog)
-        if not _base_diffusion_resolvable(capabilities):
+        if not is_profile_base_diffusion_resolvable(capabilities):
             raise HTTPError(409, "MODEL_PROFILE_REQUIRED_ARTIFACTS_MISSING")
 
         # Phase 3 — re-lock to recheck and commit.

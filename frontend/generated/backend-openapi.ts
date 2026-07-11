@@ -1171,12 +1171,6 @@ export interface components {
             /** Conditioning Type */
             conditioning_type?: ("canny" | "depth") | null;
             /**
-             * Final Mask Blur Px
-             * @description Blur radius for final raw-mask guard feather. Smoothens inpaint edge. 0=no feather. Separate from laplacian_blend_grow (pyramid blend level) and mask_grow_px (model context dilation).
-             * @default 6
-             */
-            final_mask_blur_px: number;
-            /**
              * Frame Rate
              * @description T2V frame rate (ingredients/no-video only)
              * @default 24
@@ -1190,12 +1184,6 @@ export interface components {
             height: number;
             /** Images */
             images?: components["schemas"]["IcLoraImageInput"][];
-            /**
-             * Laplacian Blend Grow
-             * @description Controls Laplacian pyramid blend mask_low_res_dilation for inpaint. Larger values expand blend region at low-res level. Separate from mask_grow_px (dilation radii) and final_mask_blur_px (raw mask feather).
-             * @default 12
-             */
-            laplacian_blend_grow: number;
             /**
              * Lora Strength
              * @default 1
@@ -1681,6 +1669,8 @@ export interface components {
         ModelSelectionOption: {
             /** Canonical Relative Path */
             canonical_relative_path: string;
+            /** Compatible Profile Ids */
+            compatible_profile_ids: string[];
             /** Disabled Reason */
             disabled_reason?: string | null;
             /** Downloadable */

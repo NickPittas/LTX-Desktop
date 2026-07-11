@@ -14,6 +14,7 @@ export interface ParsedMediaRef {
   id: string
   name: string
   path: string           // Effective local file path used for import
+  proxyPath?: string
   bigThumbnailPath?: string
   smallThumbnailPath?: string
   duration: number       // in seconds

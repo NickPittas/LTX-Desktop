@@ -357,7 +357,7 @@ export function ExportModal({ projectName }: ExportModalProps) {
 
   const handleCancel = useCallback(async () => {
     abortRef.current = true
-    window.electronAPI?.exportCancel({ sessionId: 'current' }).catch(() => {})
+    window.electronAPI?.exportCancel().catch(() => {})
     setExportStatus('idle')
   }, [])
 

@@ -1065,8 +1065,6 @@ class IcLoraHandler(StateHandlerBase):
                     output_path=output_path,
                     conditioning_strength=req.conditioning_strength,
                     mask_grow_px=req.mask_grow_px,
-                    laplacian_blend_grow=req.laplacian_blend_grow,
-                    final_mask_blur_px=req.final_mask_blur_px,
                     output_format=output_format,
                     encoder=self.media_encoder,
                     proxy_path=proxy_path,

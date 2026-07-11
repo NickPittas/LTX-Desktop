@@ -266,7 +266,13 @@ class TestOffloadModeGuard:
         test_state.pipelines.load_gpu_pipeline("fast")
         assert fake_services.fast_video_pipeline.last_offload_mode == OffloadMode.NONE
 
-    def test_official_remains_none(self, test_state, tmp_path, fake_services):
+    def test_official_remains_none(self, test_state, tmp_path, fake_services, monkeypatch):
+        from services.local_memory_plan import VramSnapshot
+
+        monkeypatch.setattr(
+            "handlers.pipelines_handler.snapshot_vram",
+            lambda: VramSnapshot(total_gib=48, free_gib=48, effective_gib=48, effective_tier_gib=48),
+        )
         _activate_official_profile(test_state, tmp_path)
         test_state.pipelines.load_gpu_pipeline("fast")
         assert fake_services.fast_video_pipeline.last_offload_mode == OffloadMode.NONE
@@ -298,7 +304,13 @@ class TestOffloadModeGuard:
         test_state.pipelines.load_ic_lora(lora_paths=[], depth_model_path=None)
         assert fake_services.ic_lora_pipeline.last_offload_mode == OffloadMode.NONE
 
-    def test_ic_lora_official_remains_none(self, test_state, tmp_path, fake_services):
+    def test_ic_lora_official_remains_none(self, test_state, tmp_path, fake_services, monkeypatch):
+        from services.local_memory_plan import VramSnapshot
+
+        monkeypatch.setattr(
+            "handlers.pipelines_handler.snapshot_vram",
+            lambda: VramSnapshot(total_gib=48, free_gib=48, effective_gib=48, effective_tier_gib=48),
+        )
         _activate_official_profile(test_state, tmp_path)
         test_state.pipelines.load_ic_lora(lora_paths=[], depth_model_path=None)
         assert fake_services.ic_lora_pipeline.last_offload_mode == OffloadMode.NONE
@@ -329,7 +341,13 @@ class TestOffloadModeGuard:
         test_state.pipelines.load_a2v_pipeline()
         assert fake_services.a2v_pipeline.last_offload_mode == OffloadMode.NONE
 
-    def test_a2v_official_remains_none(self, test_state, tmp_path, fake_services):
+    def test_a2v_official_remains_none(self, test_state, tmp_path, fake_services, monkeypatch):
+        from services.local_memory_plan import VramSnapshot
+
+        monkeypatch.setattr(
+            "handlers.pipelines_handler.snapshot_vram",
+            lambda: VramSnapshot(total_gib=48, free_gib=48, effective_gib=48, effective_tier_gib=48),
+        )
         _activate_official_profile(test_state, tmp_path)
         test_state.pipelines.load_a2v_pipeline()
         assert fake_services.a2v_pipeline.last_offload_mode == OffloadMode.NONE

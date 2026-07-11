@@ -17,6 +17,7 @@ import { pathToFileUrl } from '../../lib/file-url'
 import type { AssetListFilters } from './editor-state'
 import { equalAssetBins, selectAssetBins, selectAssets, selectVisibleAssets } from './editor-selectors'
 import { useEditorActions, useEditorStore } from './editor-store'
+import type { DeletionTarget } from '@/hooks/use-managed-asset-deletion'
 
 export interface VideoEditorAssetsPanelHandle {
   revealAsset: (assetId: string) => void
@@ -32,6 +33,7 @@ export interface VideoEditorAssetsPanelProps {
   regeneratingAssetId: string | null
   regenProgress: number
   regenStatusMessage: string
+  requestManagedDeletion: (targets: DeletionTarget[]) => Promise<void>
 }
 
 export const VideoEditorAssetsPanel = forwardRef<VideoEditorAssetsPanelHandle, VideoEditorAssetsPanelProps>(function VideoEditorAssetsPanel(props, ref) {
@@ -44,6 +46,7 @@ export const VideoEditorAssetsPanel = forwardRef<VideoEditorAssetsPanelHandle, V
     regeneratingAssetId,
     regenProgress,
     regenStatusMessage,
+    requestManagedDeletion,
   } = props
   const actions = useEditorActions()
   const assets = useEditorStore(selectAssets)
@@ -101,7 +104,7 @@ export const VideoEditorAssetsPanel = forwardRef<VideoEditorAssetsPanelHandle, V
     const ids = Array.from(new Set(rawIds.filter(Boolean)))
     if (ids.length === 0) return
 
-    actions.deleteAssets(ids)
+    void requestManagedDeletion(ids.map(assetId => ({ assetId })))
     setSelectedAssetIds(prev => {
       if (prev.size === 0) return prev
       const next = new Set(prev)
@@ -143,6 +146,9 @@ export const VideoEditorAssetsPanel = forwardRef<VideoEditorAssetsPanelHandle, V
     id: `asset-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
     type: asset.type,
     path: take.path,
+    origin: take.origin,
+    managedSourcePaths: take.managedSourcePaths,
+    proxyPath: take.proxyPath,
     bigThumbnailPath: take.bigThumbnailPath,
     smallThumbnailPath: take.smallThumbnailPath,
     width: take.width,
@@ -152,16 +158,21 @@ export const VideoEditorAssetsPanel = forwardRef<VideoEditorAssetsPanelHandle, V
     duration: asset.duration,
     binId: asset.binId,
     generationParams: asset.generationParams,
+    generationElapsedSeconds: take.generationElapsedSeconds,
     takes: [{
       path: take.path,
+      origin: take.origin,
+      managedSourcePaths: take.managedSourcePaths,
+      proxyPath: take.proxyPath,
       bigThumbnailPath: take.bigThumbnailPath,
       smallThumbnailPath: take.smallThumbnailPath,
       width: take.width,
       height: take.height,
       createdAt: take.createdAt,
+      generationElapsedSeconds: take.generationElapsedSeconds,
     }],
     activeTakeIndex: 0,
-    createdAt: Date.now(),
+    createdAt: take.createdAt ?? asset.createdAt,
   }), [])
 
   const openCreateBinEditor = useCallback((assetIds?: string[]) => {
@@ -631,8 +642,13 @@ export const VideoEditorAssetsPanel = forwardRef<VideoEditorAssetsPanelHandle, V
                         openSourceAsset({
                           ...takesAsset,
                           path: take.path,
+                          origin: take.origin,
+                          managedSourcePaths: take.managedSourcePaths,
+                          proxyPath: take.proxyPath,
                           bigThumbnailPath: take.bigThumbnailPath,
                           smallThumbnailPath: take.smallThumbnailPath,
+                          width: take.width,
+                          height: take.height,
                         })
                       }}
                       onContextMenu={(e) => {
@@ -680,9 +696,7 @@ export const VideoEditorAssetsPanel = forwardRef<VideoEditorAssetsPanelHandle, V
                           className="absolute top-1.5 right-1.5 p-1 rounded-md bg-black/70 text-zinc-400 hover:text-red-400 hover:bg-red-900/60 opacity-0 group-hover:opacity-100 transition-all z-10"
                           onClick={(e) => {
                             e.stopPropagation()
-                            if (confirm(`Delete take ${idx + 1}?`)) {
-                              actions.deleteAssetTake(takesAsset.id, idx)
-                            }
+                            void requestManagedDeletion([{ assetId: takesAsset.id, takeIndex: idx }])
                           }}
                         >
                             <Trash2 className="h-3 w-3" />
@@ -1140,6 +1154,7 @@ export const VideoEditorAssetsPanel = forwardRef<VideoEditorAssetsPanelHandle, V
             setAssetContextMenu={setAssetContextMenu}
             createAssetFromTake={createAssetFromTake}
             openCreateBinEditor={openCreateBinEditor}
+            requestManagedDeletion={requestManagedDeletion}
           />
         )
       })()}
@@ -1159,6 +1174,7 @@ export const VideoEditorAssetsPanel = forwardRef<VideoEditorAssetsPanelHandle, V
             addClipToTimeline={addClipToTimeline}
             createAssetFromTake={createAssetFromTake}
             setTakeContextMenu={setTakeContextMenu}
+            requestManagedDeletion={requestManagedDeletion}
           />
         )
       })()}

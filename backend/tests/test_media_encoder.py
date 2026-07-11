@@ -671,7 +671,7 @@ def test_mp4_pixels_byte_identical_to_external(tmp_path: Path) -> None:
     video_b = _make_gray_frames(2, 32, 32, gray=0.5)
 
     external_mp4 = tmp_path / "external.mp4"
-    encode_video(video=video_a, fps=24, audio=None, output_path=str(external_mp4),
+    encode_video(video=video_a.float() / 255.0, fps=24, audio=None, output_path=str(external_mp4),
                  video_chunks_number=1)
 
     tagged_mp4 = tmp_path / "tagged.mp4"

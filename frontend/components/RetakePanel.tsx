@@ -378,10 +378,10 @@ export function RetakePanel({
     const assetData = e.dataTransfer.getData('asset')
     if (assetData) {
       try {
-        const asset = JSON.parse(assetData) as { type?: string; path?: string }
+        const asset = JSON.parse(assetData) as { type?: string; path?: string; proxyPath?: string }
         if (asset.type === 'video' && asset.path) {
           setVideoPath(asset.path)
-          setPreviewPath(asset.path)
+          setPreviewPath(asset.proxyPath ?? asset.path)
           setThumbnails([])
           extractingRef.current = false
           return

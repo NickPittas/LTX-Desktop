@@ -2,12 +2,12 @@
 
 ## Responsibility
 
-The non-linear video editor. 32 files implementing the editor state machine, the timeline/program/source/assets UI, and the supporting hooks. The folder is organized as a classic **store / selectors / actions** split plus presentational components and controller hooks.
+The non-linear video editor. 30 files implementing the editor state machine, the timeline/program/source/assets UI, and the supporting hooks. The folder is organized as a classic **store / selectors / actions** split plus presentational components and controller hooks.
 
-- **State core** — `editor-state.ts` (types + `createInitialEditorState` + undo snapshot helpers), `editor-store.tsx` (Zustand vanilla store + React binding + undo/redo recording), `editor-selectors.ts` (pure derivations), `editor-actions.ts` (164 reducer-style mutators), `editor-project-bridging.ts` (`Project` ⇔ `EditorModel` conversion).
-- **Shared utils** — `video-editor-utils.ts` (tools, color labels, layout persistence, clip-effect CSS, time formatting, overlap resolution, migrations).
+- **State core** — `editor-state.ts` (types + `createInitialEditorState` + undo snapshot helpers), `editor-store.tsx` (Zustand vanilla store + React binding + undo/redo recording), `editor-selectors.ts` (pure derivations), `editor-actions.ts` (163 reducer-style mutators), `editor-project-bridging.ts` (`Project` ⇔ `EditorModel` conversion).
+- **Shared utils** — `video-editor-utils.ts` (tools, color labels, layout persistence, active clip color-correction/transform CSS, time formatting, overlap resolution, migrations).
 - **Hooks** — `useEditorKeyboard`, `usePlaybackEngine`, `usePlaybackAudioSync`, `useRegeneration`, `useEditorMediaImport`, `useSubtitleImportExport`, `useTimelineXmlExport`, `useTimelineDrag`, `useBuildMenuDefinitions`.
-- **Components** — 19 panels/widgets (see below).
+- **Components** — 17 panels/widgets (see below).
 
 ## Design Patterns
 
@@ -25,7 +25,7 @@ Only the `editorModel` slice (`assets`, `bins`, `timelines`) participates in his
 ### Component conventions
 
 - **Store-connected components** subscribe via `useEditorStore(selectX)` and dispatch via `useEditorActions()` (e.g. `ProgramMonitor`, `ClipPropertiesPanel`, `SubtitlePropertiesPanel`, `VideoEditorTimelineControlPanel`, `SubtitleTrackStyleEditor`).
-- **Props-driven presentational components** receive callbacks and data from a parent (e.g. `ClipContextMenu`, `AssetContextMenu`, `TakeContextMenu`, `GapGenerationModal`, `TimelineToolbar`, `ToolsPanel`, `EffectsBrowser`, `VideoEditorLayoutMenu`). This keeps them testable and avoids nested store subscriptions.
+- **Props-driven presentational components** receive callbacks and data from a parent (e.g. `ClipContextMenu`, `AssetContextMenu`, `TakeContextMenu`, `GapGenerationModal`, `TimelineToolbar`, `VideoEditorLayoutMenu`). This keeps them testable and avoids nested store subscriptions.
 - **Imperative handles** expose escape-hatch APIs to the host: `ProgramMonitorHandle.toggleFullscreen`, `VideoEditorAssetsPanelHandle.{revealAsset, deleteAsset}`, `VideoEditorSourceMonitorHandle.{openAsset, pause, dispatchKeyboardAction}`.
 
 ## Data & Control Flow
@@ -77,8 +77,8 @@ A single stable `useEffect` (no deps — reads latest state via refs) resolves t
 
 ## Component reference
 
-- **`ProgramMonitor.tsx`** (forwardRef, `ProgramMonitorHandle`) — timeline preview. Composites a video pool + cross-dissolve incoming clip, image layers, text overlays, subtitles, letterbox, adjustment-layer effects, and audio-only clips using a `buildFrameRenderCache` + `deriveFrameRenderState` pipeline. Manages preview zoom/pan, playback resolution, and fullscreen.
-- **`VideoEditorTimelineEditingPanel.tsx`** (3306 lines) — the timeline orchestration hub. Renders ruler, track headers, clips, gap selection, `ToolsPanel`, `TimelineToolbar`, `EffectsBrowser`, `ClipContextMenu`, `GapGenerationModal`. Instantiates `useTimelineDrag` and owns gap-generation suggestion flow (extracting before/after frames, `ApiClient.suggestGapPrompt`, abortable).
+- **`ProgramMonitor.tsx`** (forwardRef, `ProgramMonitorHandle`) — timeline preview. Composites a video pool + cross-dissolve incoming clip, image layers, text overlays, subtitles, letterbox, and audio-only clips using a `buildFrameRenderCache` + `deriveFrameRenderState` pipeline. Manages preview zoom/pan, playback resolution, and fullscreen.
+- **`VideoEditorTimelineEditingPanel.tsx`** (3306 lines) — the timeline orchestration hub. Renders ruler, track headers, clips, gap selection, `TimelineToolbar`, `ClipContextMenu`, `GapGenerationModal`. Instantiates `useTimelineDrag` and owns gap-generation suggestion flow (extracting before/after frames, `ApiClient.suggestGapPrompt`, abortable).
 - **`VideoEditorAssetsPanel.tsx`** (forwardRef, `VideoEditorAssetsPanelHandle`) — left-panel media library. Grid/list views, filtering/sorting (`selectVisibleAssets`), bins, lasso selection, takes view, and the asset/take/bin context menus. Bridges to `AssetContextMenu`, `TakeContextMenu`, `VideoThumbnailCard`.
 - **`VideoEditorSourceMonitor.tsx`** (forwardRef, `VideoEditorSourceMonitorHandle`; exports `SourceKeyboardAction`) — clip viewer with In/Out marks, loop playback, and insert/overwrite edit dispatch (`insertSourceEdit`/`overwriteSourceEdit`).
 - **`ClipPropertiesPanel.tsx`** — right panel; Properties/Metadata tabs. Flip, transitions, color correction, letterbox, text style, takes, speed, opacity, audio levels (`selectSelectedClipAudioControls`).
@@ -87,7 +87,7 @@ A single stable `useEffect` (no deps — reads latest state via refs) resolves t
 - **`TakeContextMenu.tsx`** (props-driven) — set active take, add to timeline, create asset from take, delete take.
 - **`GapGenerationModal.tsx`** (props-driven) — generate media into a timeline gap (text-to-video / image-to-video / text-to-image), with prompt suggestion, before/after frames, and `SettingsPanel`.
 - **`SubtitlePropertiesPanel.tsx`**, **`SubtitleTrackStyleEditor.tsx`** — per-subtitle and per-track subtitle style editors.
-- **`TimelineToolbar.tsx`**, **`ToolsPanel.tsx`**, **`EffectsBrowser.tsx`** (effects currently hidden), **`VideoEditorLayoutMenu.tsx`** (preset save/apply/reset), **`VideoEditorTimelineControlPanel.tsx`** (timeline tabs + create/import/rename/delete), **`VideoThumbnailCard.tsx`** (hover-scrub canvas preview).
+- **`TimelineToolbar.tsx`**, **`VideoEditorLayoutMenu.tsx`** (preset save/apply/reset), **`VideoEditorTimelineControlPanel.tsx`** (timeline tabs + create/import/rename/delete), **`VideoThumbnailCard.tsx`** (hover-scrub canvas preview). Persisted project effect schemas remain supported for round-trip compatibility, but effect runtime/UI helpers are inactive.
 
 ## Integration Points
 

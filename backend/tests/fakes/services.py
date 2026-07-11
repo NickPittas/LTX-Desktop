@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from PIL import Image
 from api_types import ImageConditioningInput, OutputFormat, VideoCameraMotion
+from app_handler import ServiceBundle
 from services.ltx_components import CheckpointPath, ResolvedLtxComponents
 from services.interfaces import VideoInfoPayload
 from services.ltx_api_client.ltx_api_client import LTXRetakeResult
@@ -468,7 +469,6 @@ class _FakeVideoPipelineBase:
 
     def __init__(self) -> None:
         self.generate_calls: list[dict[str, Any]] = []
-        self.warmup_calls: list[dict[str, Any]] = []
         self.compile_calls = 0
         self.raise_on_generate: Exception | None = None
         self.last_checkpoint_path: CheckpointPath | None = None
@@ -492,13 +492,6 @@ class _FakeVideoPipelineBase:
         output_path = Path(payload["output_path"])
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"fake-video")
-
-    def warmup(self, output_path: str) -> None:
-        self.warmup_calls.append({"output_path": output_path})
-        path = Path(output_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"warmup")
-        path.unlink(missing_ok=True)
 
     def compile_transformer(self) -> None:
         self.compile_calls += 1
@@ -682,7 +675,49 @@ class FakeIcLoraPipeline:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"fake-ic-lora-video")
 
-    def generate_inpaint(self, **kwargs: Any) -> None:
+    def generate_inpaint(
+        self,
+        prompt: str,
+        seed: int,
+        height: int,
+        width: int,
+        num_frames: int,
+        frame_rate: float,
+        images: list[ImageConditioningInput],
+        video_path: str,
+        mask_path: str,
+        output_path: str,
+        conditioning_strength: float = 1.0,
+        mask_grow_px: int = 30,
+        output_format: OutputFormat = OutputFormat.MP4,
+        encoder: Any = None,
+        proxy_path: str | None = None,
+        on_progress: Any = None,
+        input_colorspace: Any = None,
+        on_phase_update: Any = None,
+        save_stage_1_preview: bool = False,
+    ) -> None:
+        kwargs: dict[str, Any] = {
+            "prompt": prompt,
+            "seed": seed,
+            "height": height,
+            "width": width,
+            "num_frames": num_frames,
+            "frame_rate": frame_rate,
+            "images": images,
+            "video_path": video_path,
+            "mask_path": mask_path,
+            "output_path": output_path,
+            "conditioning_strength": conditioning_strength,
+            "mask_grow_px": mask_grow_px,
+            "output_format": output_format,
+            "encoder": encoder,
+            "proxy_path": proxy_path,
+            "on_progress": on_progress,
+            "input_colorspace": input_colorspace,
+            "on_phase_update": on_phase_update,
+            "save_stage_1_preview": save_stage_1_preview,
+        }
         self.generate_calls.append(kwargs)
         if self.raise_on_generate is not None:
             raise self.raise_on_generate
@@ -690,9 +725,6 @@ class FakeIcLoraPipeline:
         output_path = Path(kwargs["output_path"])
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"fake-ic-lora-inpaint-video")
-
-    # ponytail: generate_inpaint accepts **kwargs, mask_grow_px captured in generate_calls
-
 
 class FakeHdrIcLoraPipeline:
     """Test double for :class:`HdrIcLoraPipeline` (dedicated HDR IC-LoRA path).
@@ -1065,3 +1097,27 @@ class FakeServices:
         FakePoseProcessorPipeline.bind_singleton(self.pose_processor_pipeline)
         FakeA2VPipeline.bind_singleton(self.a2v_pipeline)
         FakeRetakePipeline.bind_singleton(self.retake_pipeline)
+
+
+def make_service_bundle(fake_services: FakeServices) -> ServiceBundle:
+    return ServiceBundle(
+        http=fake_services.http,
+        gpu_cleaner=fake_services.gpu_cleaner,
+        model_downloader=fake_services.model_downloader,
+        gpu_info=fake_services.gpu_info,
+        video_processor=fake_services.video_processor,
+        text_encoder=fake_services.text_encoder,
+        task_runner=fake_services.task_runner,
+        ltx_api_client=fake_services.ltx_api_client,
+        zit_api_client=fake_services.zit_api_client,
+        fast_video_pipeline_class=type(fake_services.fast_video_pipeline),
+        image_generation_pipeline_class=type(fake_services.image_generation_pipeline),
+        ic_lora_pipeline_class=type(fake_services.ic_lora_pipeline),
+        hdr_ic_lora_pipeline_class=type(fake_services.hdr_ic_lora_pipeline),
+        depth_processor_pipeline_class=type(fake_services.depth_processor_pipeline),
+        pose_processor_pipeline_class=type(fake_services.pose_processor_pipeline),
+        a2v_pipeline_class=type(fake_services.a2v_pipeline),
+        retake_pipeline_class=type(fake_services.retake_pipeline),
+        media_encoder=fake_services.media_encoder,
+        system_info=fake_services.system_info,
+    )

@@ -34,7 +34,6 @@
     "start:unpacked:win": "powershell -Command \"& '.\\release\\win-unpacked\\LTX Desktop.exe'\""
   },
   "dependencies": {
-    "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.1",
     "electron-updater": "^6.8.3",
     "js-yaml": "^4.1.1",

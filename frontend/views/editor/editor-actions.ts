@@ -758,6 +758,8 @@ export function importParsedTimeline(state: EditorState, parsed: ParsedTimeline)
     id: makeId('asset'),
     type: ref.type,
     path: ref.path,
+    origin: 'imported',
+    proxyPath: ref.proxyPath,
     bigThumbnailPath: ref.bigThumbnailPath,
     smallThumbnailPath: ref.smallThumbnailPath,
     width: ref.width,
@@ -1633,6 +1635,28 @@ export function deleteAssets(state: EditorState, assetIds: string[]): EditorStat
   }))
 }
 
+/** Applies a Trash-confirmed batch in one editor-store update. */
+export function deleteManagedAssetTargets(
+  state: EditorState,
+  targets: Array<{ assetId: string; takeIndex?: number }>,
+): EditorState {
+  const wholeAssetIds = new Set(targets.filter(target => target.takeIndex === undefined).map(target => target.assetId))
+  let next = wholeAssetIds.size > 0 ? deleteAssets(state, [...wholeAssetIds]) : state
+  const takeTargets = new Map<string, number[]>()
+  for (const target of targets) {
+    if (target.takeIndex === undefined || wholeAssetIds.has(target.assetId)) continue
+    const indexes = takeTargets.get(target.assetId) ?? []
+    indexes.push(target.takeIndex)
+    takeTargets.set(target.assetId, indexes)
+  }
+  for (const [assetId, indexes] of takeTargets) {
+    for (const takeIndex of [...new Set(indexes)].sort((a, b) => b - a)) {
+      next = deleteAssetTake(next, assetId, takeIndex)
+    }
+  }
+  return next
+}
+
 export function updateAsset(state: EditorState, assetId: string, patch: Partial<Asset>): EditorState {
   return updateEditorModel(state, editorModel => ({
     ...editorModel,
@@ -1719,6 +1743,9 @@ export function addAssetTake(state: EditorState, assetId: string, take: AssetTak
       if (asset.id !== assetId) return asset
       const existingTakes: AssetTake[] = asset.takes || [{
         path: asset.path,
+        origin: asset.origin,
+        managedSourcePaths: asset.managedSourcePaths,
+        proxyPath: asset.proxyPath,
         bigThumbnailPath: asset.bigThumbnailPath,
         smallThumbnailPath: asset.smallThumbnailPath,
         width: asset.width,
@@ -1732,6 +1759,9 @@ export function addAssetTake(state: EditorState, assetId: string, take: AssetTak
         takes: nextTakes,
         activeTakeIndex: newIndex,
         path: take.path,
+        origin: take.origin,
+        managedSourcePaths: take.managedSourcePaths,
+        proxyPath: take.proxyPath,
         bigThumbnailPath: take.bigThumbnailPath,
         smallThumbnailPath: take.smallThumbnailPath,
         width: take.width,
@@ -1754,6 +1784,9 @@ export function deleteAssetTake(state: EditorState, assetId: string, takeIndex: 
         takes: nextTakes,
         activeTakeIndex: nextActiveTakeIndex,
         path: activeTake.path,
+        origin: activeTake.origin,
+        managedSourcePaths: activeTake.managedSourcePaths,
+        proxyPath: activeTake.proxyPath,
         bigThumbnailPath: activeTake.bigThumbnailPath,
         smallThumbnailPath: activeTake.smallThumbnailPath,
         width: activeTake.width,
@@ -1782,6 +1815,9 @@ export function setAssetActiveTake(state: EditorState, assetId: string, takeInde
         ...asset,
         activeTakeIndex: takeIndex,
         path: take.path,
+        origin: take.origin,
+        managedSourcePaths: take.managedSourcePaths,
+        proxyPath: take.proxyPath,
         bigThumbnailPath: take.bigThumbnailPath,
         smallThumbnailPath: take.smallThumbnailPath,
         width: take.width,
@@ -2238,16 +2274,6 @@ export function setShowPropertiesPanel(state: EditorState, value: boolean): Edit
   }))
 }
 
-export function setShowEffectsBrowser(state: EditorState, value: boolean): EditorState {
-  return updateSession(state, session => ({
-    ...session,
-    ui: {
-      ...session.ui,
-      showEffectsBrowser: value,
-    },
-  }))
-}
-
 export function setActiveFocusArea(state: EditorState, area: 'source' | 'timeline'): EditorState {
   return updateSession(state, session => ({
     ...session,
@@ -2517,6 +2543,16 @@ export function redo(state: EditorState): EditorState {
     history: {
       undoStack: [...state.history.undoStack, currentSnapshot],
       redoStack: state.history.redoStack.slice(0, -1),
+    },
+  }
+}
+
+export function clearHistory(state: EditorState): EditorState {
+  return {
+    ...state,
+    history: {
+      undoStack: [],
+      redoStack: [],
     },
   }
 }

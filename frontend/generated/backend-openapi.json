@@ -1753,14 +1753,6 @@
             ],
             "title": "Conditioning Type"
           },
-          "final_mask_blur_px": {
-            "default": 6,
-            "description": "Blur radius for final raw-mask guard feather. Smoothens inpaint edge. 0=no feather. Separate from laplacian_blend_grow (pyramid blend level) and mask_grow_px (model context dilation).",
-            "maximum": 64.0,
-            "minimum": 0.0,
-            "title": "Final Mask Blur Px",
-            "type": "integer"
-          },
           "frame_rate": {
             "default": 24.0,
             "description": "T2V frame rate (ingredients/no-video only)",
@@ -1781,14 +1773,6 @@
             },
             "title": "Images",
             "type": "array"
-          },
-          "laplacian_blend_grow": {
-            "default": 12,
-            "description": "Controls Laplacian pyramid blend mask_low_res_dilation for inpaint. Larger values expand blend region at low-res level. Separate from mask_grow_px (dilation radii) and final_mask_blur_px (raw mask feather).",
-            "maximum": 64.0,
-            "minimum": 0.0,
-            "title": "Laplacian Blend Grow",
-            "type": "integer"
           },
           "lora_strength": {
             "default": 1.0,
@@ -3420,6 +3404,13 @@
             "title": "Canonical Relative Path",
             "type": "string"
           },
+          "compatible_profile_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Compatible Profile Ids",
+            "type": "array"
+          },
           "disabled_reason": {
             "anyOf": [
               {
@@ -3495,6 +3486,7 @@
           "variant_group",
           "installed",
           "pipeline_family",
+          "compatible_profile_ids",
           "repo_id",
           "source_url",
           "canonical_relative_path",

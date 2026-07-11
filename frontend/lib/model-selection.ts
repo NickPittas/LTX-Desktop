@@ -7,9 +7,6 @@ export type ModelSelectionWorkflow = components['schemas']['ModelSelectionOption
 // source. The frontend never hardcodes ids except storing/rendering the
 // backend's returned ``option.id``.
 export type ModelSelectionID = ModelSelectionOption['id']
-// Deprecated alias retained for callers that still name the option id after the
-// download checkpoint id (the two coincide today). Prefer ``ModelSelectionID``.
-export type ModelCheckpointID = ModelSelectionID
 
 export interface GroupedModelOptions {
   section: ModelSelectionOption['section']
@@ -75,7 +72,7 @@ export function groupModelOptions(options: ModelSelectionOption[]): GroupedModel
 
 export function findModelOption(
   options: ModelSelectionOption[],
-  id: ModelCheckpointID | null | undefined,
+  id: ModelSelectionID | null | undefined,
 ): ModelSelectionOption | undefined {
   if (!id) return undefined
   return options.find((option) => option.id === id)

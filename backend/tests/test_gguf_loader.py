@@ -175,13 +175,21 @@ def test_install_gguf_loader_is_idempotent() -> None:
     assert pipe.stage._transformer_builder is after_first
 
 
-def test_install_gguf_loader_forces_none_offload_and_disables_streaming_builder() -> None:
+def test_install_gguf_loader_forces_none_offload_and_disables_streaming_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The transformer GGUF loader keeps raw bytes on CPU (peak mitigation) and,
     because GGUF cannot stream, forces stage _offload_mode=NONE and clears
     _streaming_builder — even when the pipeline was constructed with CPU offload."""
     from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder
     from ltx_core.model.transformer import LTXV_MODEL_COMFY_RENAMING_MAP, LTXModelConfigurator
     from ltx_pipelines.utils.types import OffloadMode
+    from services.local_memory_plan import VramSnapshot
+
+    monkeypatch.setattr(
+        "services.local_memory_plan.snapshot_vram",
+        lambda: VramSnapshot(total_gib=24, free_gib=22, effective_gib=20, effective_tier_gib=24),
+    )
 
     builder = SingleGPUModelBuilder(
         model_path="/fake/t.gguf",

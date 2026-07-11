@@ -10,7 +10,7 @@ import { AudioWaveform } from '../../components/AudioWaveform'
 import { pathToFileUrl } from '../../lib/file-url'
 import { DEFAULT_SUBTITLE_STYLE } from '../../types/project-model'
 import type { Asset, TimelineClip, Track, SubtitleClip } from '../../types/project-model'
-import { getClipEffectStyles, getTransitionBgColor, formatTime, getShortcutLabel, tooltipLabel, getMaskedEffectOverlays } from './video-editor-utils'
+import { getClipEffectStyles, getTransitionBgColor, formatTime, getShortcutLabel, tooltipLabel } from './video-editor-utils'
 import type { KeyboardLayout } from '../../lib/keyboard-shortcuts'
 import {
   selectActiveTimelineInPoint,
@@ -39,15 +39,6 @@ interface ActiveLetterboxState {
   key: string
 }
 
-interface AdjustmentEffectState {
-  clip: TimelineClip
-  filterStyle: React.CSSProperties
-  hasVignette: boolean
-  vignetteAmount: number
-  hasGrain: boolean
-  grainAmount: number
-}
-
 interface DissolvePair {
   outgoing: TimelineClip
   incoming: TimelineClip
@@ -67,7 +58,6 @@ interface FrameOverlayState {
   activeTextClips: TimelineClip[]
   activeSubtitles: SubtitleClip[]
   activeLetterbox: ActiveLetterboxState | null
-  activeAdjustmentEffects: AdjustmentEffectState[]
   audioOnlyClips: TimelineClip[]
 }
 
@@ -348,7 +338,6 @@ function deriveFrameRenderState(cache: FrameRenderCache, tracks: Track[], time: 
     activeTextClips: getActiveTextClips(cache.textClips, tracks, time),
     activeSubtitles: getActiveSubtitles(cache.subtitles, tracks, time),
     activeLetterbox: getActiveLetterbox(cache.adjustmentClips, tracks, time),
-    activeAdjustmentEffects: [],
     audioOnlyClips: cache.audioClips.filter(clip => time >= clip.startTime && time < clip.startTime + clip.duration),
     activeVideoContributors: getActiveVideoContributors(activeClip, dissolve?.pair ?? null, dissolve?.progress ?? 0, compositingStack, time),
   }
@@ -384,8 +373,7 @@ function sameFrameOverlayState(a: FrameOverlayState, b: FrameOverlayState): bool
     sameClipList(a.activeTextClips, b.activeTextClips) &&
     sameSubtitleList(a.activeSubtitles, b.activeSubtitles) &&
     sameLetterbox(a.activeLetterbox, b.activeLetterbox) &&
-    sameClipList(a.audioOnlyClips, b.audioOnlyClips) &&
-    a.activeAdjustmentEffects.length === b.activeAdjustmentEffects.length
+    sameClipList(a.audioOnlyClips, b.audioOnlyClips)
   )
 }
 
@@ -492,7 +480,6 @@ export const ProgramMonitor = React.forwardRef<ProgramMonitorHandle, ProgramMoni
       activeTextClips: initial.activeTextClips,
       activeSubtitles: initial.activeSubtitles,
       activeLetterbox: initial.activeLetterbox,
-      activeAdjustmentEffects: initial.activeAdjustmentEffects,
       audioOnlyClips: initial.audioOnlyClips,
     }
   })
@@ -556,7 +543,6 @@ export const ProgramMonitor = React.forwardRef<ProgramMonitorHandle, ProgramMoni
         activeTextClips: nextState.activeTextClips,
         activeSubtitles: nextState.activeSubtitles,
         activeLetterbox: nextState.activeLetterbox,
-        activeAdjustmentEffects: nextState.activeAdjustmentEffects,
         audioOnlyClips: nextState.audioOnlyClips,
       }
       if (sameFrameOverlayState(prevState, nextOverlayState)) {
@@ -978,18 +964,6 @@ export const ProgramMonitor = React.forwardRef<ProgramMonitorHandle, ProgramMoni
       }
     }
 
-    if (activeClip?.asset?.type === 'video') {
-      const poolVideo = activePoolPathRef.current ? videoPoolRef.current.get(activePoolPathRef.current) ?? null : null
-      if (poolVideo) {
-        const overlays = getMaskedEffectOverlays(activeClip)
-        for (const overlay of overlays) {
-          const maskVideo = document.getElementById(`mask-video-${overlay.effectId}`) as HTMLVideoElement | null
-          if (maskVideo && Math.abs(maskVideo.currentTime - poolVideo.currentTime) > 0.04) {
-            maskVideo.currentTime = poolVideo.currentTime
-          }
-        }
-      }
-    }
   }, [ensureContributorSyncState, ensurePoolVideo, getContributorKey, getNextVideoClipRef, resolveClipPathRef, syncPlaybackContributorVideo, syncRetainedPoolVideos])
 
   const renderFrame = React.useCallback((atTime: number, mode: MonitorRenderMode) => {
@@ -1136,7 +1110,6 @@ export const ProgramMonitor = React.forwardRef<ProgramMonitorHandle, ProgramMoni
   const activeTextClips = frameScene.activeTextClips
   const activeSubtitles = frameScene.activeSubtitles
   const activeLetterbox = frameScene.activeLetterbox
-  const activeAdjustmentEffects = frameScene.activeAdjustmentEffects
   const crossDissolveState = frameScene.crossDissolve
     ? {
       ...frameScene.crossDissolve,
@@ -1325,51 +1298,6 @@ export const ProgramMonitor = React.forwardRef<ProgramMonitorHandle, ProgramMoni
                 </>
                 )
               })()}
-
-              {/* Adjustment layer effects */}
-              {activeAdjustmentEffects.map(({ clip: adjClip, filterStyle, hasVignette, vignetteAmount, hasGrain, grainAmount }) => {
-                const backdropFilter = filterStyle.filter && filterStyle.filter !== 'none' ? String(filterStyle.filter) : undefined
-                return (
-                  <React.Fragment key={`adj-fx-${adjClip.id}`}>
-                    {backdropFilter && (
-                      <div
-                        className="absolute inset-0 z-[22] pointer-events-none"
-                        style={{ backdropFilter, WebkitBackdropFilter: backdropFilter }}
-                      />
-                    )}
-                    {hasVignette && (
-                      <div
-                        className="absolute inset-0 z-[22] pointer-events-none"
-                        style={{
-                          background: `radial-gradient(ellipse at center, transparent 30%, rgba(0,0,0,${vignetteAmount}) 100%)`,
-                        }}
-                      />
-                    )}
-                    {hasGrain && (
-                      <canvas
-                        ref={(canvas) => {
-                          if (!canvas) return
-                          const ctx = canvas.getContext('2d')
-                          if (!ctx) return
-                          const w = canvas.width = 256
-                          const h = canvas.height = 256
-                          const imageData = ctx.createImageData(w, h)
-                          for (let i = 0; i < imageData.data.length; i += 4) {
-                            const v = Math.random() * 255
-                            imageData.data[i] = v
-                            imageData.data[i + 1] = v
-                            imageData.data[i + 2] = v
-                            imageData.data[i + 3] = (grainAmount / 100) * 80
-                          }
-                          ctx.putImageData(imageData, 0, 0)
-                        }}
-                        className="absolute inset-0 z-[22] pointer-events-none w-full h-full"
-                        style={{ mixBlendMode: 'overlay', imageRendering: 'pixelated' }}
-                      />
-                    )}
-                  </React.Fragment>
-                )
-              })}
 
               {/* Text overlay clips */}
               {activeTextClips.map(tc => {

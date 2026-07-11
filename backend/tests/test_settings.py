@@ -7,9 +7,8 @@ from pathlib import Path
 
 from state.app_settings import AppSettings, UpdateSettingsRequest
 from state import build_initial_state
-from app_handler import ServiceBundle
 from tests.conftest import TEST_ADMIN_TOKEN
-from tests.fakes.services import FakeServices
+from tests.fakes.services import FakeServices, make_service_bundle
 
 
 class TestGetSettings:
@@ -169,26 +168,7 @@ class TestModelsDirAdminGuard:
         assert r.status_code == 200
 
         fake_services = FakeServices()
-        bundle = ServiceBundle(
-            http=fake_services.http,
-            gpu_cleaner=fake_services.gpu_cleaner,
-            model_downloader=fake_services.model_downloader,
-            gpu_info=fake_services.gpu_info,
-            video_processor=fake_services.video_processor,
-            text_encoder=fake_services.text_encoder,
-            task_runner=fake_services.task_runner,
-            ltx_api_client=fake_services.ltx_api_client,
-            zit_api_client=fake_services.zit_api_client,
-            fast_video_pipeline_class=type(fake_services.fast_video_pipeline),
-            image_generation_pipeline_class=type(fake_services.image_generation_pipeline),
-            ic_lora_pipeline_class=type(fake_services.ic_lora_pipeline),
-            depth_processor_pipeline_class=type(fake_services.depth_processor_pipeline),
-            pose_processor_pipeline_class=type(fake_services.pose_processor_pipeline),
-            a2v_pipeline_class=type(fake_services.a2v_pipeline),
-            retake_pipeline_class=type(fake_services.retake_pipeline),
-            media_encoder=fake_services.media_encoder,
-            system_info=fake_services.system_info,
-        )
+        bundle = make_service_bundle(fake_services)
         loaded = build_initial_state(test_state.config, default_app_settings.model_copy(deep=True), service_bundle=bundle)
         assert loaded.state.app_settings.models_dir == "/tmp/persisted-models"
         assert loaded.models.models_dir == Path("/tmp/persisted-models")
@@ -197,26 +177,7 @@ class TestModelsDirAdminGuard:
 class TestSettingsPersistence:
     def _new_state(self, test_state, default_app_settings):
         fake_services = FakeServices()
-        bundle = ServiceBundle(
-            http=fake_services.http,
-            gpu_cleaner=fake_services.gpu_cleaner,
-            model_downloader=fake_services.model_downloader,
-            gpu_info=fake_services.gpu_info,
-            video_processor=fake_services.video_processor,
-            text_encoder=fake_services.text_encoder,
-            task_runner=fake_services.task_runner,
-            ltx_api_client=fake_services.ltx_api_client,
-            zit_api_client=fake_services.zit_api_client,
-            fast_video_pipeline_class=type(fake_services.fast_video_pipeline),
-            image_generation_pipeline_class=type(fake_services.image_generation_pipeline),
-            ic_lora_pipeline_class=type(fake_services.ic_lora_pipeline),
-            depth_processor_pipeline_class=type(fake_services.depth_processor_pipeline),
-            pose_processor_pipeline_class=type(fake_services.pose_processor_pipeline),
-            a2v_pipeline_class=type(fake_services.a2v_pipeline),
-            retake_pipeline_class=type(fake_services.retake_pipeline),
-            media_encoder=fake_services.media_encoder,
-            system_info=fake_services.system_info,
-        )
+        bundle = make_service_bundle(fake_services)
         return build_initial_state(test_state.config, default_app_settings.model_copy(deep=True), service_bundle=bundle)
 
     def test_load_settings_clamps_from_disk_and_ignores_removed_fields(self, test_state, default_app_settings):

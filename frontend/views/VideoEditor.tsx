@@ -77,6 +77,8 @@ import {
 } from './editor/editor-store'
 import { GenerationErrorDialog } from '../components/GenerationErrorDialog'
 import { SubtitleTrackStyleEditor } from './editor/SubtitleTrackStyleEditor'
+import { useManagedAssetDeletion } from '../hooks/use-managed-asset-deletion'
+import { ManagedAssetDeletionDialog } from '../components/ManagedAssetDeletionDialog'
 
 interface VideoEditorProps {
   currentProject: Project
@@ -171,6 +173,7 @@ function VideoEditorWithStore({
     progress: regenProgress,
     statusMessage: regenStatusMessage,
     videoPath: regenVideoPath,
+    proxyPath: regenProxyPath,
     imagePath: regenImagePath,
     error: regenError,
     cancel: regenCancel,
@@ -181,6 +184,7 @@ function VideoEditorWithStore({
     generate: regenGenerate,
     generateImage: regenGenerateImage,
     videoPath: regenVideoPath,
+    proxyPath: regenProxyPath,
     imagePath: regenImagePath,
     isGenerating: isRegenerating,
     progress: regenProgress,
@@ -199,6 +203,7 @@ function VideoEditorWithStore({
     regenReset,
     regenStatusMessage,
     regenVideoPath,
+    regenProxyPath,
   ])
   
   const currentProjectId = currentProject.id
@@ -224,6 +229,16 @@ function VideoEditorWithStore({
   editorModelRef.current = editorModel
   const currentProjectRef = useRef(currentProject)
   currentProjectRef.current = currentProject
+  const managedDeletion = useManagedAssetDeletion({
+    projectId: currentProjectId,
+    store: {
+      kind: 'editor',
+      project: currentProject,
+      editorModel,
+      removeTargets: targets => actions.deleteManagedAssetTargets(targets),
+      clearHistory: actions.clearHistory,
+    },
+  })
 
   const bladeShiftHeldRef = useRef(false)
   const [bladeShiftHeld, setBladeShiftHeld] = useState(false)
@@ -534,7 +549,7 @@ function VideoEditorWithStore({
   } = useRegeneration({
     projectId: currentProjectId,
     regenGenerate, regenGenerateImage,
-    regenVideoPath, regenImagePath,
+    regenVideoPath, regenProxyPath, regenImagePath,
     isRegenerating,
     regenCancel, regenReset, regenError,
     shouldVideoGenerateWithLtxApi,
@@ -821,6 +836,7 @@ function VideoEditorWithStore({
                   regeneratingAssetId={regeneratingAssetId}
                   regenProgress={regenProgress}
                   regenStatusMessage={regenStatusMessage}
+                  requestManagedDeletion={managedDeletion.requestDeletion}
                 />
               </Panel>
               <Separator className="h-1 flex-shrink-0 cursor-row-resize bg-transparent hover:bg-blue-500/40 active:bg-blue-500/60 transition-colors relative z-10" />
@@ -1037,6 +1053,12 @@ function VideoEditorWithStore({
           }}
         />
       )}
+      <ManagedAssetDeletionDialog
+        dialogState={managedDeletion.dialogState}
+        onProjectOnly={managedDeletion.confirmProjectOnly}
+        onTrash={managedDeletion.confirmTrash}
+        onCancel={managedDeletion.cancelDeletion}
+      />
       </div>
   )
 }

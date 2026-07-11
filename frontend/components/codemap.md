@@ -25,7 +25,7 @@ Reusable, mostly self-contained UI building blocks shared across screens: dialog
   - **standard_video workflow**: driving video + optional canny/depth conditioning (preview via `ApiClient.extractIcLoraConditioning`, throttled 300ms).
   - `checkIcLoraAvailability` merges `getLtxIcLoraRecommendation` + `getAdapterRecommendation` into `requiredIcLoraCpIds`; the download gate UI renders until `icLoraReady`.
 - **`RetakePanel.tsx`** — video trim selector. Snaps selections to VAE-compatible frame counts via `snapFramesDown` (`1 + 8*floor((n-1)/8)` at `RETAKE_FPS=24`). Generates a 20-thumbnail filmstrip through `window.electronAPI.extractVideoFrame`. Emits `onChange({videoPath, startTime, duration, videoDuration, ready})`. `MIN_DURATION=2` enforces the lower bound.
-- **`FreeApiKeyBubble.tsx`** — surfaces only after 2.5s of generation while `!forceApiGenerations && !hasLtxApiKey`. A module-level `dismissedThisSession` flag persists dismissal until reload. "Get a free LTX API key" dispatches `open-settings` with `tab:'apiKeys'`.
+- **`FreeApiKeyBubble.tsx`** — surfaces only after 2.5s of generation while `!forceApiGenerations && !hasLtxApiKey`, and is suppressed by an active local text encoder profile. A module-level `dismissedThisSession` flag persists dismissal until reload. "Get a free LTX API key" dispatches `open-settings` with `tab:'apiKeys'`.
 
 ### Setup / gating
 

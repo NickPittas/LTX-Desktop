@@ -31,6 +31,9 @@ function ProjectCard({ project, onOpen, onDelete, onRename }: {
   // Keep existing representative selection logic: prefer first image, else first asset.
   const representativeAsset = project.assets.find(a => a.type === 'image') || project.assets[0] || null
   const representativeUrl = representativeAsset?.path ? pathToFileUrl(representativeAsset.path) : null
+  const representativeVideoUrl = representativeAsset?.type === 'video'
+    ? pathToFileUrl(representativeAsset.proxyPath ?? representativeAsset.path)
+    : null
   const representativeBigThumbnailUrl = representativeAsset?.bigThumbnailPath
     ? pathToFileUrl(representativeAsset.bigThumbnailPath)
     : null
@@ -51,9 +54,9 @@ function ProjectCard({ project, onOpen, onDelete, onRename }: {
                 className="w-full h-full object-cover"
                 onError={() => setImgError(true)}
               />
-            ) : representativeUrl ? (
+            ) : representativeVideoUrl ? (
               <video
-                src={representativeUrl}
+                src={representativeVideoUrl}
                 className="w-full h-full object-cover"
                 muted
                 preload="metadata"

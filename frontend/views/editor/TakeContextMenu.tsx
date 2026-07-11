@@ -2,6 +2,7 @@ import React, { type RefObject } from 'react'
 import { Plus, Copy, Eye, Trash2 } from 'lucide-react'
 import type { Asset, AssetTake } from '../../types/project-model'
 import { useEditorActions } from './editor-store'
+import type { DeletionTarget } from '@/hooks/use-managed-asset-deletion'
 
 export interface TakeContextMenuProps {
   tcAsset: Asset
@@ -12,6 +13,7 @@ export interface TakeContextMenuProps {
   addClipToTimeline: (asset: Asset, trackIndex?: number, startTime?: number) => void
   createAssetFromTake: (asset: Asset, take: AssetTake) => Asset
   setTakeContextMenu: React.Dispatch<React.SetStateAction<{ assetId: string; takeIndex: number; x: number; y: number } | null>>
+  requestManagedDeletion: (targets: DeletionTarget[]) => Promise<void>
 }
 
 export function TakeContextMenu({
@@ -23,6 +25,7 @@ export function TakeContextMenu({
   addClipToTimeline,
   createAssetFromTake,
   setTakeContextMenu,
+  requestManagedDeletion,
 }: TakeContextMenuProps) {
   const actions = useEditorActions()
   const isActive = (tcAsset.activeTakeIndex ?? 0) === takeIndex
@@ -56,8 +59,13 @@ export function TakeContextMenu({
           addClipToTimeline({
             ...tcAsset,
             path: take.path,
+            origin: take.origin,
+            managedSourcePaths: take.managedSourcePaths,
+            proxyPath: take.proxyPath,
             bigThumbnailPath: take.bigThumbnailPath,
             smallThumbnailPath: take.smallThumbnailPath,
+            width: take.width,
+            height: take.height,
           }, 0)
           setTakeContextMenu(null)
         }}
@@ -85,9 +93,7 @@ export function TakeContextMenu({
           <div className="h-px bg-zinc-700 my-1" />
           <button
             onClick={() => {
-              if (confirm(`Delete take ${takeIndex + 1}?`)) {
-                actions.deleteAssetTake(tcAsset.id, takeIndex)
-              }
+              void requestManagedDeletion([{ assetId: tcAsset.id, takeIndex }])
               setTakeContextMenu(null)
             }}
             className="w-full text-left px-3 py-1.5 text-red-400 hover:bg-red-900/30 flex items-center gap-3"

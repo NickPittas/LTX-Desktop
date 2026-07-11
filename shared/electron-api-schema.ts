@@ -184,10 +184,6 @@ export const electronAPISchemas = {
     input: z.object({}),
     output: z.string().nullable(),
   },
-  getDownloadsPath: {
-    input: z.object({}),
-    output: z.string(),
-  },
 
   // Project assets
   addVisualAssetToProject: {
@@ -204,6 +200,13 @@ export const electronAPISchemas = {
   addGenericAssetToProject: {
     input: z.object({ srcPath: z.string(), projectId: z.string() }),
     output: ipcResult({ path: z.string() }),
+  },
+  trashManagedProjectFiles: {
+    input: z.object({ projectId: z.string(), filePaths: z.array(z.string()) }),
+    output: ipcResult({
+      trashedPaths: z.array(z.string()),
+      failedPaths: z.array(z.object({ path: z.string(), reason: z.string() })),
+    }),
   },
   makeThumbnailsForProjectAsset: {
     input: z.object({ path: z.string(), type: z.enum(['video', 'image']) }),
@@ -294,7 +297,7 @@ export const electronAPISchemas = {
     output: emptyResult,
   },
   exportCancel: {
-    input: z.object({ sessionId: z.string() }),
+    input: z.object({}),
     output: emptyResult,
   },
 

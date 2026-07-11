@@ -1155,37 +1155,19 @@ class TestInpaintBlendOutsideMaskPreservation:
         )
 
 
-class TestLaplacianBlendGrowParameter:
-    """laplacian_blend_grow is now 12, final_mask_blur_px is separate control."""
-
-    def test_default_is_12(self):
+class TestInpaintFixedBlendContract:
+    def test_removed_parameters_absent(self):
         from inspect import signature
         from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
 
-        sig = signature(LTXIcLoraPipeline.generate_inpaint)
-        param = sig.parameters["laplacian_blend_grow"]
-        assert param.default == 12, f"Expected default=12, got {param.default}"
+        parameters = signature(LTXIcLoraPipeline.generate_inpaint).parameters
+        assert "laplacian_blend_grow" not in parameters
+        assert "final_mask_blur_px" not in parameters
 
-    def test_final_mask_blur_px_default_is_6(self):
-        from inspect import signature
-        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
+    def test_fixed_low_res_dilation_is_5(self):
+        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import INPAINT_BLEND1_LOW_RES_DILATION
 
-        sig = signature(LTXIcLoraPipeline.generate_inpaint)
-        param = sig.parameters["final_mask_blur_px"]
-        assert param.default == 6, f"Expected default=6, got {param.default}"
-
-    def test_param_source_assertions(self):
-        """Source-text assertions: laplacian_blend_grow feeds mask_low_res_dilation; final_mask_blur_px feeds blur_radius."""
-        from pathlib import Path
-
-        source = Path(__file__).resolve().parents[1] / "services" / "ic_lora_pipeline" / "ltx_ic_lora_pipeline.py"
-        text = source.read_text()
-        assert "mask_low_res_dilation=laplacian_blend_grow" in text, (
-            "laplacian_blend_grow must feed mask_low_res_dilation in Laplacian blend"
-        )
-        assert "blur_radius=final_mask_blur_px" in text, (
-            "final_mask_blur_px must feed blur_radius in raw-mask guard feather"
-        )
+        assert INPAINT_BLEND1_LOW_RES_DILATION == 5
 
 
 class TestEncodeGreenGuideConditioning:
@@ -1683,4 +1665,3 @@ class TestHdrVideoOnly:
             "generate() must set audio = None exactly once, and only under the "
             "HDR video-only guard (preserve non-HDR audio passthrough)"
         )
-
