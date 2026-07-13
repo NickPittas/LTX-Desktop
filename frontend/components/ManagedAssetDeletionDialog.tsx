@@ -1,4 +1,5 @@
 import { useEffect, useId, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { AlertCircle, Check, Loader2, Trash2, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import type { ManagedDeletionDialogState } from '@/hooks/use-managed-asset-deletion'
@@ -240,7 +241,7 @@ export function ManagedAssetDeletionDialog({
       return null
   }
 
-  return (
+  return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
       onClick={dialogState.status === 'trashing' ? undefined : onCancel}
@@ -251,7 +252,7 @@ export function ManagedAssetDeletionDialog({
         aria-modal="true"
         aria-labelledby={titleId}
         aria-describedby={descId}
-        className="bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl w-[480px] max-h-[calc(100vh-2rem)] flex flex-col overflow-hidden"
+        className="bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl w-full max-w-[480px] max-h-[calc(100vh-2rem)] max-h-[calc(100dvh-2rem)] flex flex-col overflow-hidden"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800">
@@ -275,12 +276,13 @@ export function ManagedAssetDeletionDialog({
         <div className="px-6 py-5 overflow-y-auto">{body}</div>
 
         {footer && (
-          <div className="px-6 py-4 border-t border-zinc-800 flex items-center justify-end gap-3">
+          <div className="px-6 py-4 border-t border-zinc-800 flex flex-wrap items-center justify-end gap-3">
             {footer}
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body
   )
 }
 
