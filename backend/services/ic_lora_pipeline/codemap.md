@@ -2,11 +2,12 @@
 
 ## Responsibility
 
-IC-LoRA (Image-Conditioned LoRA) video generation: produces video conditioned on reference images and optional video reference latents, with a LoRA stack applied to the diffusion transformer. Provides two paths — a general `generate` path (T2V/I2V with optional video conditioning, optional outpaint compositing) and an official two-stage `generate_inpaint` path (half-res → full-res with green composite conditioning, Laplacian pyramid blending, and raw-mask guarding). Exposes `IcLoraPipeline` Protocol and `LTXIcLoraPipeline` concrete wrapper.
+IC-LoRA (Image-Conditioned LoRA) video generation: produces video conditioned on reference images and optional video reference latents, with a LoRA stack applied to the diffusion transformer. Provides three paths — general `generate` (T2V/I2V with optional video conditioning and outpaint compositing), V1 `generate_inpaint` (RGB two-stage bridge), and experimental video-only latent `generate_inpaint_v2` (latent blend → learned upsample → masked Stage 2). Exposes `IcLoraPipeline` Protocol and `LTXIcLoraPipeline` concrete wrapper.
 
 Files:
-- `ic_lora_pipeline.py` — `IcLoraPipeline` Protocol (`create` with `lora_paths`, `lora_strength`; `generate`, `generate_inpaint`).
-- `ltx_ic_lora_pipeline.py` — `LTXIcLoraPipeline` implementation (wraps `ltx_pipelines.ic_lora.ICLoraPipeline`).
+- `ic_lora_pipeline.py` — `IcLoraPipeline` Protocol (`create` with `lora_paths`, `lora_strength`; `generate`, `generate_inpaint`, `generate_inpaint_v2`).
+- `ltx_ic_lora_pipeline.py` — `LTXIcLoraPipeline` implementation (wraps `ltx_pipelines.ic_lora.ICLoraPipeline`); its V2 method is delegation-only.
+- `inpaint_v2.py` — isolated video-only latent bridge: half-source/Stage-1 latent blend, exactly one learned upsample, full-resolution mask preserving the learned-upsampled blended latent, ordinary or call-scoped context Stage 2.
 - `official_inpaint.py` — inpaint helpers: `green_composite_preprocess` (#66FF00), `dilate_video_mask` (separable max-pool), `laplacian_pyramid_blend` (kornia-based, chunked).
 
 ## Design Patterns

@@ -30,6 +30,8 @@ Top-level routed screens rendered inside the app shell. Four files:
 
 `handleGenerate` mirrors `canSubmit` exactly with early `return`s — retake requires `videoPath + duration>=2`; ic-lora requires `ready`, a video unless `adapterId==='ingredients'`, and a prompt unless `adapterId==='in_outpainting'` or `adapterId==='hdr'` (HDR is source-video-driven and ignores the prompt). This alignment is the Generate no-op fix (button enabled ⇔ handler runs). For HDR the IC-LoRA submit sends `conditioningType: null` + `images: []`; the response's EXR `videoPath` is persisted as the primary asset and `proxyPath` as the in-app preview sidecar.
 
+`GenSpace` owns `inpaintPipelineVersion`, defaults/resets it to `'v1'`, and sends it only when `adapterId==='in_outpainting'`; every other IC-LoRA request omits `inpaint_pipeline_version`.
+
 ### Ingredients vs V2V LoRA output settings
 
 `PromptBar` derives `isIngredients = mode==='ic-lora' && icLoraInput.adapterId==='ingredients'`. `showIcLoraOutputSettings={isIngredients}` is passed down:
@@ -39,7 +41,7 @@ Top-level routed screens rendered inside the app shell. Four files:
 
 ### Base-model picker for IC-LoRA
 
-GenSpace exposes the base-model picker for every IC-LoRA workflow — `modelSelectionWorkflow` is `'hdr-ic-lora'` for HDR and `'ic-lora'` for all other adapters (ingredients, in/outpainting, standard_video, union_control); selecting a base sends `model_selection` on `POST /api/ic-lora/generate` for every IC-LoRA submit. This matches the backend, which now accepts `model_selection` for all available IC-LoRA workflows (only `motion_track_control`/`hdr_scene_embeddings`/`lipdub` are still gated).
+GenSpace exposes profile-aware base-model selection for local T2V/I2V and every IC-LoRA workflow; exact compatible profiles activate before committing a selected sidecar-dependent transformer.
 
 ### Result persistence
 

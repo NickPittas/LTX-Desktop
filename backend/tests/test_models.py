@@ -465,7 +465,104 @@ _UNSUPPORTED_WORKFLOW_REASON = (
 _NOT_INSTALLED_REASON = "Model checkpoint is not installed"
 
 
+def _sidecar_profile(profile_id: str, transformer: Path, sidecars_dir: Path) -> ModelProfilePayload:
+    sidecars_dir.mkdir(parents=True, exist_ok=True)
+    sidecars: dict[str, str] = {}
+    for name in ("text-projection", "video-vae", "audio-vae"):
+        path = sidecars_dir / name
+        path.write_bytes(b"x")
+        sidecars[name] = str(path)
+    return ModelProfilePayload(
+        id=profile_id,
+        name=profile_id,
+        components=ModelComponentPaths(
+            transformer=str(transformer),
+            transformer_format="gguf" if transformer.suffix == ".gguf" else "split_safetensors",
+            text_projection=sidecars["text-projection"],
+            video_vae=sidecars["video-vae"],
+            audio_vae=sidecars["audio-vae"],
+        ),
+    )
+
+
 class TestModelSelectionOptions:
+    def test_exact_kijai_profile_is_preferred_over_same_basename_fallback(
+        self, client, test_state, tmp_path, create_fake_model_files
+    ):
+        create_fake_model_files()
+        selection_id = "ltx-2.3-22b-distilled-fp8-kijai-v3"
+        transformer = resolve_model_path(test_state.config.default_models_dir, selection_id)
+        transformer.parent.mkdir(parents=True, exist_ok=True)
+        transformer.write_bytes(b"FP8")
+        same_basename_elsewhere = test_state.config.default_models_dir / "other" / transformer.name
+        same_basename_elsewhere.parent.mkdir(parents=True, exist_ok=True)
+        same_basename_elsewhere.write_bytes(b"FP8")
+        test_state.state.model_profiles = [
+            _sidecar_profile("kijai", transformer, tmp_path / "kijai"),
+            _sidecar_profile("different-path", same_basename_elsewhere, tmp_path / "different"),
+        ]
+
+        response = client.get("/api/models/model-options", params={"workflow": "text-to-video"}, headers=_ADMIN_HEADERS)
+        option = next(item for item in response.json()["options"] if item["id"] == selection_id)
+        assert option["compatible_profile_ids"] == ["kijai"]
+
+    def test_exact_quantstack_profile_is_preferred(self, client, test_state, tmp_path, create_fake_model_files):
+        create_fake_model_files()
+        selection_id = "ltx-2.3-22b-distilled-gguf-quantstack-q4-k-m"
+        transformer = resolve_model_path(test_state.config.default_models_dir, selection_id)
+        transformer.parent.mkdir(parents=True, exist_ok=True)
+        transformer.write_bytes(b"GGUF")
+        test_state.state.model_profiles = [
+            _sidecar_profile("quantstack", transformer, tmp_path / "quantstack"),
+            _sidecar_profile("fallback", resolve_model_path(test_state.config.default_models_dir, "ltx-2.3-22b-distilled"), tmp_path / "fallback"),
+        ]
+
+        response = client.get("/api/models/model-options", params={"workflow": "text-to-video"}, headers=_ADMIN_HEADERS)
+        option = next(item for item in response.json()["options"] if item["id"] == selection_id)
+        assert option["compatible_profile_ids"] == ["quantstack"]
+
+    def test_exact_profile_path_normalizes_aliases_and_symlinks(self, client, test_state, tmp_path, create_fake_model_files):
+        create_fake_model_files()
+        selection_id = "ltx-2.3-22b-distilled-fp8-kijai-v3"
+        transformer = resolve_model_path(test_state.config.default_models_dir, selection_id)
+        transformer.parent.mkdir(parents=True, exist_ok=True)
+        transformer.write_bytes(b"FP8")
+        alias = transformer.parent / "." / transformer.name
+        profiles = [_sidecar_profile("alias", alias, tmp_path / "alias")]
+        symlink = test_state.config.default_models_dir / "aliases" / transformer.name
+        symlink.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            symlink.symlink_to(transformer)
+        except OSError:
+            pass
+        else:
+            profiles.append(_sidecar_profile("symlink", symlink, tmp_path / "symlink"))
+        test_state.state.model_profiles = profiles
+
+        response = client.get("/api/models/model-options", params={"workflow": "text-to-video"}, headers=_ADMIN_HEADERS)
+        option = next(item for item in response.json()["options"] if item["id"] == selection_id)
+        assert option["compatible_profile_ids"] == [profile.id for profile in sorted(profiles, key=lambda p: p.id)]
+
+    def test_dev_gguf_without_exact_owner_keeps_sorted_sidecar_fallbacks(
+        self, client, test_state, tmp_path, create_fake_model_files
+    ):
+        create_fake_model_files()
+        selection_id = "ltx-2.3-22b-dev-gguf-q4-k-m"
+        transformer = resolve_model_path(test_state.config.default_models_dir, selection_id)
+        transformer.parent.mkdir(parents=True, exist_ok=True)
+        transformer.write_bytes(b"GGUF")
+        lora = test_state.config.default_models_dir / "adapters" / "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
+        lora.parent.mkdir(parents=True, exist_ok=True)
+        lora.write_bytes(b"LORA")
+        test_state.state.model_profiles = [
+            _sidecar_profile("z-fallback", resolve_model_path(test_state.config.default_models_dir, "ltx-2.3-22b-distilled"), tmp_path / "z"),
+            _sidecar_profile("a-fallback", resolve_model_path(test_state.config.default_models_dir, "ltx-2.3-22b-distilled"), tmp_path / "a"),
+        ]
+
+        response = client.get("/api/models/model-options", params={"workflow": "text-to-video"}, headers=_ADMIN_HEADERS)
+        option = next(item for item in response.json()["options"] if item["id"] == selection_id)
+        assert option["compatible_profile_ids"] == ["a-fallback", "z-fallback"]
+
     def test_compatible_profile_ids_include_activation_admissible_profile(
         self, client, test_state, tmp_path, create_fake_model_files
     ):

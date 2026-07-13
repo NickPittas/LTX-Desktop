@@ -180,7 +180,10 @@ path (profile→typed field→`models_dir`), falling back to the legacy
 `_require_ic_lora_model_paths(conditioning_type, require_lora=True)` checkpoint.
 `lora_paths` stacks base + adapter; `lora_strength` is forwarded into
 `pipelines.load_ic_lora(..., lora_strength=req.lora_strength)`. For
-`in_outpainting` it calls `ic_state.pipeline.generate_inpaint(...)`; otherwise
+`in_outpainting` defaults to `ic_state.pipeline.generate_inpaint(...)` (V1); an
+explicit `inpaint_pipeline_version="v2"` dispatches to `generate_inpaint_v2(...)`
+with the workload plan's V2-local context window/overlap. The version is rejected
+before loading for every non-in/outpainting adapter; otherwise
 `pipeline.generate(...)` with `video_conditioning=[(control_video_path,
 conditioning_strength)]`. Canny/depth control videos are built frame-by-frame
 through `_build_conditioning_frame` (depth requires `ic_state.depth_pipeline`)
@@ -239,7 +242,7 @@ available. `prepare_text_encoding(prompt, enhance_prompt)` raises
 `finally` blocks). `resolve_gemma_root()` returns the profile
 `text_encoder_root` or the downloaded Gemma CP path.
 
-**`models_handler.ModelsHandler`** — filesystem state + recommendations.
+**`models_handler.ModelsHandler`** — filesystem state + recommendations. Sidecar-dependent model options prefer profiles whose resolved transformer path exactly matches the selected registry entry; otherwise they retain all sidecar-compatible profiles.
 `get_ltx_recommendation()` short-circuits to `LtxOkRecommendationResponse` if
 `has_valid_active_official_profile()`, else inspects
 `get_downloaded_ltx_model_id(models_dir)` and emits

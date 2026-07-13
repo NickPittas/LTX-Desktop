@@ -1184,6 +1184,8 @@ export interface components {
             height: number;
             /** Images */
             images?: components["schemas"]["IcLoraImageInput"][];
+            /** Inpaint Pipeline Version */
+            inpaint_pipeline_version?: ("v1" | "v2") | null;
             /**
              * Lora Strength
              * @default 1

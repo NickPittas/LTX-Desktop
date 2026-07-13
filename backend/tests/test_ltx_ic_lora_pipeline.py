@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -14,6 +16,126 @@ from services.ic_lora_pipeline.ltx_ic_lora_pipeline import (
     _vae_compatible_frame_count,
     _vae_padded_frame_count,
 )
+from services.ic_lora_pipeline.inpaint_v2 import (
+    _windows,
+    blend_half_latents,
+    build_inpaint_v2_context_config,
+    mask_to_latent_denoise_mask,
+)
+import services.ic_lora_pipeline.inpaint_v2 as inpaint_v2
+
+
+@dataclass
+class _State:
+    latent: torch.Tensor
+    denoise_mask: torch.Tensor | None = None
+    clean_latent: torch.Tensor | None = None
+    positions: torch.Tensor | None = None
+    attention_mask: torch.Tensor | None = None
+
+
+class _V2Harness:
+    """Small recording pipeline that runs the real V2 function on CPU."""
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, preview: bool = False, context: bool = False) -> None:
+        from ltx_core import conditioning
+        from ltx_core.components import noisers
+        from ltx_pipelines.utils import constants, denoisers, helpers, media_io, types
+        import services.exr_input as exr_input
+        self.calls: list[tuple[str, Any]] = []; self.encoded: list[dict[str, Any]] = []
+        self.device, self.dtype, self.preview, self.context = torch.device("cpu"), torch.float32, preview, context
+        self.prompt_encoder = lambda *_args, **_kwargs: (type("Prompt", (), {"video_encoding": "context"})(),)
+        self.stage_1 = lambda **kwargs: self._stage1(**kwargs)
+        self.stage_2 = lambda **kwargs: self._stage2(**kwargs)
+        self.upsampler, self.video_decoder = self._upsample, self._decode
+        monkeypatch.setattr(helpers, "assert_resolution", lambda **_: None)
+        monkeypatch.setattr(helpers, "combined_image_conditionings", lambda **_: ["anchor"])
+        monkeypatch.setattr(exr_input, "iter_video_frames_to_model_domain", lambda *_, **__: iter(["source"]))
+        monkeypatch.setattr(media_io, "decode_video_by_frame", lambda **_: iter(["mask"]))
+        monkeypatch.setattr(media_io, "video_preprocess", lambda frames, h, w, *_: torch.full((1, 3, 3 if next(frames) == "source" else 9, h, w), -1.0))
+        monkeypatch.setattr(constants, "DISTILLED_SIGMAS", torch.tensor([1.0, 0.0])); monkeypatch.setattr(constants, "STAGE_2_DISTILLED_SIGMAS", torch.tensor([0.9, 0.5, 0.0]))
+        monkeypatch.setattr(denoisers, "SimpleDenoiser", lambda *args: args); monkeypatch.setattr(noisers, "GaussianNoiser", lambda **kwargs: kwargs)
+        monkeypatch.setattr(types, "ModalitySpec", lambda **kwargs: type("Spec", (), kwargs)())
+        monkeypatch.setattr(conditioning, "VideoConditionByReferenceLatent", lambda **kwargs: ("green", kwargs))
+        monkeypatch.setattr(conditioning, "VideoConditionByMask", lambda **kwargs: ("preserve", kwargs))
+        monkeypatch.setattr(inpaint_v2, "encode_video_output", lambda **kwargs: self.encoded.append(kwargs))
+
+    def image_conditioner(self, callback: Any) -> list[Any]:
+        outer = self
+        class Encoder:
+            def tiled_encode(self, video: torch.Tensor, tiling: Any) -> torch.Tensor:
+                outer.calls.append(("encode", video.clone()))
+                return torch.full((1, 2, 2, 1, 1), 3.0 if len([n for n, _ in outer.calls if n == "encode"]) == 1 else 5.0)
+        return callback(Encoder())
+
+    def _stage1(self, **kwargs: Any) -> tuple[_State, None]: self.calls.append(("stage1", kwargs)); return _State(torch.full((1, 2, 2, 1, 1), 7.0)), None
+    def _upsample(self, latent: torch.Tensor) -> torch.Tensor: self.calls.append(("upsample", latent.clone())); return latent.clone()
+    def _stage2(self, **kwargs: Any) -> tuple[_State, None]: self.calls.append(("stage2", kwargs)); return _State(kwargs["video"].initial_latent.clone()), None
+    def _decode(self, latent: torch.Tensor, *_: Any) -> list[torch.Tensor]: self.calls.append(("decode", latent.clone())); return [torch.zeros(9, 2, 2, 3)]
+    def run(self) -> None:
+        inpaint_v2.generate_inpaint_v2(type("Outer", (), {"pipeline": self})(), prompt="p", seed=4, height=64, width=64, num_frames=9, frame_rate=24, images=[], video_path="source", mask_path="mask", output_path="out.mp4", save_stage_1_preview=self.preview, inpaint_context_window_px=33 if self.context else None, inpaint_context_overlap_px=8 if self.context else None)
+
+
+class TestInpaintV2MaskConversion:
+    def test_all_black(self): assert torch.equal(mask_to_latent_denoise_mask(torch.zeros(9, 32, 32), torch.zeros(1, 2, 2, 1, 1)), torch.zeros(1, 1, 2, 1, 1))
+    def test_all_white(self): assert torch.equal(mask_to_latent_denoise_mask(torch.ones(9, 32, 32), torch.zeros(1, 2, 2, 1, 1)), torch.ones(1, 1, 2, 1, 1))
+    def test_fractional_spatial_edge(self): assert 0 < mask_to_latent_denoise_mask(torch.tensor([[[0., 1.], [0., 1.]]]), torch.zeros(1, 2, 1, 1, 3))[0, 0, 0, 0, 1] < 1
+    def test_frame_zero_causal_mapping(self): assert mask_to_latent_denoise_mask(torch.cat([torch.ones(1, 2, 2), torch.zeros(8, 2, 2)]), torch.zeros(1, 2, 2, 1, 1))[0, 0, 0, 0, 0] == 1
+    def test_later_group_uses_temporal_max(self):
+        mask = torch.zeros(9, 2, 2); mask[5] = 1; assert mask_to_latent_denoise_mask(mask, torch.zeros(1, 2, 2, 1, 1))[0, 0, 1, 0, 0] == 1
+    def test_exact_8n_plus_1_shape(self): assert mask_to_latent_denoise_mask(torch.zeros(17, 2, 2), torch.zeros(1, 2, 3, 1, 1)).shape == (1, 1, 3, 1, 1)
+    def test_half_and_full_mask_direction(self): assert torch.all(blend_half_latents(torch.ones(1, 2, 1, 1, 1), torch.zeros(1, 2, 1, 1, 1), torch.ones(1, 1, 1, 1, 1)) == 1)
+
+
+class TestInpaintV2LatentBridge:
+    def test_stage1_receives_anchor_and_full_green_reference(self, monkeypatch: pytest.MonkeyPatch):
+        h = _V2Harness(monkeypatch); h.run(); s = next(v for n, v in h.calls if n == "stage1")
+        assert s["audio"] is None and s["video"].conditionings[0] == "anchor" and s["video"].conditionings[-1][0] == "green"
+    def test_half_latent_composition(self, monkeypatch: pytest.MonkeyPatch):
+        h = _V2Harness(monkeypatch); h.run(); assert torch.equal(next(v for n, v in h.calls if n == "upsample"), torch.full((1, 2, 2, 1, 1), 3.0))
+    def test_upsampler_called_once_with_exact_blend(self, monkeypatch: pytest.MonkeyPatch):
+        h = _V2Harness(monkeypatch); h.run(); assert [n for n, _ in h.calls].count("upsample") == 1
+    def test_no_intermediate_decode_or_reencode(self, monkeypatch: pytest.MonkeyPatch):
+        h = _V2Harness(monkeypatch); h.run(); names = [n for n, _ in h.calls]; assert names.index("upsample") < names.index("decode") and names.count("encode") == 2
+    def test_video_condition_by_mask_applied_last_before_noiser(self, monkeypatch: pytest.MonkeyPatch):
+        h = _V2Harness(monkeypatch); h.run(); assert next(v for n, v in h.calls if n == "stage2")["video"].conditionings[-1][0] == "preserve"
+
+
+class TestInpaintV2Stage2:
+    def test_official_sigmas_and_noise_scale(self, monkeypatch: pytest.MonkeyPatch):
+        h = _V2Harness(monkeypatch); h.run(); s = next(v for n, v in h.calls if n == "stage2"); assert torch.equal(s["sigmas"], torch.tensor([0.9, .5, 0.])) and s["video"].noise_scale == pytest.approx(.9)
+    def test_stage1_and_stage2_are_video_only(self, monkeypatch: pytest.MonkeyPatch):
+        h = _V2Harness(monkeypatch); h.run(); assert all(v["audio"] is None for n, v in h.calls if n.startswith("stage"))
+    def test_ordinary_euler_preserves_clean_tokens(self, monkeypatch: pytest.MonkeyPatch):
+        h = _V2Harness(monkeypatch); h.run(); assert next(v for n, v in h.calls if n == "stage2")["loop"] is None
+        context = _V2Harness(monkeypatch, context=True); context.run(); assert callable(next(v for n, v in context.calls if n == "stage2")["loop"])
+    def test_context_video_pyramid_fusion(self, monkeypatch: pytest.MonkeyPatch):
+        import ltx_pipelines.utils.samplers as samplers
+        monkeypatch.setattr(samplers, "post_process_latent", lambda value, *_: value + 100)
+        loop, windows = inpaint_v2._context_loop(5, 2, 9, 1, 1), ((0, 5), (3, 8), (4, 9)); latent = torch.arange(9.).view(1, 9, 1)
+        state = _State(latent, torch.zeros_like(latent), torch.zeros_like(latent), torch.zeros(1, 1, 9, 1)); calls: list[torch.Tensor] = []; steps: list[torch.Tensor] = []
+        def denoiser(_t: Any, sliced: _State, audio: Any, _s: Any, _i: int) -> tuple[Any, None]: calls.append(sliced.latent); assert audio is None; return type("R", (), {"denoised": torch.full_like(sliced.latent, 10 + sliced.latent[0, 0, 0] // 3 * 10)})(), None
+        stepper = type("Stepper", (), {"step": lambda _, _before, after, *_args: steps.append(after) or after})()
+        result, audio = loop(torch.tensor([1., .5, 0.]), state, None, stepper, object(), denoiser)
+        expected = torch.tensor([110, 110, 110, 113.3333, 117.5, 120, 120, 120, 120]).view(1, 9, 1)
+        assert inpaint_v2._windows(9, 5, 2) == windows and len(calls) == 6 and len(steps) == 2 and audio is None and torch.allclose(steps[0], expected, atol=.001) and torch.equal(result.latent, steps[-1]) and all(torch.equal(call, source[:, start:end]) for source, group in ((latent, calls[:3]), (steps[0], calls[3:])) for call, (start, end) in zip(group, windows))
+    def test_context_rejects_appended_tokens_or_attention_mask(self):
+        state = _State(torch.zeros(1, 10, 1), torch.zeros(1, 10, 1), torch.zeros(1, 10, 1), torch.zeros(1, 1, 10, 1))
+        with pytest.raises(ValueError, match="target-only"): inpaint_v2._context_loop(5, 2, 9, 1, 1)(torch.tensor([1., 0.]), state, None, None, None, None)
+        attention = _State(torch.zeros(1, 9, 1), torch.zeros(1, 9, 1), torch.zeros(1, 9, 1), torch.zeros(1, 1, 9, 1), torch.ones(1, 9))
+        with pytest.raises(ValueError, match="target-only"): inpaint_v2._context_loop(5, 2, 9, 1, 1)(torch.tensor([1., 0.]), attention, None, None, None, None)
+    def test_preview_does_not_mutate_handoff(self, monkeypatch: pytest.MonkeyPatch):
+        h = _V2Harness(monkeypatch, preview=True); h.run(); decoded = next(v for n, v in h.calls if n == "decode"); upsampled = next(v for n, v in h.calls if n == "upsample"); assert torch.equal(decoded, torch.full_like(decoded, 7.0)) and torch.equal(upsampled, torch.full_like(upsampled, 3.0))
+    def test_final_decode_crop_and_encode_are_video_only(self, monkeypatch: pytest.MonkeyPatch):
+        h = _V2Harness(monkeypatch); h.run(); assert h.encoded[-1]["audio"] is None and h.encoded[-1]["total_frames"] == 3 and h.encoded[-1]["video"].shape[0] == 3
+
+
+class TestInpaintV2Isolation:
+    def test_v1_v2_v1_state_isolation(self, monkeypatch: pytest.MonkeyPatch):
+        h = _V2Harness(monkeypatch); h.stage_2.cached_marker = "v1"; h.calls.append(("v1", None)); h.run(); h.calls.append(("v1", None)); assert h.stage_2.cached_marker == "v1" and [name for name, _ in h.calls if name == "v1"] == ["v1", "v1"]
+    def test_exception_cleanup_leaves_no_stage_state(self, monkeypatch: pytest.MonkeyPatch):
+        h = _V2Harness(monkeypatch); h.upsampler = lambda _: (_ for _ in ()).throw(RuntimeError("boom"))
+        with pytest.raises(RuntimeError, match="boom"): h.run()
+        assert not hasattr(h.stage_2, "_ltx_desktop_context_loop")
 
 
 # ── Visual/manual acceptance gate for inpaint parity ──

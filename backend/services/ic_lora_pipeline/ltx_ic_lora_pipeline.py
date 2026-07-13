@@ -1030,6 +1030,46 @@ class LTXIcLoraPipeline:
         logger.info("[inpaint] Done — %s", output_path)
         return stage_1_preview_path
 
+    @torch.inference_mode()
+    def generate_inpaint_v2(
+        self,
+        prompt: str,
+        seed: int,
+        height: int,
+        width: int,
+        num_frames: int,
+        frame_rate: float,
+        images: list[ImageConditioningInput],
+        video_path: str,
+        mask_path: str,
+        output_path: str,
+        conditioning_strength: float = 1.0,
+        mask_grow_px: int = 30,
+        output_format: OutputFormat = OutputFormat.MP4,
+        encoder: MediaEncoder | None = None,
+        proxy_path: str | None = None,
+        on_progress: Callable[[float], None] | None = None,
+        input_colorspace: ColorSpace | None = None,
+        on_phase_update: Callable[[str, str | None], None] | None = None,
+        save_stage_1_preview: bool = False,
+        inpaint_context_window_px: int | None = None,
+        inpaint_context_overlap_px: int | None = None,
+    ) -> str | None:
+        """Run the isolated latent-bridge inpaint experiment without touching V1."""
+        from .inpaint_v2 import generate_inpaint_v2
+
+        return generate_inpaint_v2(
+            self, prompt=prompt, seed=seed, height=height, width=width,
+            num_frames=num_frames, frame_rate=frame_rate, images=images,
+            video_path=video_path, mask_path=mask_path, output_path=output_path,
+            conditioning_strength=conditioning_strength, mask_grow_px=mask_grow_px,
+            output_format=output_format, encoder=encoder, proxy_path=proxy_path,
+            on_progress=on_progress, input_colorspace=input_colorspace,
+            on_phase_update=on_phase_update, save_stage_1_preview=save_stage_1_preview,
+            inpaint_context_window_px=inpaint_context_window_px,
+            inpaint_context_overlap_px=inpaint_context_overlap_px,
+        )
+
     def _encode_video_conditioning(
         self,
         enc: Any,

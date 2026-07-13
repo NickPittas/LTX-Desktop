@@ -454,7 +454,7 @@ class ModelsHandler(StateHandlerBase):
 
     def _compatible_profile_ids_for_entry(
         self,
-        base_family: str,
+        entry: BaseVideoModelRegistryEntry,
         models_dir: Path,
         profiles: list[ModelProfilePayload],
         catalog: ModelLibraryScanResponse,
@@ -475,7 +475,7 @@ class ModelsHandler(StateHandlerBase):
                 continue
             if not (components.upsampler and Path(components.upsampler).is_file()) and not canonical_upsampler_available:
                 continue
-            if base_family == "dev":
+            if entry.base_family == "dev":
                 profile_lora_available = any(
                     path and Path(path).is_file()
                     for path in (
@@ -487,7 +487,17 @@ class ModelsHandler(StateHandlerBase):
                     continue
             compatible_ids.append(profile.id)
 
-        return sorted(compatible_ids)
+        if entry.transformer_path is None:
+            return sorted(compatible_ids)
+        entry_identity = Path(entry.transformer_path).expanduser().resolve(strict=False)
+        exact_ids = [
+            profile.id
+            for profile in profiles
+            if profile.id in compatible_ids
+            and profile.components.transformer
+            and Path(profile.components.transformer).expanduser().resolve(strict=False) == entry_identity
+        ]
+        return sorted(exact_ids or compatible_ids)
 
     def _sidecar_option_disabled_reason(self, compatible_profile_ids: list[str]) -> str | None:
         """Disable sidecar-dependent selections without a compatible profile."""
@@ -549,7 +559,7 @@ class ModelsHandler(StateHandlerBase):
         options: list[ModelSelectionOption] = []
         for entry in entries:
             compatible_profile_ids = (
-                self._compatible_profile_ids_for_entry(entry.base_family, models_dir, profiles, catalog)
+                self._compatible_profile_ids_for_entry(entry, models_dir, profiles, catalog)
                 if entry.installed and entry.runtime_readiness == "requires_active_profile_sidecars"
                 else []
             )

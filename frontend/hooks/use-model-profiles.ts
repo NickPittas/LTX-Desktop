@@ -57,14 +57,19 @@ export function useModelProfiles(enabled = true): ModelProfilesState {
 
   const refresh = useCallback(async () => {
     setIsLoading(true)
-    const result = await ApiClient.getModelProfiles()
-    if (result.ok) {
-      setData(result.data)
-      setErrorMessage(null)
-    } else {
-      setErrorMessage(result.error.message)
+    try {
+      const result = await ApiClient.getModelProfiles()
+      if (result.ok) {
+        setData(result.data)
+        setErrorMessage(null)
+      } else {
+        setErrorMessage(result.error.message)
+      }
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Unable to refresh model profiles')
+    } finally {
+      setIsLoading(false)
     }
-    setIsLoading(false)
   }, [])
 
   useEffect(() => {
@@ -100,12 +105,25 @@ export function useModelProfiles(enabled = true): ModelProfilesState {
   }, [refresh])
 
   const activateProfileSafe = useCallback(async (profileId: string) => {
-    const result = await ApiClient.activateModelProfile(profileId)
-    if (result.ok) {
-      await refresh()
-      return { ok: true as const, data: result.data }
+    try {
+      const result = await ApiClient.activateModelProfile(profileId)
+      if (result.ok) {
+        setData((current) => current && {
+          ...current,
+          active_model_profile_id: result.data.active_model_profile_id,
+        })
+        await refresh()
+        return { ok: true as const, data: result.data }
+      }
+      return { ok: false as const, error: parseActivationError(result.error) }
+    } catch (error) {
+      return {
+        ok: false as const,
+        error: parseActivationError({
+          message: error instanceof Error ? error.message : 'Unable to activate model profile',
+        }),
+      }
     }
-    return { ok: false as const, error: parseActivationError(result.error) }
   }, [refresh])
 
   return {

@@ -12,7 +12,7 @@ import { useGeneration } from '../hooks/use-generation'
 import { useVideoGenerationModelSpecs } from '../hooks/use-video-generation-model-specs'
 import { createLocalGenerationError, type GenerationError } from '../lib/generation-errors'
 import { useRetake } from '../hooks/use-retake'
-import { useIcLora } from '../hooks/use-ic-lora'
+import { useIcLora, type InpaintPipelineVersion } from '../hooks/use-ic-lora'
 import { useModelSelectionOptions } from '../hooks/use-model-selection-options'
 import { useModelProfiles } from '../hooks/use-model-profiles'
 import type { ModelSelectionID, ModelSelectionOption, ModelSelectionWorkflow } from '../lib/model-selection'
@@ -380,10 +380,9 @@ function ModelSelectionPopover({
   isLoading,
   errorMessage,
   profileAware,
-  activeProfileId: _activeProfileId,
+  activeProfileId,
   profiles,
   activateProfileSafe,
-  refreshProfiles,
   refreshOptions,
   activationScope,
 }: {
@@ -410,13 +409,23 @@ function ModelSelectionPopover({
   const [activationError, setActivationError] = useState<string | null>(null)
   const [isActivating, setIsActivating] = useState(false)
   const activationTokenRef = useRef(0)
+  const activationInFlightRef = useRef(false)
   const mountedRef = useRef(true)
-  useEffect(() => () => { mountedRef.current = false; activationTokenRef.current += 1 }, [])
-  useEffect(() => { activationTokenRef.current += 1 }, [profileAware, activationScope])
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false; activationTokenRef.current += 1 }
+  }, [])
+  useEffect(() => {
+    activationTokenRef.current += 1
+    setIsActivating(activationInFlightRef.current)
+    setPendingOption(null)
+    setActivationError(null)
+  }, [profileAware, activationScope])
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        if (activationInFlightRef.current) return
         activationTokenRef.current += 1
         setIsOpen(false)
       }
@@ -425,51 +434,63 @@ function ModelSelectionPopover({
       document.addEventListener('mousedown', handleClickOutside)
     }
     return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [isOpen])
+  }, [isOpen, isActivating])
 
   const selectedOption = findModelOption(options, selectedId)
   const triggerLabel = selectedOption ? selectedOption.label : 'Auto'
   const grouped = groupModelOptions(options)
 
   const activateAndCommit = useCallback(async (option: ModelSelectionOption, profileId: string) => {
-    if (!activateProfileSafe || !refreshProfiles || !refreshOptions) return
+    if (activationInFlightRef.current || !activateProfileSafe || !refreshOptions) return
+    activationInFlightRef.current = true
     const token = ++activationTokenRef.current
     setIsActivating(true)
     setActivationError(null)
 
-    const result = await activateProfileSafe(profileId)
-    if (!mountedRef.current || token !== activationTokenRef.current) return
-    if (!result.ok) {
-      setIsActivating(false)
-      setActivationError(result.error.message)
-      return
+    try {
+      const result = await activateProfileSafe(profileId)
+      if (!mountedRef.current || token !== activationTokenRef.current) return
+      if (!result.ok) {
+        setActivationError(result.error.message)
+        return
+      }
+      if (result.data.active_model_profile_id !== profileId) {
+        setActivationError('The activated profile did not match the requested profile.')
+        return
+      }
+      const freshOptions = await refreshOptions()
+      if (!mountedRef.current || token !== activationTokenRef.current) return
+      const freshOption = findModelOption(freshOptions, option.id)
+      if (!freshOption || !isModelOptionSelectable(freshOption)) {
+        setActivationError('This model is no longer available after refreshing profiles.')
+        return
+      }
+      if (!freshOption.compatible_profile_ids.includes(profileId)) {
+        setActivationError('The activated profile is no longer compatible with this model after refresh.')
+        return
+      }
+      onChange(option.id)
+      setPendingOption(null)
+      setActivationError(null)
+      setIsOpen(false)
+    } catch (error) {
+      if (mountedRef.current && token === activationTokenRef.current) {
+        setActivationError(error instanceof Error ? error.message : 'Unable to activate model profile.')
+      }
+    } finally {
+      activationInFlightRef.current = false
+      if (mountedRef.current) setIsActivating(false)
     }
-
-    await refreshProfiles()
-    const freshOptions = await refreshOptions()
-    if (!mountedRef.current || token !== activationTokenRef.current) return
-    const freshOption = findModelOption(freshOptions, option.id)
-    if (!freshOption || !isModelOptionSelectable(freshOption)) {
-      setIsActivating(false)
-      setActivationError('This model is no longer available after refreshing profiles.')
-      return
-    }
-    if (!freshOption.compatible_profile_ids.includes(profileId)) {
-      setIsActivating(false)
-      setActivationError('The activated profile is no longer compatible with this model after refresh.')
-      return
-    }
-
-    onChange(option.id)
-    setIsActivating(false)
-    setPendingOption(null)
-    setActivationError(null)
-    setIsOpen(false)
-  }, [activateProfileSafe, refreshProfiles, refreshOptions, onChange])
+  }, [activateProfileSafe, refreshOptions, onChange])
 
   const handleOptionClick = useCallback((option: ModelSelectionOption) => {
-    if (option.disabled_reason || isActivating) return
+    if (option.disabled_reason || activationInFlightRef.current) return
     if (!profileAware || option.compatible_profile_ids.length === 0) {
+      onChange(option.id)
+      setIsOpen(false)
+      return
+    }
+    if (activeProfileId && option.compatible_profile_ids.includes(activeProfileId)) {
       onChange(option.id)
       setIsOpen(false)
       return
@@ -481,14 +502,13 @@ function ModelSelectionPopover({
     }
     const [profileId] = option.compatible_profile_ids
     void activateAndCommit(option, profileId)
-  }, [profileAware, onChange, activateAndCommit, isActivating])
+  }, [profileAware, onChange, activateAndCommit, activeProfileId])
 
   const handleTriggerClick = () => {
-    if (disabled) return
+    if (disabled || activationInFlightRef.current) return
     if (!isOpen) {
       setPendingOption(null)
       setActivationError(null)
-      setIsActivating(false)
     }
     if (isOpen) activationTokenRef.current += 1
     setIsOpen(!isOpen)
@@ -818,6 +838,10 @@ function PromptBar({
     if (inputAudio) return null
     return inputImage ? 'image-to-video' : 'text-to-video'
   })()
+  const profileAwareWorkflow = modelSelectionWorkflow === 'text-to-video'
+    || modelSelectionWorkflow === 'image-to-video'
+    || modelSelectionWorkflow === 'ic-lora'
+    || modelSelectionWorkflow === 'hdr-ic-lora'
   const isIcLoraUnifiedSelection = modelSelectionWorkflow === 'ic-lora' || modelSelectionWorkflow === 'hdr-ic-lora'
 
   const {
@@ -831,7 +855,7 @@ function PromptBar({
     data: modelProfilesData,
     activateProfileSafe,
     refresh: refreshModelProfiles,
-  } = useModelProfiles(isIcLoraUnifiedSelection)
+  } = useModelProfiles(profileAwareWorkflow)
 
   useEffect(() => {
     if (!modelSelectionWorkflow && settings.modelSelection) {
@@ -1358,6 +1382,12 @@ function PromptBar({
               isLoading={isLoadingModelSelectionOptions}
               errorMessage={modelSelectionErrorMessage}
               activationScope={`${modelSelectionWorkflow ?? ''}:${icLoraAdapterId ?? ''}`}
+              profileAware={profileAwareWorkflow}
+              activeProfileId={modelProfilesData?.active_model_profile_id ?? null}
+              profiles={modelProfilesData?.profiles ?? []}
+              activateProfileSafe={activateProfileSafe}
+              refreshProfiles={refreshModelProfiles}
+              refreshOptions={refreshModelSelectionOptions}
             />
 
             <div className="w-px h-4 bg-zinc-700 mx-0.5" />
@@ -1662,6 +1692,7 @@ export function GenSpace() {
   const [icLoraCondType, setIcLoraCondType] = useState<ICLoraConditioningType>(null)
   const [icLoraStrength, setIcLoraStrength] = useState(1.0)
   const [loraStrength, setLoraStrength] = useState(1.0)
+  const [inpaintPipelineVersion, setInpaintPipelineVersion] = useState<InpaintPipelineVersion>('v1')
   const [icLoraInitial, setIcLoraInitial] = useState<{
     videoPath: string | null
     previewPath?: string | null
@@ -1743,6 +1774,7 @@ export function GenSpace() {
       videoPath: genSpaceIcLoraSource.videoPath,
       previewPath: genSpaceIcLoraSource.previewPath,
     })
+    setInpaintPipelineVersion('v1')
     setIcLoraPanelKey((prev) => prev + 1)
     setGenSpaceIcLoraSource(null)
   }, [genSpaceIcLoraSource, forceApiGenerations, setGenSpaceIcLoraSource])
@@ -1937,6 +1969,7 @@ export function GenSpace() {
         outputFormat: settings.outputFormat,
         modelSelection: settings.modelSelection ?? null,
         saveStage1Preview: settings.saveStage1Preview,
+        inpaintPipelineVersion: icLoraInput.adapterId === 'in_outpainting' ? inpaintPipelineVersion : undefined,
         ...(isIngredients
           ? { width: icWidth, height: icHeight, numFrames: icNumFrames }
           : {}),
@@ -2532,6 +2565,8 @@ export function GenSpace() {
             onConditioningTypeChange={setIcLoraCondType}
             conditioningStrength={icLoraStrength}
             onConditioningStrengthChange={setIcLoraStrength}
+            inpaintPipelineVersion={inpaintPipelineVersion}
+            onInpaintPipelineVersionChange={setInpaintPipelineVersion}
             outputVideoPath={icLoraResult?.videoPath || null}
             outputProxyPath={icLoraResult?.proxyPath || null}
             onChange={setIcLoraInput}
@@ -2724,6 +2759,7 @@ export function GenSpace() {
               setLocalError(null)
               resetRetake()
               resetIcLora()
+              setInpaintPipelineVersion('v1')
             }
           }}
         />

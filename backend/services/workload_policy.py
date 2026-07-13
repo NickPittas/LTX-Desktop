@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from api_types import InpaintPipelineVersion
+
 # >121 padded frames is the "long clip" threshold (matches the HDR context-window
 # and block_offload resident-policy cutoffs). >=1080p is "large pixels".
 _LARGE_FRAME_THRESHOLD = 121
@@ -35,6 +37,8 @@ class LoraWorkloadPlan:
     blockswap_prefetch: int | None = None
     hdr_context_window: int | None = None
     hdr_vae_encode_tile: bool = False
+    inpaint_context_window_px: int | None = None
+    inpaint_context_overlap_px: int | None = None
 
     def cache_key_parts(self) -> tuple[str, ...]:
         """Tuple folded into the pipeline cache key so plan changes invalidate it."""
@@ -47,6 +51,10 @@ class LoraWorkloadPlan:
             parts.append(f"ctx={self.hdr_context_window}")
         if self.hdr_vae_encode_tile:
             parts.append("vae_tile=1")
+        if self.inpaint_context_window_px is not None:
+            parts.append(f"inpaint_ctx={self.inpaint_context_window_px}")
+        if self.inpaint_context_overlap_px is not None:
+            parts.append(f"inpaint_overlap={self.inpaint_context_overlap_px}")
         return tuple(parts)
 
     def summary(self) -> str:
@@ -60,6 +68,10 @@ class LoraWorkloadPlan:
             bits.append(f"hdr_context_window={self.hdr_context_window}")
         if self.hdr_vae_encode_tile:
             bits.append("hdr_vae_encode_tile")
+        if self.inpaint_context_window_px is not None:
+            bits.append(f"inpaint_context_window_px={self.inpaint_context_window_px}")
+        if self.inpaint_context_overlap_px is not None:
+            bits.append(f"inpaint_context_overlap_px={self.inpaint_context_overlap_px}")
         return ", ".join(bits)
 
 
@@ -80,6 +92,7 @@ def classify_lora_workload(
     width: int | None,
     height: int | None,
     vram_gib: float | None = None,
+    inpaint_pipeline_version: InpaintPipelineVersion | None = None,
 ) -> LoraWorkloadPlan:
     """Classify an IC-LoRA run and pick compensation knobs.
 
@@ -104,6 +117,31 @@ def classify_lora_workload(
 
     if not (large_duration or large_pixels):
         return LoraWorkloadPlan(label="normal")
+
+    if workflow == "in_outpainting" and inpaint_pipeline_version == "v2":
+        # V2 receives the handler's single authoritative snapshot; probing again
+        # here could classify a different effective-VRAM state.
+        vram = vram_gib
+        both_axes = large_duration and large_pixels
+        if vram is None or vram < 12:
+            resident, window, overlap, prefetch = 0, 33, 8, 0
+        elif vram < 15:
+            resident, window, overlap, prefetch = 0, 33, 8, 0
+        elif vram < 16:
+            resident, window, overlap, prefetch = 20, 33, 8, 0
+        elif vram < 24:
+            resident, window, overlap, prefetch = (20 if both_axes else 26), 33, 8, 0
+        elif vram < 28:
+            resident, window, overlap, prefetch = (20 if both_axes else 26), 49, 16, 0
+        else:
+            resident, window, overlap, prefetch = (26 if both_axes else 37), 65, 16, None
+        return LoraWorkloadPlan(
+            label=f"inpaint_v2:large:ctx{window}",
+            resident_blocks=resident,
+            blockswap_prefetch=prefetch,
+            inpaint_context_window_px=window,
+            inpaint_context_overlap_px=overlap,
+        )
 
     if not is_hdr:
         vram = vram_gib if vram_gib is not None else _detect_vram_gib()

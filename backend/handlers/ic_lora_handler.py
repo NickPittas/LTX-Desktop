@@ -9,7 +9,7 @@ import time
 import uuid
 from pathlib import Path
 from threading import RLock
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
@@ -707,13 +707,18 @@ class IcLoraHandler(StateHandlerBase):
             self._text.clear_api_embeddings()
 
     def generate(self, req: IcLoraGenerateRequest) -> IcLoraGenerateResponse:
-        if self._generation.is_generation_running():
-            raise HTTPError(409, "Generation already in progress")
-
         # ponytail: resolve workflow before any Path(req.video_path) so ingredients can skip
         workflow: str | None = _ADAPTER_WORKFLOW.get(req.adapter_id) if req.adapter_id else None
         if workflow is None and req.adapter_id is None and req.conditioning_type is not None:
             workflow = "union_control"
+        if req.inpaint_pipeline_version is not None and workflow != "in_outpainting":
+            raise HTTPError(
+                400,
+                "inpaint_pipeline_version is only valid when adapter_id is 'in_outpainting'",
+                code="INPAINT_PIPELINE_VERSION_REQUIRES_IN_OUTPAINTING",
+            )
+        if self._generation.is_generation_running():
+            raise HTTPError(409, "Generation already in progress")
         if workflow in _UNAVAILABLE_WORKFLOWS:
             raise HTTPError(400, _UNAVAILABLE_MESSAGES[workflow])
 
@@ -801,6 +806,9 @@ class IcLoraHandler(StateHandlerBase):
                     400,
                     f"First-frame anchor image not found: {req.images[0].path}",
                 )
+        effective_inpaint_pipeline_version = (
+            (req.inpaint_pipeline_version or "v1") if workflow == "in_outpainting" else None
+        )
         # ponytail: in_outpainting allows empty prompt; other adapters require non-blank
         if workflow != "in_outpainting" and not (req.prompt or "").strip():
             raise HTTPError(400, "Prompt is required for this adapter")
@@ -867,14 +875,22 @@ class IcLoraHandler(StateHandlerBase):
         except Exception:  # noqa: BLE001  probe is advisory; classify as normal
             _fr = _w = _h = 0
         _snap = snapshot_vram()
+        _classification_frames = _fr or None
+        _classification_width = _w or None
+        _classification_height = _h or None
+        if workflow == "in_outpainting" and _fr and _w and _h:
+            _classification_frames = ((max(_fr, 1) - 2) // 8 + 1) * 8 + 1
+            _classification_width = _align_up(_w, 128 if req.conditioning_type is not None else 64)
+            _classification_height = _align_up(_h, 128 if req.conditioning_type is not None else 64)
         _wl_plan = classify_lora_workload(
             workflow=workflow or "standard_video",
-            frame_count=_fr or None,
-            width=_w or None,
-            height=_h or None,
+            frame_count=_classification_frames,
+            width=_classification_width,
+            height=_classification_height,
             vram_gib=float(_snap.effective_tier_gib) if _snap.effective_tier_gib is not None else None,
+            inpaint_pipeline_version=effective_inpaint_pipeline_version,
         )
-        _wl_set_envs = _apply_lora_workload_envs(_wl_plan, _fr or None, hdr=False)
+        _wl_set_envs = _apply_lora_workload_envs(_wl_plan, _classification_frames, hdr=False)
         _wl_mode = _wl_plan.summary()
         if _snap.free_gib is not None or _snap.total_gib is not None:
             _wl_mode += f" · VRAM {_snap.free_gib}/{_snap.total_gib}GiB free, tier {_snap.effective_tier_gib}GiB"
@@ -1052,7 +1068,7 @@ class IcLoraHandler(StateHandlerBase):
 
             t_inference_start = time.perf_counter()
             if workflow == "in_outpainting":
-                _stage1_preview = ic_state.pipeline.generate_inpaint(
+                _inpaint_kwargs: dict[str, Any] = dict(
                     prompt=resolved_prompt,
                     seed=self._resolve_seed(),
                     height=height,
@@ -1073,6 +1089,14 @@ class IcLoraHandler(StateHandlerBase):
                     on_phase_update=_phase_update,
                     save_stage_1_preview=req.save_stage_1_preview,
                 )
+                if effective_inpaint_pipeline_version == "v2":
+                    _stage1_preview = ic_state.pipeline.generate_inpaint_v2(
+                        **_inpaint_kwargs,
+                        inpaint_context_window_px=_wl_plan.inpaint_context_window_px,
+                        inpaint_context_overlap_px=_wl_plan.inpaint_context_overlap_px,
+                    )
+                else:
+                    _stage1_preview = ic_state.pipeline.generate_inpaint(**_inpaint_kwargs)
             else:
                 _stage1_preview = None
                 ic_state.pipeline.generate(

@@ -1774,6 +1774,21 @@
             "title": "Images",
             "type": "array"
           },
+          "inpaint_pipeline_version": {
+            "anyOf": [
+              {
+                "enum": [
+                  "v1",
+                  "v2"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inpaint Pipeline Version"
+          },
           "lora_strength": {
             "default": 1.0,
             "maximum": 2.0,

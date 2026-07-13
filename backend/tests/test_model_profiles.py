@@ -778,6 +778,33 @@ class TestProfileActivationSafety:
         assert response.json()["code"] == "MODEL_PROFILE_REQUIRED_ARTIFACTS_MISSING"
         assert test_state.state.active_model_profile_id is None
 
+    def test_activation_changes_video_cache_key_and_rejects_stale_cache(self, client, test_state, fake_services):
+        from state.app_state_types import GpuSlot, VideoPipelineState
+
+        components = _scanner_known_components(test_state)
+        for profile_id in ("profile-a", "profile-b"):
+            response = client.post(
+                "/api/model-profiles",
+                json=_make_official_payload(profile_id=profile_id, components=components),
+                headers=_ADMIN_HEADERS,
+            )
+            assert response.status_code == 200
+
+        assert client.post("/api/model-profiles/profile-a/activate", headers=_ADMIN_HEADERS).status_code == 200
+        cache_key_a = test_state.pipelines._current_cache_key()
+        test_state.state.gpu_slot = GpuSlot(
+            active_pipeline=VideoPipelineState(
+                pipeline=fake_services.fast_video_pipeline,
+                is_compiled=False,
+                cache_key=cache_key_a,
+            )
+        )
+
+        assert client.post("/api/model-profiles/profile-b/activate", headers=_ADMIN_HEADERS).status_code == 200
+        cache_key_b = test_state.pipelines._current_cache_key()
+        assert cache_key_b != cache_key_a
+        assert not test_state.pipelines._pipeline_matches_model_type("fast")
+
 
 class TestUpsamplerPathCanonicalization:
     """Phase 1: safe canonicalization of stale upsampler component paths.
