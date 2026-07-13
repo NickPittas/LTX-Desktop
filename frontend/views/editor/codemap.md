@@ -48,7 +48,7 @@ Only the `editorModel` slice (`assets`, `bins`, `timelines`) participates in his
 
 ### Export projections
 
-`selectExportModalModel` aggregates `selectExportClipData` (filters disabled tracks, maps flip/speed/volume/opacity), `selectExportSubtitleData` (merges track + subtitle styles), and `selectExportLetterbox` (picks the longest enabled adjustment-layer letterbox, resolving aspect via `LETTERBOX_RATIO_MAP`).
+`selectExportModalModel` aggregates `selectExportClipData` (filters disabled tracks, maps flip/speed/volume/opacity), `selectExportSubtitleData` (merges track + subtitle styles), and `selectExportLetterbox` (picks the longest enabled adjustment-layer letterbox, resolving aspect via `LETTERBOX_RATIO_MAP`). Export `path` keeps the original MOV/project primary authoritative; `audioPath` uses the MP4 sidecar/playback path when present, otherwise the primary. EXR directories retain their documented proxy fallback because timeline ffmpeg cannot consume a directory.
 
 ### Playback
 

@@ -31,7 +31,7 @@ Files:
 1. `tiling_config = default_tiling_config()`.
 2. `result = self._run_inference(...)` → `self.pipeline(...)` (`ICLoraPipeline`). Inside `_run_inference`, if `mask_path is not None`, loads mask via `ic_lora_module._load_mask_video(mask_path, height//2, width//2, num_frames_vae)` and passes it as `conditioning_attention_mask` with `conditioning_attention_strength`. Returns `(video, audio)` where `video` is `torch.Tensor | Iterator[torch.Tensor]`.
 3. **Optional outpaint compositing** (lines 422–433): if both `original_video_path` and `mask_path` are set and `video` is an Iterator, it is materialized via `torch.cat(list(video), dim=0)`, then `_composite_in_outpainting(...)` blends generated frames with the decoded original using the decoded mask (`gen*mask + orig*(1-mask)` in [0,1], uint8 out).
-4. `chunks = video_chunks_number(num_frames, tiling_config)`.
+4. `chunks = video_chunks_number(num_frames, tiling_config)`. Shared tiling uses the app-owned 768/256 spatial seam mitigation (80/24 temporal); retake and HDR remain excluded under their separate policies.
 
 ### `generate` — encode call site (b)
 

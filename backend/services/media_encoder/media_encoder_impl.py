@@ -77,10 +77,6 @@ _PRORES_PIXFMT_BY_PROFILE: Final[dict[int, str]] = {
     5: "yuv444p12le",
 }
 
-# 12-bit (4444) profiles ingest rgb48le (uint16) to avoid 8-bit quantization of
-# a 12-bit master; 10-bit profiles ingest rgb24 (uint8) bytes directly.
-_12BIT_PROFILES: Final[frozenset[int]] = frozenset({4, 5})
-
 _EXR_FRAME_PATTERN: Final[str] = "frame_{:05d}.exr"
 # printf-style pattern the ffmpeg image2 demuxer consumes (reads the WHOLE
 # sequence, not a single frame). The Python ``str.format`` pattern above
@@ -151,6 +147,30 @@ def _hdr_reinhard_bt709_geq_expr() -> str:
     # Escape commas so the filtergraph parser treats them as literal expression
     # argument separators, not filter-chain separators.
     return raw.replace(",", "\\,")
+
+
+def _build_prores_ffmpeg_command(
+    *, ffmpeg: str, width: int, height: int, fps: int, profile: int,
+    pix_fmt: str, primary_path: str,
+) -> list[str]:
+    """Build the deterministic high-precision raw-frame ProRes command."""
+    return [
+        ffmpeg, "-y",
+        "-f", "rawvideo",
+        "-vcodec", "rawvideo",
+        "-s", f"{width}x{height}",
+        "-pix_fmt", "rgb48le",
+        "-r", str(int(fps)),
+        "-i", "-",
+        "-vf", ffmpeg_bt709_matrix_filter(),
+        "-c:v", "prores_ks",
+        "-profile:v", str(profile),
+        "-pix_fmt", pix_fmt,
+        "-vendor", "apl0",
+        *ffmpeg_bt709_color_flags(),
+        "-progress", "pipe:1",
+        primary_path,
+    ]
 
 
 class MediaEncoderImpl:
@@ -333,7 +353,6 @@ class MediaEncoderImpl:
     ) -> EncoderResult:
         profile = _PRORES_PROFILE[output_format]
         pix_fmt = _PRORES_PIXFMT_BY_PROFILE[profile]
-        use_12bit = profile in _12BIT_PROFILES
         ff = _ffmpeg_exe()
 
         out_file = Path(primary_path)
@@ -352,29 +371,10 @@ class MediaEncoderImpl:
         width = int(first_chunk.shape[-2])
         is_uint8 = first_chunk.dtype == torch.uint8
 
-        # Input pixel format: rgb48le (uint16) for 12-bit profiles to preserve
-        # precision; rgb24 (uint8 bytes) for 10-bit profiles. ffmpeg rawvideo
-        # input needs the matching -pix_fmt on the INPUT side.
-        in_pix_fmt = "rgb48le" if use_12bit else "rgb24"
-
-        cmd: list[str] = [
-            ff, "-y",
-            "-f", "rawvideo",
-            "-vcodec", "rawvideo",
-            "-s", f"{width}x{height}",
-            "-pix_fmt", in_pix_fmt,
-            "-r", str(int(fps)),
-            "-i", "-",
-            "-vf", ffmpeg_bt709_matrix_filter(),
-            "-c:v", "prores_ks",
-            "-profile:v", str(profile),
-            "-pix_fmt", pix_fmt,
-            "-vendor", "apl0",
-            "-qscale:v", "9",
-            *ffmpeg_bt709_color_flags(),
-            "-progress", "pipe:1",
-            primary_path,
-        ]
+        cmd = _build_prores_ffmpeg_command(
+            ffmpeg=ff, width=width, height=height, fps=fps, profile=profile,
+            pix_fmt=pix_fmt, primary_path=primary_path,
+        )
 
         proc = subprocess.Popen(  # noqa: S603 — intentional subprocess to ffmpeg
             cmd,
@@ -421,12 +421,8 @@ class MediaEncoderImpl:
         try:
             assert proc.stdin is not None
             for chunk in _refeed():
-                if use_12bit:
-                    arr = _chunk_to_uint16(chunk, is_uint8)
-                    proc.stdin.write(arr.tobytes())
-                else:
-                    arr = _chunk_to_uint8(chunk, is_uint8)
-                    proc.stdin.write(arr.tobytes())
+                arr = _chunk_to_uint16(chunk, is_uint8)
+                proc.stdin.write(arr.tobytes())
             proc.stdin.close()
         except Exception:
             # Ensure ffmpeg terminates so reader threads exit cleanly.
@@ -857,18 +853,11 @@ class MediaEncoderImpl:
 # Tensor → raw array helpers (dtype-aware per §0A.A)
 # ---------------------------------------------------------------------------
 
-def _chunk_to_uint8(chunk: torch.Tensor, is_uint8: bool) -> np.ndarray:
-    """Return an ``(N, H, W, 3)`` uint8 ndarray for rgb24 piping."""
-    if is_uint8:
-        return chunk.contiguous().cpu().numpy()
-    return (chunk.clamp(0.0, 1.0) * 255.0).round().to(torch.uint8).contiguous().cpu().numpy()
-
-
 def _chunk_to_uint16(chunk: torch.Tensor, is_uint8: bool) -> np.ndarray:
-    """Return an ``(N, H, W, 3)`` uint16 ndarray for rgb48le piping (12-bit masters).
+    """Return an ``(N, H, W, 3)`` uint16 ndarray for rgb48le piping.
 
     uint8 input is scaled 0..255 → 0..65535 to fill the 16-bit container (avoids
-    8-bit quantization of a 12-bit master, §0B). float input is scaled from [0,1].
+    source precision in the 16-bit container. Float input is scaled from [0,1].
     """
     if is_uint8:
         arr = (chunk.to(torch.int32) * 257).to(torch.uint16)

@@ -42,7 +42,7 @@ Reusable, mostly self-contained UI building blocks shared across screens: dialog
 
 ### Editor-adjacent
 
-- **`ExportModal.tsx`** — codec (`h264 | prores | vp9` via `CODEC_INFO`), resolution (4K/1080p/720p), frame rate (24/25/30/60), ProRes profile. Reads the active timeline through editor selectors; `generateFCPXML` produces a Premiere/DaVinci interchange; closing dispatches `closeExportModal`. Subtitles burn-in via `DEFAULT_SUBTITLE_STYLE`; letterbox via `LETTERBOX_RATIO_MAP`.
+- **`ExportModal.tsx`** — codec (`h264 | prores | vp9` via `CODEC_INFO`), resolution (4K/1080p/720p), frame rate (24/25/30/60), ProRes profile. Consumes `selectExportModalModel`, keeping original MOV/project primary video authoritative while an MP4 sidecar is playback/audio-only; `generateFCPXML` produces a Premiere/DaVinci interchange; closing dispatches `closeExportModal`. Subtitles burn-in and letterbox come from the same selector model.
 - **`ImportTimelineModal.tsx`** — `select → parsing → relink → error` flow. `parseTimelineXml` produces a `ParsedTimeline`; media refs are checked (`ApiClient.checkMediaAvailability`), copied into project storage (`addVisualAssetToProject`/`addGenericAssetToProject`), and finally committed via `importParsedTimeline`.
 
 ### Supporting widgets

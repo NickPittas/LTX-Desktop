@@ -96,6 +96,8 @@ export interface RunFfmpegOptions {
   durationUs?: number
   /** Total-frames hint; used to compute pct from the `frame` count. */
   totalFrames?: number
+  /** Export-owned cancellation signal. */
+  signal?: AbortSignal
 }
 
 /**
@@ -116,13 +118,17 @@ export function runFfmpeg(
   const durationUs = options?.durationUs
   const totalFrames = options?.totalFrames
   const trackProgress = typeof onProgress === 'function'
+  const signal = options?.signal
 
   return new Promise((resolve) => {
+    if (signal?.aborted) { resolve({ success: false, error: 'Export cancelled' }); return }
     // `-progress pipe:1` emits key=value update blocks on stdout. Prepend it so
     // the rest of the arg vector is untouched.
     const finalArgs = trackProgress ? ['-progress', 'pipe:1', ...args] : args
     logger.info(`[ffmpeg] spawn: ${finalArgs.join(' ').slice(0, 400)}`)
     const proc = spawn(ffmpegPath, finalArgs, { stdio: ['pipe', 'pipe', 'pipe'] })
+    const abort = () => proc.kill()
+    signal?.addEventListener('abort', abort, { once: true })
 
     // Only the non-isolated (export) path registers for cancel-kill.
     if (!isolated) {
@@ -196,12 +202,15 @@ export function runFfmpeg(
     }
 
     proc.on('close', (code) => {
+      signal?.removeEventListener('abort', abort)
       // Only the non-isolated path owns the global slot; never clear it from an
       // isolated run (it may be holding a different, in-flight export process).
-      if (!isolated) {
+      if (!isolated && activeExportProcess === proc) {
         activeExportProcess = null
       }
-      if (code === 0) {
+      if (signal?.aborted) {
+        resolve({ success: false, error: 'Export cancelled' })
+      } else if (code === 0) {
         if (trackProgress) {
           try {
             onProgress(1)
@@ -217,7 +226,8 @@ export function runFfmpeg(
       }
     })
     proc.on('error', (err) => {
-      if (!isolated) {
+      signal?.removeEventListener('abort', abort)
+      if (!isolated && activeExportProcess === proc) {
         activeExportProcess = null
       }
       resolve({ success: false, error: `Failed to start ffmpeg: ${err.message}` })

@@ -1,16 +1,10 @@
-import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { X, Download, FolderOpen, Film, Package, Loader2, Check, AlertCircle, ChevronDown } from 'lucide-react'
 import { Button } from './ui/button'
-import { DEFAULT_SUBTITLE_STYLE } from '../types/project-model'
 import type { Track, TimelineClip } from '../types/project-model'
 import {
-  selectActiveTimeline,
-  selectAssets,
-  selectClipPathFromAssets,
-  selectClips,
+  selectExportModalModel,
   selectShowExportModal,
-  selectSubtitles,
-  selectTracks,
 } from '../views/editor/editor-selectors'
 import { useEditorActions, useEditorStore } from '../views/editor/editor-store'
 
@@ -49,14 +43,6 @@ const PRORES_PROFILES = [
   { value: 2, label: 'Standard' },
   { value: 3, label: 'HQ' },
 ]
-
-const LETTERBOX_RATIO_MAP: Record<string, number> = {
-  '2.35:1': 2.35,
-  '2.39:1': 2.39,
-  '2.76:1': 2.76,
-  '1.85:1': 1.85,
-  '4:3': 4 / 3,
-}
 
 // Generate FCPXML for Premiere / DaVinci
 function generateFCPXML(
@@ -155,69 +141,7 @@ function escapeXml(str: string): string {
 export function ExportModal({ projectName }: ExportModalProps) {
   const { closeExportModal } = useEditorActions()
   const isOpen = useEditorStore(selectShowExportModal)
-  const timeline = useEditorStore(selectActiveTimeline)
-  const assets = useEditorStore(selectAssets)
-  const clips = useEditorStore(selectClips)
-  const tracks = useEditorStore(selectTracks)
-  const subtitles = useEditorStore(selectSubtitles)
-
-  const exportClips = useMemo(() => (
-    clips
-      .filter(clip => clip.type === 'video' || clip.type === 'image' || clip.type === 'audio')
-      .filter(clip => tracks[clip.trackIndex]?.enabled !== false)
-      .map(clip => ({
-        path: selectClipPathFromAssets(assets, clip),
-        type: clip.type,
-        startTime: clip.startTime,
-        duration: clip.duration,
-        trimStart: clip.trimStart,
-        speed: clip.speed || 1,
-        reversed: clip.reversed || false,
-        flipH: clip.flipH || false,
-        flipV: clip.flipV || false,
-        opacity: clip.opacity ?? 100,
-        trackIndex: clip.trackIndex,
-        muted: clip.muted || false,
-        volume: clip.volume ?? 1,
-      }))
-  ), [assets, clips, tracks])
-
-  const subtitleData = useMemo(() => (
-    subtitles.map(subtitle => {
-      const track = tracks[subtitle.trackIndex]
-      return {
-        text: subtitle.text,
-        startTime: subtitle.startTime,
-        endTime: subtitle.endTime,
-        style: {
-          ...DEFAULT_SUBTITLE_STYLE,
-          ...(track?.subtitleStyle || {}),
-          ...(subtitle.style || {}),
-        },
-      }
-    })
-  ), [subtitles, tracks])
-
-  const letterbox = useMemo(() => {
-    const adjustmentClips = clips.filter(
-      clip =>
-        clip.type === 'adjustment'
-        && clip.letterbox?.enabled
-        && tracks[clip.trackIndex]?.enabled !== false,
-    )
-    if (adjustmentClips.length === 0) return null
-    const best = adjustmentClips.reduce((currentBest, candidate) => (
-      candidate.duration > currentBest.duration ? candidate : currentBest
-    ))
-    const config = best.letterbox!
-    return {
-      ratio: config.aspectRatio === 'custom'
-        ? (config.customRatio || 2.35)
-        : (LETTERBOX_RATIO_MAP[config.aspectRatio] || 2.35),
-      color: config.color || '#000000',
-      opacity: (config.opacity ?? 100) / 100,
-    }
-  }, [clips, tracks])
+  const { timeline, clips, tracks, exportClips, subtitleData, letterbox } = useEditorStore(selectExportModalModel)
 
   const [exportStatus, setExportStatus] = useState<ExportStatus>('idle')
   const [exportType, setExportType] = useState<'package' | 'video' | null>(null)

@@ -12,12 +12,12 @@ export interface ExportSubtitle {
 export function buildVideoFilterGraph(
   segments: FlatSegment[],
   opts: {
-    width: number; height: number; fps: number;
+    width: number; height: number; fps: number; targetPixFmt: 'yuv420p' | 'yuv422p10le';
     letterbox?: { ratio: number; color: string; opacity: number };
     subtitles?: ExportSubtitle[];
   },
 ): { inputs: string[]; filterScript: string } {
-  const { width, height, fps, letterbox, subtitles } = opts
+  const { width, height, fps, letterbox, subtitles, targetPixFmt } = opts
   const inputs: string[] = []
   const filterParts: string[] = []
   let idx = 0
@@ -136,10 +136,7 @@ export function buildVideoFilterGraph(
     }
   }
 
-  // Rename final label to outv
-  if (lastLabel !== 'outv') {
-    filterParts.push(`[${lastLabel}]null[outv]`)
-  }
+  filterParts.push(`[${lastLabel}]scale=out_color_matrix=bt709:out_range=tv,format=${targetPixFmt}[outv]`)
 
   return { inputs, filterScript: filterParts.join(';\n') }
 }

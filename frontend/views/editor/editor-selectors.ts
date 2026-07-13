@@ -44,6 +44,7 @@ export interface ExportLetterbox {
 
 export interface ExportClipData {
   path: string
+  audioPath?: string
   type: string
   startTime: number
   duration: number
@@ -797,21 +798,25 @@ export function selectExportClipData(state: EditorState): ExportClipData[] {
   return selectClips(state)
     .filter(clip => clip.type === 'video' || clip.type === 'image' || clip.type === 'audio')
     .filter(clip => tracks[clip.trackIndex]?.enabled !== false)
-    .map(clip => ({
-      path: selectExportClipPath(state, clip),
-      type: clip.type,
-      startTime: clip.startTime,
-      duration: clip.duration,
-      trimStart: clip.trimStart,
-      speed: clip.speed || 1,
-      reversed: clip.reversed || false,
-      flipH: clip.flipH || false,
-      flipV: clip.flipV || false,
-      opacity: clip.opacity ?? 100,
-      trackIndex: clip.trackIndex,
-      muted: clip.muted || false,
-      volume: clip.volume ?? 1,
-    }))
+    .map(clip => {
+      const path = selectExportClipPath(state, clip)
+      return {
+        path,
+        audioPath: selectClipPath(state, clip) || path,
+        type: clip.type,
+        startTime: clip.startTime,
+        duration: clip.duration,
+        trimStart: clip.trimStart,
+        speed: clip.speed || 1,
+        reversed: clip.reversed || false,
+        flipH: clip.flipH || false,
+        flipV: clip.flipV || false,
+        opacity: clip.opacity ?? 100,
+        trackIndex: clip.trackIndex,
+        muted: clip.muted || false,
+        volume: clip.volume ?? 1,
+      }
+    })
 }
 
 export function selectExportSubtitleData(state: EditorState): ExportSubtitleData[] {

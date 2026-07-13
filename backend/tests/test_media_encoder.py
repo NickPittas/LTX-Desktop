@@ -32,7 +32,12 @@ from services.media_encoder.color import (
     BT709_CHROMATICITIES,
     bt709_eotf,
 )
-from services.media_encoder.media_encoder_impl import MediaEncoderImpl
+from services.media_encoder.media_encoder_impl import (
+    MediaEncoderImpl,
+    _PRORES_PROFILE,
+    _build_prores_ffmpeg_command,
+    _chunk_to_uint16,
+)
 from services.services_utils import AudioOrNone
 
 # ---------------------------------------------------------------------------
@@ -286,6 +291,27 @@ _PRORES_EXPECTED_PIXFMT = {
     OutputFormat.PRORES_4444: "yuv444p12le",
     OutputFormat.PRORES_4444_XQ: "yuv444p12le",
 }
+
+
+@pytest.mark.parametrize("fmt", _PRORES_FORMATS)
+def test_prores_command_uses_high_precision_profile_defaults(fmt: OutputFormat) -> None:
+    profile = _PRORES_PROFILE[fmt]
+    cmd = _build_prores_ffmpeg_command(
+        ffmpeg="ffmpeg", width=1920, height=1088, fps=25, profile=profile,
+        pix_fmt=_PRORES_EXPECTED_PIXFMT[fmt], primary_path="out.mov",
+    )
+    assert cmd[cmd.index("-pix_fmt") + 1] == "rgb48le"
+    assert cmd[cmd.index("-profile:v") + 1] == str(profile)
+    assert cmd[cmd.index("-pix_fmt", cmd.index("-pix_fmt") + 1) + 1] == _PRORES_EXPECTED_PIXFMT[fmt]
+    assert "-qscale:v" not in cmd
+    assert "bt709" in " ".join(cmd)
+
+
+def test_chunk_to_uint16_preserves_sub_8_bit_precision() -> None:
+    values = torch.tensor([0.5, 0.5 + 1 / 1024], dtype=torch.float32).reshape(1, 1, 2, 1)
+    chunk = values.repeat(1, 1, 1, 3)
+    encoded = _chunk_to_uint16(chunk, is_uint8=False)
+    assert encoded[0, 0, 0, 0] != encoded[0, 0, 1, 0]
 
 
 @pytest.mark.parametrize("fmt", _PRORES_FORMATS)

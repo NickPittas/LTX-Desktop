@@ -90,6 +90,12 @@ LTX Desktop is an Electron app for AI video generation using LTX models. Three-l
 - Dev/full GGUF models are Full-family selectable base models.
 - Missing model UI must show source link and exact required placement path for the same selectable ID that generation would use.
 
+## Media Export and Source Rules
+
+- **ProRes primary exports are direct.** Every ProRes primary or timeline export must encode directly from decoded/model frames or the timeline filter graph; never transcode an H.264/MP4 intermediate to ProRes. An H.264 MP4 may only be a playback/proxy sidecar derived from that primary.
+- **Primary sources stay authoritative.** Original source video/MOV remains the generation/model input and project primary storage. Preview/proxy transcodes are separate sidecars; they must never replace or be submitted instead of the primary. Prefer direct source decoding; create PNG intermediates only when a decoder genuinely cannot consume the source.
+- **Timeline inputs preserve the split.** Timeline export uses primary video `path` plus optional proxy `audioPath`. The existing EXR-directory proxy fallback is the documented exception until native EXR-sequence timeline input exists.
+
 ## Common Commands
 
 | Command | Purpose |

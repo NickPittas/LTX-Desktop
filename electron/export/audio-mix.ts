@@ -13,9 +13,10 @@ const BYTES_PER_FRAME = NUM_CHANNELS * BYTES_PER_SAMPLE // 4 bytes per stereo fr
 /** Extract raw PCM from a file via ffmpeg stdout pipe */
 function extractPcmBuffer(
   ffmpegPath: string,
-  filePath: string, trimStart: number, trimEnd: number, speed: number, reversed: boolean
+  filePath: string, trimStart: number, trimEnd: number, speed: number, reversed: boolean, signal?: AbortSignal
 ): Promise<Buffer> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(new Error('Export cancelled')); return }
     // Build audio filter chain: trim -> reset PTS -> speed -> reverse
     // Using atrim (not -ss/-t) for sample-accurate trimming
     const filters: string[] = [
@@ -38,14 +39,18 @@ function extractPcmBuffer(
       'pipe:1',
     ]
     const proc = spawn(ffmpegPath, args, { stdio: ['pipe', 'pipe', 'pipe'] })
+    const abort = () => proc.kill()
+    signal?.addEventListener('abort', abort, { once: true })
     const chunks: Buffer[] = []
     proc.stdout?.on('data', (chunk: Buffer) => chunks.push(chunk))
     proc.stderr?.on('data', () => {}) // drain stderr to prevent blocking
     proc.on('close', (code) => {
+      signal?.removeEventListener('abort', abort)
+      if (signal?.aborted) { reject(new Error('Export cancelled')); return }
       if (code === 0) resolve(Buffer.concat(chunks))
       else reject(new Error(`PCM extraction failed (code ${code}) for ${filePath}`))
     })
-    proc.on('error', reject)
+    proc.on('error', (err) => { signal?.removeEventListener('abort', abort); reject(err) })
   })
 }
 
@@ -62,6 +67,7 @@ export async function mixAudioToPcm(
   clips: ExportClip[],
   totalDuration: number,
   ffmpegPath: string,
+  signal?: AbortSignal,
 ): Promise<{ pcmBuffer: Buffer; sampleRate: number; channels: number }> {
   // Collect audio sources from ORIGINAL clips
   const audioProbeCache = new Map<string, boolean>()
@@ -69,7 +75,8 @@ export async function mixAudioToPcm(
 
   for (const c of clips) {
     if (c.muted || c.volume <= 0) continue
-    const fp = c.path
+    if (signal?.aborted) throw new Error('Export cancelled')
+    const fp = c.audioPath ?? c.path
     if (!fp || !fs.existsSync(fp)) continue
 
     if (c.type === 'audio') {
@@ -111,7 +118,7 @@ export async function mixAudioToPcm(
     const src = audioSources[i]
     logger.info( `[Export] Audio ${i + 1}/${audioSources.length}: ${path.basename(src.filePath)} trim=${src.trimStart.toFixed(2)}-${src.trimEnd.toFixed(2)} @${src.timelineStart.toFixed(2)}s vol=${src.volume}`)
     try {
-      const pcm = await extractPcmBuffer(ffmpegPath, src.filePath, src.trimStart, src.trimEnd, src.speed, src.reversed)
+      const pcm = await extractPcmBuffer(ffmpegPath, src.filePath, src.trimStart, src.trimEnd, src.speed, src.reversed, signal)
       const startFrame = Math.round(src.timelineStart * SAMPLE_RATE)
       const startSample = startFrame * NUM_CHANNELS
       const numPcmSamples = Math.floor(pcm.length / BYTES_PER_SAMPLE)
@@ -123,8 +130,9 @@ export async function mixAudioToPcm(
         mixBuffer[destIdx] += value * src.volume
       }
       logger.info( `[Export] Audio ${i + 1}: mixed ${numPcmSamples} samples (${(numPcmSamples / SAMPLE_RATE / NUM_CHANNELS).toFixed(2)}s) at offset frame ${startFrame}`)
-    } catch (err: any) {
-      logger.warn( `[Export] Failed to extract audio from ${src.filePath}: ${err.message}`)
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err)
+      throw new Error(`Audio extraction failed for ${src.filePath}: ${detail}`)
     }
   }
 

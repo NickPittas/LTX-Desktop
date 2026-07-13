@@ -19,9 +19,12 @@ if TYPE_CHECKING:
 
 
 def default_tiling_config() -> TilingConfigType:
-    from ltx_core.model.video_vae import TilingConfig
+    from ltx_core.model.video_vae import SpatialTilingConfig, TemporalTilingConfig, TilingConfig
 
-    return TilingConfig.default()
+    return TilingConfig(
+        spatial_config=SpatialTilingConfig(tile_size_in_pixels=768, tile_overlap_in_pixels=256),
+        temporal_config=TemporalTilingConfig(tile_size_in_frames=80, tile_overlap_in_frames=24),
+    )
 
 
 def default_guiders() -> tuple[MultiModalGuiderParams, MultiModalGuiderParams]:
@@ -201,4 +204,3 @@ def _get_default_encoder() -> "MediaEncoder":
 
         _default_encoder_instance = MediaEncoderImpl()
     return _default_encoder_instance
-

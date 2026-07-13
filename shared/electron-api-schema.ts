@@ -15,6 +15,7 @@ const emptyResult = ipcResult({})
 
 const exportClip = z.object({
   path: z.string(),
+  audioPath: z.string().optional(),
   type: z.string(),
   startTime: z.number(),
   duration: z.number(),

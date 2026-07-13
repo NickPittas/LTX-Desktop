@@ -7,34 +7,31 @@ The **timeline composition and ffmpeg-based export pipeline**. Renders a multi-t
 
 ## Design Patterns
 
-- **Three-pass export (video-only → audio-only → mux).** Video and audio are produced independently then muxed. Reasons: (1) the video pass uses a complex `filter_complex_script` and the audio pass mixes in JS, (2) the final mux can `-c:v copy` when target codec is h264 (intermediate is already libx264), avoiding a re-encode.
+- **Three-pass export (video-only → audio-only → mux).** Pass 1 renders directly to the requested target codec and pass 3 always uses `-c:v copy`; no newly created H.264 intermediate may feed ProRes. The existing EXR-directory fallback to its already-existing proxy remains the documented exception because ffmpeg cannot consume a directory.
 - **Single global fps conversion.** Per-segment filters do NOT do fps conversion (comment: "real NLEs convert frame rate globally"); `concat` is followed by exactly one `fps=<fps>` filter on the concatenated stream to avoid per-segment duration quantization.
 - **Filter graph as a script file, not CLI args.** `buildVideoFilterGraph` returns `{ inputs, filterScript }`; the script is written to a temp file and passed via `-filter_complex_script <file>` to avoid shell-escaping/quoting issues with large timelines.
 - **Multi-track timeline flattening (NLE convention).** `flattenTimeline` collects every clip boundary, computes the highest-`trackIndex` clip active at each midpoint, emits contiguous `FlatSegment`s, then merges adjacent segments that share file/speed/flip/opacity/mute/contiguous-trim into single segments (smaller filter graph).
 - **PCM mixing in JS, not ffmpeg.** `mixAudioToPcm` extracts each source as raw `s16le` PCM via ffmpeg `pipe:1`, accumulates into a `Float64Array` (no clipping during sum), then clamps to Int16 and writes the mix. This gives sample-accurate placement and per-clip volume control that ffmpeg's `amix` cannot match cleanly.
-- **One module-level `activeExportProcess`** for cancellation. `runFfmpeg` stashes the spawned `ChildProcess` so `stopExportProcess()` (called from `exportCancel` and `before-quit`) can `kill()` it. Only one export at a time is supported.
+- **One export-owned `AbortController`** rejects concurrent exports, checks cancellation between phases, and kills only its active ffmpeg/PCM extraction. `runFfmpeg` clears its global process slot only when the exiting process still owns it; isolated preview/import transcodes remain outside this cancellation path.
 - **Pure, I/O-free filter graph builder.** `video-filter.ts` does zero filesystem work — only string construction. This keeps it unit-testable in isolation.
-- **Codec profile centralization.** All codec-specific ffmpeg args live in one `if/else if` block in `export-handler.ts` (`h264` / `prores` / `vp9`), the single point to extend when adding new target codecs.
+- **Codec profile centralization.** `export-codec.ts::buildExportVideoPlan` validates quality and owns direct, BT.709-tagged pass-1 codec/container/pixel-format selection: H.264 MKV, ProRes 422 10-bit MOV (`apl0`, no qscale), or VP9 WebM.
 
 ## Data & Control Flow
 
-### `export-handler.ts` — `exportNative({ clips, outputPath, codec, width, height, fps, quality, letterbox, subtitles })`
+### `export-handler.ts` / `export-runner.ts` — `exportNative({ clips, outputPath, codec, width, height, fps, quality, letterbox, subtitles })`
 1. **Resolve ffmpeg** via `findFfmpegPath()`; bail with `{ success: false, error: 'FFmpeg not found' }` if missing.
 2. **Validate every path** — `validatePath(outputPath, getAllowedRoots())` plus `validatePath(clip.path, ...)` for each clip.
-3. **Flatten** — `flattenTimeline(clips)` → `FlatSegment[]` (gaps allowed). Reject empty timeline.
-4. **Verify source files exist.**
+3. **Preflight sources** — validate every visual segment path and, for each audible audio/video clip, the effective `audioPath ?? path`.
+4. **Flatten** — `flattenTimeline(clips)` → `FlatSegment[]` (gaps allowed). Reject empty timeline.
 5. **Allocate temp artifacts** in `os.tmpdir()`: `ltx-export-video-<ts>.mkv`, `ltx-export-audio-<ts>.wav`; define `cleanup()` to unlink both.
 6. **Pass 1 — video only:**
    - `buildVideoFilterGraph(segments, { width, height, fps, letterbox, subtitles })` → `{ inputs, filterScript }`.
    - Write `filterScript` to `ltx-filter-v-<ts>.txt`.
-   - `runFfmpeg(ffmpegPath, ['-y', ...inputs, '-filter_complex_script', filterFile, '-map', '[outv]', '-an', '-c:v', 'libx264', '-preset', 'fast', '-crf', '16', '-pix_fmt', 'yuv420p', tmpVideo])`. (Intermediate is always libx264/yuv420p regardless of final codec.)
+   - `runFfmpeg(ffmpegPath, ['-y', ...inputs, '-filter_complex_script', filterFile, '-map', '[outv]', '-an', ...plan.pass1VideoArgs, tmpVideo])`. The requested delivery codec is encoded directly with limited BT.709 tags.
 7. **Pass 2 — audio mix:** compute `totalDuration` as `max(seg.startTime + seg.duration)` across both segments and original clips; `mixAudioToPcm(clips, totalDuration, ffmpegPath)` → `{ pcmBuffer, sampleRate, channels }`. Write raw PCM (`ltx-pcm-<ts>.raw`), then `runFfmpeg(['-f', 's16le', '-ar', '<sr>', '-ac', '<ch>', '-i', rawPcm, '-c:a', 'pcm_s16le', tmpAudio])`.
-8. **Pass 3 — mux + final encode:**
-   - `h264`: `videoCodecArgs = ['-c:v', 'libx264', '-preset', 'medium', '-crf', String(quality||18), '-pix_fmt', 'yuv420p', '-movflags', '+faststart']`, `audioCodecArgs = ['-c:a', 'aac', '-b:a', '192k']`. **Can `-c:v copy`** (intermediate already h264).
-   - `prores`: `videoCodecArgs = ['-c:v', 'prores_ks', '-profile:v', String(quality||3), '-pix_fmt', 'yuva444p10le']`, `audioCodecArgs = ['-c:a', 'pcm_s16le']`. **No copy** — re-encodes from the libx264 intermediate.
-   - `vp9`: `videoCodecArgs = ['-c:v', 'libvpx-vp9', '-b:v', String(quality||8) + 'M', '-pix_fmt', 'yuv420p']`, `audioCodecArgs = ['-c:a', 'libopus', '-b:a', '128k']`.
-   - Unknown codec → cleanup + `{ success: false, error: 'Unknown codec' }`.
-   - Final command: `runFfmpeg(['-y', '-i', tmpVideo, '-i', tmpAudio, '-map', '0:v', '-map', '1:a', ...(canCopyVideo ? ['-c:v','copy'] : videoCodecArgs), ...audioCodecArgs, '-shortest', outputPath])`.
+8. **Pass 3 — mux:**
+   - H.264, ProRes 4:2:2 10-bit, and VP9 are each encoded directly in pass 1.
+   - Every final mux uses `-c:v copy`, codec-specific audio, target muxer/container flags, and limited BT.709 tags.
 9. `cleanup()` and return `{ success: true }` or `{ success: false, error }`.
 
 ### `export-handler.ts` — `exportCancel({ sessionId })`

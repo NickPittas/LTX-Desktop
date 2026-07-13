@@ -1,7 +1,7 @@
 export interface ExportClip {
   path: string; type: string; startTime: number; duration: number; trimStart: number;
   speed: number; reversed: boolean; flipH: boolean; flipV: boolean; opacity: number; trackIndex: number;
-  muted: boolean; volume: number;
+  muted: boolean; volume: number; audioPath?: string;
 }
 
 export interface FlatSegment {
