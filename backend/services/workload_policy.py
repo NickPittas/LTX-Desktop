@@ -129,7 +129,8 @@ def classify_lora_workload(
         elif vram < 24:
             resident, window, overlap, prefetch = (20 if both_axes else 26), 33, 8, 0
         elif vram < 28:
-            resident, window, overlap, prefetch = (20 if both_axes else 26), 49, 16, 0
+            # 1080p inpaint needs VAE/LoRA/activation headroom on 24 GiB cards.
+            resident, window, overlap, prefetch = (20 if large_pixels else 26), 49, 16, 0
         else:
             resident, window, overlap, prefetch = (26 if both_axes else 37), 65, 16, None
         return LoraWorkloadPlan(
