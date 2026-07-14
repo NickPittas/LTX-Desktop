@@ -2,12 +2,12 @@
 
 ## Responsibility
 
-IC-LoRA (Image-Conditioned LoRA) video generation: produces video conditioned on reference images and optional video reference latents, with a LoRA stack applied to the diffusion transformer. Provides three paths — general `generate` (T2V/I2V with optional video conditioning and outpaint compositing), V1 `generate_inpaint` (RGB two-stage bridge), and experimental video-only latent `generate_inpaint_v2` (latent blend → learned upsample → masked Stage 2). Exposes `IcLoraPipeline` Protocol and `LTXIcLoraPipeline` concrete wrapper.
+IC-LoRA (Image-Conditioned LoRA) video generation: produces video conditioned on reference images and optional video reference latents, with a LoRA stack applied to the diffusion transformer. Provides the general `generate` path (T2V/I2V with optional video conditioning and outpaint compositing) and one canonical latent-only `generate_inpaint` path. Exposes `IcLoraPipeline` Protocol and `LTXIcLoraPipeline` concrete wrapper.
 
 Files:
-- `ic_lora_pipeline.py` — `IcLoraPipeline` Protocol (`create` with `lora_paths`, `lora_strength`; `generate`, `generate_inpaint`, `generate_inpaint_v2`).
-- `ltx_ic_lora_pipeline.py` — `LTXIcLoraPipeline` implementation (wraps `ltx_pipelines.ic_lora.ICLoraPipeline`); its V2 method is delegation-only.
-- `inpaint_v2.py` — isolated video-only latent bridge: half-source/Stage-1 latent blend, exactly one learned upsample, full-resolution mask preserving the learned-upsampled blended latent, ordinary or call-scoped context Stage 2.
+- `ic_lora_pipeline.py` — `IcLoraPipeline` Protocol (`create` with `lora_paths`, `lora_strength`; `generate`, `generate_inpaint`).
+- `ltx_ic_lora_pipeline.py` — `LTXIcLoraPipeline` implementation (wraps `ltx_pipelines.ic_lora.ICLoraPipeline`).
+- `latent_inpaint.py` — canonical video-only latent in/outpaint flow: green guide Stage 1 conditioning, latent blend, one learned upsample, binary-mask Stage 2, and optional context loop/preview.
 - `official_inpaint.py` — inpaint helpers: `green_composite_preprocess` (#66FF00), `dilate_video_mask` (separable max-pool), `laplacian_pyramid_blend` (kornia-based, chunked).
 
 ## Design Patterns
@@ -17,7 +17,9 @@ Files:
 - **Format/quantization branching** identical to other pipelines: GGUF → None; split + cuda → the shared `kijai_fp8_quantization_policy()` from `services.patches.gguf_loader_fix` (Kijai scaled-FP8, including the policy-level `FuseRule`); else `build_policy()` (fp8_cast) if cuda else None. **Offload/quantization decisions are supplied by `LocalMemoryPlan`** when the handler passes one (`memory_plan.offload_mode` overrides the caller's); the transitional `memory_plan=None` path uses the caller's `offload_mode` as-is — no internal split/GGUF offload coercion remains.
 - **VAE frame-count helpers**: `_vae_compatible_frame_count` (largest 1+8k ≤ n, for mask trim) and `_vae_padded_frame_count` (next 1+8k ≥ n, for inpaint padding; output cropped back).
 - **Mask-radius derivation**: `derive_stage_radii(mask_grow_px)` → `(stage1=(n+1)//2, stage2=n)` mapping the user-facing `mask_grow_px` to per-stage dilation radii.
-- **Green-guide direct tensor encode** (`_encode_green_guide_conditioning`): replaces a temp-mp4 roundtrip; builds a `VideoConditionByReferenceLatent(latent=encoded, downscale_factor=1, strength=strength)` from a direct tiled VAE encode of the green composite tensor.
+- **Stage-1 green guide gate**: the final full-video keyframe guide is wrapped only for a nonblank prompt, no optional images, and a nonempty half latent mask. The wrapper uses patchifier token order to install a persistent `(1,2N,2N)` boolean matrix blocking only masked target-query → green-guide-key attention; guide → target remains open. That exact gated Stage 1 uses CFG=1 official CFG++ ancestral two-pass sampling with the positive prompt and the module-local official negative prompt: it post-processes the positive x0 prediction, passes the negative prediction raw, then restores clean tokens on the stochastic x_next. Empty/whitespace prompts, image requests, or empty masks use the raw guide and ordinary Euler; Stage 2 remains ordinary Euler preserve-conditioning-only and the source-latent half-mask is reused unchanged for its Stage-1 blend.
+- **Canonical latent mask and Stage 2**: `mask_to_latent_denoise_mask` thresholds source masks at 0.5, nearest-resizes spatially, and causally amax-groups frames into exact float32 binary latent values. Stage 2 uses `STAGE_2_DISTILLED_SIGMAS[1:]` scaled to start at 0.55.
+- **Shared LoRA stages**: Stage 1 and Stage 2 are distinct `DiffusionStage` instances configured with the same LoRA stack. Stage 2 is replaced before memory/GGUF/Kijai patch installation.
 - **Streaming prefetch tuning for inpaint** (`_inpaint_streaming_prefetch_count`): returns explicit override unchanged; else `LTX_INPAINT_STREAM_PREFETCH` env var if frames ≥ 97; else default 2 for long (≥97f), None for short.
 - **Large inpaint stage-2 context window**: for long clips (>121f) or ≥1080p, `generate_inpaint` stamps the HDR-installed `_ltx_desktop_context_loop` config on `stage_2` before the full-res diffusion call, then clears it for non-large cached-stage reuse.
 - **`@torch.inference_mode()`** on `generate` and `generate_inpaint`.
@@ -51,20 +53,14 @@ Imported from `services.ltx_pipeline_common.encode_video_output`; forwards uncha
 
 ### `generate_inpaint` — frame production (a)
 
-`generate_inpaint(...)` (lines 442–837) runs the official LTX-2.3 two-stage IC-LoRA inpaint flow entirely inside this method (does not delegate the stages to `ICLoraPipeline`; only uses `self.pipeline.{prompt_encoder, image_conditioner, stage_1, stage_2, video_decoder, audio_decoder, device, dtype, reference_downscale_factor}`):
+`generate_inpaint(...)` is the sole in/outpaint implementation and delegates to `latent_inpaint.py`. It runs the two-stage latent flow using the IC-LoRA pipeline's prompt/image conditioning, diffusion stages, video decoder, device, dtype, and reference downscale factor:
 
 1. `assert_resolution(height, width, is_two_stage=True)`; `derive_stage_radii(mask_grow_px)` → `(stage1_radius, stage2_radius)`; `num_frames_vae_padded = _vae_padded_frame_count(num_frames)`.
-2. Encode prompt → `(video_context, audio_context)`.
-3. Load video (`decode_video_by_frame` + `video_preprocess`) at full + half res; pad to `num_frames_vae_padded` by repeating last frame. Load mask → grayscale `[0,1]`.
-4. Dilate masks: `dilate_video_mask(..., spatial_radius=stage1_radius|stage2_radius)` at full res; downscale stage1 mask to half res.
-5. `green_half = green_composite_preprocess(video_half, mask_stage1_half)`.
-6. **Stage 1** (half res, `DISTILLED_SIGMAS`, `SimpleDenoiser`): conditionings = `combined_image_conditionings(...)` + `_encode_green_guide_conditioning(enc, green_half, conditioning_strength)`; `self.pipeline.stage_1(...)` → `video_state_s1`.
-7. Decode stage 1 (`self.pipeline.video_decoder(video_state_s1.latent, tiling_config, generator)`) → `_collect_frames` → `(F, H_half, W_half, 3)` in [0,1]. `laplacian_pyramid_blend(decoded_s1, video_half_frames_01, mask_s1_blend, max_level=7, mask_low_res_dilation=INPAINT_BLEND1_LOW_RES_DILATION=5)` → `blend_stage1`.
-8. Upscale `blend_stage1` 2× (bicubic), convert `(F,3,H,W)→(1,3,F,H,W)` in [-1,1], trim to `_vae_compatible_frame_count`, tiled VAE encode via `image_conditioner(lambda enc: enc.tiled_encode(..., tiling_config))` → `encoded_blend`.
-9. **Stage 2** (full res, `STAGE_2_DISTILLED_SIGMAS[1:]` scaled so first sigma ≈ 0.55, `noise_scale=0.55`, `initial_latent=encoded_blend`; audio `noise_scale=stage2_sigmas[0].item()`, `initial_latent=audio_state_s1.latent`): large workloads stamp a rolling context-window config on `stage_2`; `self.pipeline.stage_2(...)` → `video_state_s2`, `audio_state_s2`. Optional: if `save_stage_1_preview`, encodes a half-res `<primary_stem>_stage1_preview.mp4` after the first-stage Laplacian blend; `generate_inpaint` returns the preview path (`str | None`).
-10. Decode stage 2 → `_collect_frames`. Stage 2 output used **directly** as `blend_stage2 = decoded_s2_frames` — the second `laplacian_pyramid_blend` and `_apply_raw_mask_guard` are **skipped** per the requested inpaint change (full-res decoded frames are the final output, no blend back to original video).
-11. (removed — raw-mask guard no longer applied)
-12. Decode audio: `decoded_audio = self.pipeline.audio_decoder(audio_state_s2.latent)`. Crop `blend_stage2 = blend_stage2[:num_actual_frames]`; `chunks = video_chunks_number(num_actual_frames, tiling_config)`.
+2. Encode prompt and load/pad the source video and grayscale mask. Dilate per-stage masks and make the Stage 1 green guide (`#66FF00`) at half resolution.
+3. Canonical inpaint shares the full prompt video context across both stages; it never uses transient or generated audio.
+4. Blend the Stage 1 latent with the source latent, then apply exactly one learned upsample.
+5. **Stage 2** uses `VideoConditionByMask` with the binary latent mask and the 0.55 schedule. Large-workload context policy may install a context loop; a Stage 1 preview remains optional.
+6. Decode and crop the Stage 2 video frames, then encode video only; Stage 2 and output encoding discard audio, so no audio muxing is used.
 
 ### `generate_inpaint` — encode call site (b)
 
@@ -73,7 +69,7 @@ Lines 830–836 — single encode call:
 ```python
 encode_video_output(
     video=blend_stage2.clamp(0, 1),                              # (F,H,W,3) float32 CPU tensor in [0,1]
-    audio=decoded_audio,                                       # Audio from audio_decoder
+    audio=None,                                                # canonical inpaint is video-only
     fps=int(frame_rate),
     output_path=output_path,
     video_chunks_number_value=chunks,                          # from num_actual_frames
@@ -106,4 +102,4 @@ The Ingredients T2V no-video path is `generate(..., video_conditioning=[], mask_
 - **`ltx_pipelines.utils.constants`**: `DISTILLED_SIGMAS`, `STAGE_2_DISTILLED_SIGMAS`.
 - **`kornia.geometry.transform.pyramid`**: `build_laplacian_pyramid`, `build_pyramid`, `PyrUp`, `find_next_powerof_two`, `is_powerof_two` (used by `official_inpaint.laplacian_pyramid_blend`).
 - **Depth/pose preprocessor pipelines**: when Union Control is enabled, `backend/services/depth_processor_pipeline` and `.../pose_processor_pipeline` produce conditioning frames consumed upstream of `video_conditioning` (see those codemaps).
-- Handler layer constructs via `LTXIcLoraPipeline.create(...)` and calls `.generate(...)` / `.generate_inpaint(...)`; see the relevant handler codemap for caller-supplied `output_path` resolution.
+- Handler layer constructs via `LTXIcLoraPipeline.create(...)` and calls `.generate(...)` / canonical `.generate_inpaint(...)`; see the relevant handler codemap for caller-supplied `output_path` resolution.

@@ -52,46 +52,31 @@ class TestIcLoraExtractConditioning:
         assert_http_error(response, status_code=409, code="NO_DOWNLOADED_LTX_MODEL")
 
 
-class TestIcLoraInpaintPipelineVersion:
+class TestIcLoraInpaintDispatch:
     def _payload(self, test_state, *, large: bool = False):
         from runtime_config.model_download_specs import OFFICIAL_LTX23_ADAPTERS
         adapter = test_state.config.default_models_dir / "adapters" / OFFICIAL_LTX23_ADAPTERS["in_outpainting"].filename
         adapter.parent.mkdir(parents=True, exist_ok=True); adapter.write_bytes(b"adapter")
-        video = test_state.config.outputs_dir / "v2-source.mp4"; video.write_bytes(b"video")
-        mask = test_state.config.outputs_dir / "v2-mask.mp4"; mask.write_bytes(b"mask")
+        video = test_state.config.outputs_dir / "inpaint-source.mp4"; video.write_bytes(b"video")
+        mask = test_state.config.outputs_dir / "inpaint-mask.mp4"; mask.write_bytes(b"mask")
         test_state.video_processor.register_video(
             str(video),
             FakeCapture(frames=["f"] * (193 if large else 9), width=1920 if large else 960, height=1080 if large else 576),
         )
         return {"video_path": str(video), "mask_path": str(mask), "adapter_id": "in_outpainting"}
 
-    def test_omitted_version_routes_v1(self, client, test_state, fake_services, create_fake_model_files, create_fake_ic_lora_files):
+    def test_ordinary_inpaint_routes_canonical_call(self, client, test_state, fake_services, create_fake_model_files, create_fake_ic_lora_files):
         create_fake_model_files(); create_fake_ic_lora_files()
         response = client.post("/api/ic-lora/generate", json=self._payload(test_state))
-        assert response.status_code == 200 and "inpaint_context_window_px" not in fake_services.ic_lora_pipeline.generate_calls[-1]
-
-    def test_null_version_routes_v1(self, client, test_state, fake_services, create_fake_model_files, create_fake_ic_lora_files):
-        create_fake_model_files(); create_fake_ic_lora_files(); payload = self._payload(test_state); payload["inpaint_pipeline_version"] = None
-        assert client.post("/api/ic-lora/generate", json=payload).status_code == 200
-        assert "inpaint_context_window_px" not in fake_services.ic_lora_pipeline.generate_calls[-1]
-
-    def test_explicit_v1_routes_v1(self, client, test_state, fake_services, create_fake_model_files, create_fake_ic_lora_files):
-        create_fake_model_files(); create_fake_ic_lora_files(); payload = self._payload(test_state); payload["inpaint_pipeline_version"] = "v1"
-        assert client.post("/api/ic-lora/generate", json=payload).status_code == 200
-        assert "inpaint_context_window_px" not in fake_services.ic_lora_pipeline.generate_calls[-1]
-
-    def test_explicit_v2_routes_v2_with_policy_context(self, client, test_state, fake_services, create_fake_model_files, create_fake_ic_lora_files):
-        create_fake_model_files(); create_fake_ic_lora_files(); payload = self._payload(test_state, large=True); payload["inpaint_pipeline_version"] = "v2"
-        assert client.post("/api/ic-lora/generate", json=payload).status_code == 200
+        assert response.status_code == 200
         call = fake_services.ic_lora_pipeline.generate_calls[-1]
-        assert (call["inpaint_context_window_px"], call["inpaint_context_overlap_px"]) == (65, 16)
+        assert (call["inpaint_context_window_px"], call["inpaint_context_overlap_px"]) == (None, None)
 
-    def test_non_inpaint_version_returns_stable_400(self, client):
-        response = client.post("/api/ic-lora/generate", json={"adapter_id": "ingredients", "inpaint_pipeline_version": "v2"})
-        assert_http_error(response, status_code=400, code="INPAINT_PIPELINE_VERSION_REQUIRES_IN_OUTPAINTING", message="inpaint_pipeline_version is only valid when adapter_id is 'in_outpainting'")
-
-    def test_invalid_version_returns_422(self, client):
-        assert client.post("/api/ic-lora/generate", json={"inpaint_pipeline_version": "broken"}).status_code == 422
+    def test_large_inpaint_routes_canonical_call_with_policy_context(self, client, test_state, fake_services, create_fake_model_files, create_fake_ic_lora_files):
+        create_fake_model_files(); create_fake_ic_lora_files()
+        assert client.post("/api/ic-lora/generate", json=self._payload(test_state, large=True)).status_code == 200
+        call = fake_services.ic_lora_pipeline.generate_calls[-1]
+        assert (call["inpaint_context_window_px"], call["inpaint_context_overlap_px"]) == (49, 16)
 
 
 class TestIcLoraGenerate:

@@ -41,12 +41,12 @@ def test_normal_workload_unchanged() -> None:
     assert plan.blockswap_prefetch is None
 
 
-class TestInpaintV2WorkloadPolicy:
+class TestInpaintWorkloadPolicy:
     def _large(self, tier: float | None):
-        return classify_lora_workload(workflow="in_outpainting", frame_count=193, width=1920, height=1088, vram_gib=tier, inpaint_pipeline_version="v2")
+        return classify_lora_workload(workflow="in_outpainting", frame_count=193, width=1920, height=1088, vram_gib=tier)
 
     def test_ordinary_has_no_context_override(self):
-        plan = classify_lora_workload(workflow="in_outpainting", frame_count=121, width=960, height=576, vram_gib=31, inpaint_pipeline_version="v2")
+        plan = classify_lora_workload(workflow="in_outpainting", frame_count=121, width=960, height=576, vram_gib=31)
         assert plan.inpaint_context_window_px is None and plan.inpaint_context_overlap_px is None
 
     def _tuple(self, tier: float | None):
@@ -63,7 +63,7 @@ class TestInpaintV2WorkloadPolicy:
     def test_large_policy_unknown(self): assert self._tuple(None) == (33, 8, 0, 0)
 
     def test_both_large_axes_reduce_residency(self):
-        one = classify_lora_workload(workflow="in_outpainting", frame_count=193, width=960, height=576, vram_gib=31, inpaint_pipeline_version="v2")
+        one = classify_lora_workload(workflow="in_outpainting", frame_count=193, width=960, height=576, vram_gib=31)
         assert (one.inpaint_context_window_px, one.inpaint_context_overlap_px, one.resident_blocks, one.blockswap_prefetch) == (65, 16, 37, None)
         assert self._tuple(31) == (65, 16, 26, None)
 

@@ -955,7 +955,6 @@ class RetakeRequest(BaseModel):
 
 
 ConditioningType: TypeAlias = Literal["canny", "depth"]
-InpaintPipelineVersion: TypeAlias = Literal["v1", "v2"]
 
 
 class IcLoraExtractRequest(BaseModel):
@@ -1006,7 +1005,6 @@ class IcLoraGenerateRequest(BaseModel):
     # ``None`` preserves the legacy active-profile/downloaded-model routing.
     model_selection: ModelSelectionID | None = None
     mask_path: str | None = None
-    inpaint_pipeline_version: InpaintPipelineVersion | None = None
     mask_grow_px: int = Field(default=30, ge=0, le=128, description="Mask dilation radius in pixels. Controls LTXVDilateVideoMask radii. 0=no dilation, default=30 matches official full-res (stage2) radius")
     lora_strength: float = Field(default=1.0, ge=0.0, le=2.0)
     save_stage_1_preview: bool = False

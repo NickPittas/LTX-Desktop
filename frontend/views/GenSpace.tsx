@@ -12,7 +12,7 @@ import { useGeneration } from '../hooks/use-generation'
 import { useVideoGenerationModelSpecs } from '../hooks/use-video-generation-model-specs'
 import { createLocalGenerationError, type GenerationError } from '../lib/generation-errors'
 import { useRetake } from '../hooks/use-retake'
-import { useIcLora, type InpaintPipelineVersion } from '../hooks/use-ic-lora'
+import { useIcLora } from '../hooks/use-ic-lora'
 import { useModelSelectionOptions } from '../hooks/use-model-selection-options'
 import { useModelProfiles } from '../hooks/use-model-profiles'
 import type { ModelSelectionID, ModelSelectionOption, ModelSelectionWorkflow } from '../lib/model-selection'
@@ -1692,7 +1692,6 @@ export function GenSpace() {
   const [icLoraCondType, setIcLoraCondType] = useState<ICLoraConditioningType>(null)
   const [icLoraStrength, setIcLoraStrength] = useState(1.0)
   const [loraStrength, setLoraStrength] = useState(1.0)
-  const [inpaintPipelineVersion, setInpaintPipelineVersion] = useState<InpaintPipelineVersion>('v1')
   const [icLoraInitial, setIcLoraInitial] = useState<{
     videoPath: string | null
     previewPath?: string | null
@@ -1774,7 +1773,6 @@ export function GenSpace() {
       videoPath: genSpaceIcLoraSource.videoPath,
       previewPath: genSpaceIcLoraSource.previewPath,
     })
-    setInpaintPipelineVersion('v1')
     setIcLoraPanelKey((prev) => prev + 1)
     setGenSpaceIcLoraSource(null)
   }, [genSpaceIcLoraSource, forceApiGenerations, setGenSpaceIcLoraSource])
@@ -1969,7 +1967,6 @@ export function GenSpace() {
         outputFormat: settings.outputFormat,
         modelSelection: settings.modelSelection ?? null,
         saveStage1Preview: settings.saveStage1Preview,
-        inpaintPipelineVersion: icLoraInput.adapterId === 'in_outpainting' ? inpaintPipelineVersion : undefined,
         ...(isIngredients
           ? { width: icWidth, height: icHeight, numFrames: icNumFrames }
           : {}),
@@ -2565,8 +2562,6 @@ export function GenSpace() {
             onConditioningTypeChange={setIcLoraCondType}
             conditioningStrength={icLoraStrength}
             onConditioningStrengthChange={setIcLoraStrength}
-            inpaintPipelineVersion={inpaintPipelineVersion}
-            onInpaintPipelineVersionChange={setInpaintPipelineVersion}
             outputVideoPath={icLoraResult?.videoPath || null}
             outputProxyPath={icLoraResult?.proxyPath || null}
             onChange={setIcLoraInput}
@@ -2759,7 +2754,6 @@ export function GenSpace() {
               setLocalError(null)
               resetRetake()
               resetIcLora()
-              setInpaintPipelineVersion('v1')
             }
           }}
         />

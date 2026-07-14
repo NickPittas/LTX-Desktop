@@ -82,19 +82,6 @@ class IcLoraPipeline(Protocol):
         input_colorspace: ColorSpace | None = None,
         on_phase_update: Callable[[str, str | None], None] | None = None,
         save_stage_1_preview: bool = False,
-    ) -> str | None:
-        ...
-
-    def generate_inpaint_v2(
-        self, prompt: str, seed: int, height: int, width: int, num_frames: int,
-        frame_rate: float, images: list[ImageConditioningInput], video_path: str,
-        mask_path: str, output_path: str, conditioning_strength: float = 1.0,
-        mask_grow_px: int = 30, output_format: OutputFormat = OutputFormat.MP4,
-        encoder: MediaEncoder | None = None, proxy_path: str | None = None,
-        on_progress: Callable[[float], None] | None = None,
-        input_colorspace: ColorSpace | None = None,
-        on_phase_update: Callable[[str, str | None], None] | None = None,
-        save_stage_1_preview: bool = False,
         inpaint_context_window_px: int | None = None,
         inpaint_context_overlap_px: int | None = None,
     ) -> str | None:

@@ -3,11 +3,9 @@ import { ApiClient, type ApiRequestBodyOf } from '../lib/api-client'
 import { logger } from '../lib/logger'
 import type { OutputFormat } from '../lib/output-formats'
 import type { ModelSelectionID } from '../lib/model-selection'
-import type { components } from '../generated/backend-openapi'
 import { getPhaseMessage } from './use-generation'
 
 export type IcLoraConditioningType = 'canny' | 'depth'
-export type InpaintPipelineVersion = NonNullable<components['schemas']['IcLoraGenerateRequest']['inpaint_pipeline_version']>
 
 export interface IcLoraSubmitParams {
   videoPath: string | null
@@ -26,7 +24,6 @@ export interface IcLoraSubmitParams {
   outputFormat?: OutputFormat
   modelSelection?: ModelSelectionID | null
   saveStage1Preview?: boolean
-  inpaintPipelineVersion?: InpaintPipelineVersion
 }
 
 export interface IcLoraResult {
@@ -126,9 +123,6 @@ export function useIcLora() {
     }
     if (params.saveStage1Preview) {
       body.save_stage_1_preview = true
-    }
-    if (params.adapterId === 'in_outpainting' && params.inpaintPipelineVersion !== undefined) {
-      body.inpaint_pipeline_version = params.inpaintPipelineVersion
     }
 
     // Poll the shared generation-progress endpoint for live metrics while the

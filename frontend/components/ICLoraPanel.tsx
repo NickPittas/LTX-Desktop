@@ -8,7 +8,6 @@ import { logger } from '../lib/logger'
 import { pathToFileUrl } from '../lib/file-url'
 import { useHfAuth } from '../hooks/use-hf-auth'
 import { useHfModelAccess } from '../hooks/use-hf-model-access'
-import type { InpaintPipelineVersion } from '../hooks/use-ic-lora'
 
 const BROWSER_VIDEO_EXTS = new Set(['mp4', 'webm'])
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'])
@@ -28,8 +27,6 @@ interface ICLoraPanelProps {
   onConditioningTypeChange?: (type: ICLoraConditioningType) => void
   conditioningStrength?: number
   onConditioningStrengthChange?: (strength: number) => void
-  inpaintPipelineVersion: InpaintPipelineVersion
-  onInpaintPipelineVersionChange: (version: InpaintPipelineVersion) => void
   outputVideoPath?: string | null
   outputProxyPath?: string | null
   onChange?: (data: {
@@ -107,8 +104,6 @@ export function ICLoraPanel({
   onConditioningTypeChange,
   conditioningStrength: conditioningStrengthProp,
   onConditioningStrengthChange,
-  inpaintPipelineVersion,
-  onInpaintPipelineVersionChange,
   outputVideoPath: _outputVideoPath,
   outputProxyPath: _outputProxyPath,
   onChange,
@@ -298,12 +293,11 @@ export function ICLoraPanel({
     setIngredientPaths([])
     setMaskGrowPx(30)
     setFirstFrameAnchorPath(null)
-    onInpaintPipelineVersionChange('v1')
     onConditioningTypeChange?.(null)
     onConditioningStrengthChange?.(1.0)
     setConditioningPreview(null)
     setExtractError(null)
-  }, [resetKey, initialVideoPath, onInpaintPipelineVersionChange]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [resetKey, initialVideoPath]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const selectedEntry = getAdapterEntry(internalAdapterId)
@@ -525,8 +519,7 @@ export function ICLoraPanel({
     setInputTime(0)
     setConditioningPreview(null)
     setExtractError(null)
-    onInpaintPipelineVersionChange('v1')
-  }, [onInpaintPipelineVersionChange])
+  }, [])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -1003,20 +996,6 @@ export function ICLoraPanel({
             <div className="px-3 py-2 border-b border-zinc-800 flex items-center gap-2">
               <span className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">Output</span>
               <div className="flex-1" />
-              {selectedWorkflow === 'in_outpainting' && (
-                <label className="flex items-center gap-1 text-[10px] text-zinc-500 whitespace-nowrap">
-                  <span>Pipeline</span>
-                  <select
-                    value={inpaintPipelineVersion}
-                    onChange={(e) => onInpaintPipelineVersionChange(e.target.value as InpaintPipelineVersion)}
-                    disabled={isProcessing}
-                    className="bg-zinc-800 text-[10px] text-zinc-300 border border-zinc-700 rounded px-1.5 py-1 cursor-pointer focus:outline-none focus:border-zinc-500 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <option value="v1">Current</option>
-                    <option value="v2">Latent V2 (Experimental)</option>
-                  </select>
-                </label>
-              )}
               <select
                 value={internalAdapterId ?? ''}
                 onChange={(e) => {
@@ -1025,7 +1004,6 @@ export function ICLoraPanel({
                   setInternalAdapterId(val || null)
                   setInternalCondType(null)
                   onConditioningTypeChange?.(null)
-                  onInpaintPipelineVersionChange('v1')
     setMaskPath(null)
     setMaskPreviewPath(null)
     setMaskPreviewTranscoding(false)

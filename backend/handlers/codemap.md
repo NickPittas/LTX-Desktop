@@ -180,10 +180,9 @@ path (profile→typed field→`models_dir`), falling back to the legacy
 `_require_ic_lora_model_paths(conditioning_type, require_lora=True)` checkpoint.
 `lora_paths` stacks base + adapter; `lora_strength` is forwarded into
 `pipelines.load_ic_lora(..., lora_strength=req.lora_strength)`. For
-`in_outpainting` defaults to `ic_state.pipeline.generate_inpaint(...)` (V1); an
-explicit `inpaint_pipeline_version="v2"` dispatches to `generate_inpaint_v2(...)`
-with the workload plan's V2-local context window/overlap. The version is rejected
-before loading for every non-in/outpainting adapter; otherwise
+`in_outpainting` always dispatches to canonical `ic_state.pipeline.generate_inpaint(...)`;
+large workloads receive its context policy. There is no pipeline-version request
+field or dispatch. Otherwise
 `pipeline.generate(...)` with `video_conditioning=[(control_video_path,
 conditioning_strength)]`. Canny/depth control videos are built frame-by-frame
 through `_build_conditioning_frame` (depth requires `ic_state.depth_pipeline`)

@@ -16,8 +16,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from api_types import InpaintPipelineVersion
-
 # >121 padded frames is the "long clip" threshold (matches the HDR context-window
 # and block_offload resident-policy cutoffs). >=1080p is "large pixels".
 _LARGE_FRAME_THRESHOLD = 121
@@ -92,7 +90,6 @@ def classify_lora_workload(
     width: int | None,
     height: int | None,
     vram_gib: float | None = None,
-    inpaint_pipeline_version: InpaintPipelineVersion | None = None,
 ) -> LoraWorkloadPlan:
     """Classify an IC-LoRA run and pick compensation knobs.
 
@@ -118,8 +115,8 @@ def classify_lora_workload(
     if not (large_duration or large_pixels):
         return LoraWorkloadPlan(label="normal")
 
-    if workflow == "in_outpainting" and inpaint_pipeline_version == "v2":
-        # V2 receives the handler's single authoritative snapshot; probing again
+    if workflow == "in_outpainting":
+        # Inpaint receives the handler's single authoritative snapshot; probing again
         # here could classify a different effective-VRAM state.
         vram = vram_gib
         both_axes = large_duration and large_pixels
@@ -136,7 +133,7 @@ def classify_lora_workload(
         else:
             resident, window, overlap, prefetch = (26 if both_axes else 37), 65, 16, None
         return LoraWorkloadPlan(
-            label=f"inpaint_v2:large:ctx{window}",
+            label=f"inpaint:large:ctx{window}",
             resident_blocks=resident,
             blockswap_prefetch=prefetch,
             inpaint_context_window_px=window,

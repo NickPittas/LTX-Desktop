@@ -696,6 +696,8 @@ class FakeIcLoraPipeline:
         input_colorspace: Any = None,
         on_phase_update: Any = None,
         save_stage_1_preview: bool = False,
+        inpaint_context_window_px: int | None = None,
+        inpaint_context_overlap_px: int | None = None,
     ) -> None:
         kwargs: dict[str, Any] = {
             "prompt": prompt,
@@ -717,33 +719,16 @@ class FakeIcLoraPipeline:
             "input_colorspace": input_colorspace,
             "on_phase_update": on_phase_update,
             "save_stage_1_preview": save_stage_1_preview,
+            "inpaint_context_window_px": inpaint_context_window_px,
+            "inpaint_context_overlap_px": inpaint_context_overlap_px,
         }
         self.generate_calls.append(kwargs)
         if self.raise_on_generate is not None:
             raise self.raise_on_generate
 
-        output_path = Path(str(kwargs["output_path"]))
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(b"fake-ic-lora-inpaint-video")
-
-    def generate_inpaint_v2(
-        self, prompt: str, seed: int, height: int, width: int, num_frames: int,
-        frame_rate: float, images: list[ImageConditioningInput], video_path: str,
-        mask_path: str, output_path: str, conditioning_strength: float = 1.0,
-        mask_grow_px: int = 30, output_format: OutputFormat = OutputFormat.MP4,
-        encoder: Any = None, proxy_path: str | None = None, on_progress: Any = None,
-        input_colorspace: Any = None, on_phase_update: Any = None,
-        save_stage_1_preview: bool = False, inpaint_context_window_px: int | None = None,
-        inpaint_context_overlap_px: int | None = None,
-    ) -> None:
-        kwargs: dict[str, Any] = locals().copy()
-        kwargs.pop("self")
-        self.generate_calls.append(kwargs)
-        if self.raise_on_generate is not None:
-            raise self.raise_on_generate
-        output_path = Path(str(kwargs["output_path"]))
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(b"fake-ic-lora-inpaint-v2-video")
+        output_file = Path(str(kwargs["output_path"]))
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        output_file.write_bytes(b"fake-ic-lora-inpaint-video")
 
 class FakeHdrIcLoraPipeline:
     """Test double for :class:`HdrIcLoraPipeline` (dedicated HDR IC-LoRA path).

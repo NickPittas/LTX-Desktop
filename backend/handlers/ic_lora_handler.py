@@ -711,12 +711,6 @@ class IcLoraHandler(StateHandlerBase):
         workflow: str | None = _ADAPTER_WORKFLOW.get(req.adapter_id) if req.adapter_id else None
         if workflow is None and req.adapter_id is None and req.conditioning_type is not None:
             workflow = "union_control"
-        if req.inpaint_pipeline_version is not None and workflow != "in_outpainting":
-            raise HTTPError(
-                400,
-                "inpaint_pipeline_version is only valid when adapter_id is 'in_outpainting'",
-                code="INPAINT_PIPELINE_VERSION_REQUIRES_IN_OUTPAINTING",
-            )
         if self._generation.is_generation_running():
             raise HTTPError(409, "Generation already in progress")
         if workflow in _UNAVAILABLE_WORKFLOWS:
@@ -806,9 +800,6 @@ class IcLoraHandler(StateHandlerBase):
                     400,
                     f"First-frame anchor image not found: {req.images[0].path}",
                 )
-        effective_inpaint_pipeline_version = (
-            (req.inpaint_pipeline_version or "v1") if workflow == "in_outpainting" else None
-        )
         # ponytail: in_outpainting allows empty prompt; other adapters require non-blank
         if workflow != "in_outpainting" and not (req.prompt or "").strip():
             raise HTTPError(400, "Prompt is required for this adapter")
@@ -888,7 +879,6 @@ class IcLoraHandler(StateHandlerBase):
             width=_classification_width,
             height=_classification_height,
             vram_gib=float(_snap.effective_tier_gib) if _snap.effective_tier_gib is not None else None,
-            inpaint_pipeline_version=effective_inpaint_pipeline_version,
         )
         _wl_set_envs = _apply_lora_workload_envs(_wl_plan, _classification_frames, hdr=False)
         _wl_mode = _wl_plan.summary()
@@ -1089,14 +1079,11 @@ class IcLoraHandler(StateHandlerBase):
                     on_phase_update=_phase_update,
                     save_stage_1_preview=req.save_stage_1_preview,
                 )
-                if effective_inpaint_pipeline_version == "v2":
-                    _stage1_preview = ic_state.pipeline.generate_inpaint_v2(
-                        **_inpaint_kwargs,
-                        inpaint_context_window_px=_wl_plan.inpaint_context_window_px,
-                        inpaint_context_overlap_px=_wl_plan.inpaint_context_overlap_px,
-                    )
-                else:
-                    _stage1_preview = ic_state.pipeline.generate_inpaint(**_inpaint_kwargs)
+                _stage1_preview = ic_state.pipeline.generate_inpaint(
+                    **_inpaint_kwargs,
+                    inpaint_context_window_px=_wl_plan.inpaint_context_window_px,
+                    inpaint_context_overlap_px=_wl_plan.inpaint_context_overlap_px,
+                )
             else:
                 _stage1_preview = None
                 ic_state.pipeline.generate(

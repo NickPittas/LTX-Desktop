@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import cv2
@@ -14,15 +14,17 @@ import torch
 from services.ic_lora_pipeline.ltx_ic_lora_pipeline import (
     LTXIcLoraPipeline,
     _vae_compatible_frame_count,
-    _vae_padded_frame_count,
 )
-from services.ic_lora_pipeline.inpaint_v2 import (
+from services.ic_lora_pipeline.latent_inpaint import (
+    OFFICIAL_NEGATIVE_PROMPT,
+    InpaintTargetGuideAttention,
+    _stage1_cfg_pp_ancestral_loop,
     _windows,
     blend_half_latents,
-    build_inpaint_v2_context_config,
+    build_inpaint_context_config,
     mask_to_latent_denoise_mask,
 )
-import services.ic_lora_pipeline.inpaint_v2 as inpaint_v2
+import services.ic_lora_pipeline.latent_inpaint as latent_inpaint
 
 
 @dataclass
@@ -34,16 +36,27 @@ class _State:
     attention_mask: torch.Tensor | None = None
 
 
-class _V2Harness:
-    """Small recording pipeline that runs the real V2 function on CPU."""
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, preview: bool = False, context: bool = False) -> None:
+class _InpaintHarness:
+    """Small recording pipeline that runs the real latent-inpaint function on CPU."""
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, preview: bool = False, context: bool = False, *, prompt: str = "p", images: list[Any] | None = None, mask_active: bool = True) -> None:
         from ltx_core import conditioning
         from ltx_core.components import noisers
         from ltx_pipelines.utils import constants, denoisers, helpers, media_io, types
         import services.exr_input as exr_input
         self.calls: list[tuple[str, Any]] = []; self.encoded: list[dict[str, Any]] = []
         self.device, self.dtype, self.preview, self.context = torch.device("cpu"), torch.float32, preview, context
-        self.prompt_encoder = lambda *_args, **_kwargs: (type("Prompt", (), {"video_encoding": "context"})(),)
+        self.prompt, self.images, self.mask_active, self.blend_masks = prompt, images or [], mask_active, []
+        self.video_encoding = torch.tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]]])
+        self.audio_encoding = object()
+        self.prompt_batches: list[list[str]] = []
+        def prompt_encoder(prompts: list[str], **_kwargs: Any) -> tuple[Any, ...]:
+            self.prompt_batches.append(prompts)
+            return tuple(type("Prompt", (), {
+                "video_encoding": self.video_encoding + index,
+                "attention_mask": torch.tensor([[1, 1, 0, 0]]),
+                "audio_encoding": self.audio_encoding,
+            })() for index, _ in enumerate(prompts))
+        self.prompt_encoder = prompt_encoder
         self.stage_1 = lambda **kwargs: self._stage1(**kwargs)
         self.stage_2 = lambda **kwargs: self._stage2(**kwargs)
         self.upsampler, self.video_decoder = self._upsample, self._decode
@@ -51,13 +64,27 @@ class _V2Harness:
         monkeypatch.setattr(helpers, "combined_image_conditionings", lambda **_: ["anchor"])
         monkeypatch.setattr(exr_input, "iter_video_frames_to_model_domain", lambda *_, **__: iter(["source"]))
         monkeypatch.setattr(media_io, "decode_video_by_frame", lambda **_: iter(["mask"]))
-        monkeypatch.setattr(media_io, "video_preprocess", lambda frames, h, w, *_: torch.full((1, 3, 3 if next(frames) == "source" else 9, h, w), -1.0))
-        monkeypatch.setattr(constants, "DISTILLED_SIGMAS", torch.tensor([1.0, 0.0])); monkeypatch.setattr(constants, "STAGE_2_DISTILLED_SIGMAS", torch.tensor([0.9, 0.5, 0.0]))
+        def video_preprocess(frames: Any, h: int, w: int, *_: Any) -> torch.Tensor:
+            kind = next(frames)
+            if kind == "source":
+                return torch.full((1, 3, 3, h, w), -1.0)
+            return torch.full((1, 3, 9, h, w), 1.0 if self.mask_active else -1.0)
+
+        original_blend_half_latents = blend_half_latents
+
+        def record_blend_masks(*args: Any, **kwargs: Any) -> torch.Tensor:
+            self.blend_masks.append(args[2])
+            return original_blend_half_latents(*args, **kwargs)
+
+        monkeypatch.setattr(media_io, "video_preprocess", video_preprocess)
+        monkeypatch.setattr(latent_inpaint, "blend_half_latents", record_blend_masks)
+        monkeypatch.setattr(constants, "DISTILLED_SIGMAS", torch.tensor([1.0, 0.0])); monkeypatch.setattr(constants, "STAGE_2_DISTILLED_SIGMAS", torch.tensor([0.909375, 0.725, 0.421875, 0.0]))
         monkeypatch.setattr(denoisers, "SimpleDenoiser", lambda *args: args); monkeypatch.setattr(noisers, "GaussianNoiser", lambda **kwargs: kwargs)
         monkeypatch.setattr(types, "ModalitySpec", lambda **kwargs: type("Spec", (), kwargs)())
-        monkeypatch.setattr(conditioning, "VideoConditionByReferenceLatent", lambda **kwargs: ("green", kwargs))
+        monkeypatch.setattr(conditioning, "VideoConditionByKeyframeIndex", lambda **kwargs: ("keyframe", kwargs))
         monkeypatch.setattr(conditioning, "VideoConditionByMask", lambda **kwargs: ("preserve", kwargs))
-        monkeypatch.setattr(inpaint_v2, "encode_video_output", lambda **kwargs: self.encoded.append(kwargs))
+        monkeypatch.setattr(latent_inpaint, "make_ltx_image_conditioning_input", lambda *args: args)
+        monkeypatch.setattr(latent_inpaint, "encode_video_output", lambda **kwargs: self.encoded.append(kwargs))
 
     def image_conditioner(self, callback: Any) -> list[Any]:
         outer = self
@@ -68,17 +95,24 @@ class _V2Harness:
         return callback(Encoder())
 
     def _stage1(self, **kwargs: Any) -> tuple[_State, None]: self.calls.append(("stage1", kwargs)); return _State(torch.full((1, 2, 2, 1, 1), 7.0)), None
-    def _upsample(self, latent: torch.Tensor) -> torch.Tensor: self.calls.append(("upsample", latent.clone())); return latent.clone()
+    def _upsample(self, latent: torch.Tensor) -> torch.Tensor:
+        self.calls.append(("upsample", latent.clone())); self.stage2_initial = latent.clone(); return self.stage2_initial
     def _stage2(self, **kwargs: Any) -> tuple[_State, None]: self.calls.append(("stage2", kwargs)); return _State(kwargs["video"].initial_latent.clone()), None
     def _decode(self, latent: torch.Tensor, *_: Any) -> list[torch.Tensor]: self.calls.append(("decode", latent.clone())); return [torch.zeros(9, 2, 2, 3)]
     def run(self) -> None:
-        inpaint_v2.generate_inpaint_v2(type("Outer", (), {"pipeline": self})(), prompt="p", seed=4, height=64, width=64, num_frames=9, frame_rate=24, images=[], video_path="source", mask_path="mask", output_path="out.mp4", save_stage_1_preview=self.preview, inpaint_context_window_px=33 if self.context else None, inpaint_context_overlap_px=8 if self.context else None)
+        latent_inpaint.generate_inpaint(type("Outer", (), {"pipeline": self})(), prompt=self.prompt, seed=4, height=64, width=64, num_frames=9, frame_rate=24, images=self.images, video_path="source", mask_path="mask", output_path="out.mp4", save_stage_1_preview=self.preview, inpaint_context_window_px=33 if self.context else None, inpaint_context_overlap_px=8 if self.context else None)
 
 
-class TestInpaintV2MaskConversion:
+class TestInpaintMaskConversion:
     def test_all_black(self): assert torch.equal(mask_to_latent_denoise_mask(torch.zeros(9, 32, 32), torch.zeros(1, 2, 2, 1, 1)), torch.zeros(1, 1, 2, 1, 1))
     def test_all_white(self): assert torch.equal(mask_to_latent_denoise_mask(torch.ones(9, 32, 32), torch.zeros(1, 2, 2, 1, 1)), torch.ones(1, 1, 2, 1, 1))
-    def test_fractional_spatial_edge(self): assert 0 < mask_to_latent_denoise_mask(torch.tensor([[[0., 1.], [0., 1.]]]), torch.zeros(1, 2, 1, 1, 3))[0, 0, 0, 0, 1] < 1
+    def test_mask_to_latent_denoise_mask_thresholds_compressed_values_to_binary(self):
+        mask = torch.tensor([[[0.49, 0.5, 0.51]]] + [[[0.0, 0.0, 0.0]]] * 4 + [[[1.0, 0.0, 0.0]]] + [[[0.0, 0.0, 0.0]]] * 3)
+        result = mask_to_latent_denoise_mask(mask, torch.zeros(1, 2, 2, 1, 3))
+        assert result.shape == (1, 1, 2, 1, 3)
+        assert torch.equal(result[0, 0, 0, 0], torch.tensor([0.0, 1.0, 1.0]))
+        assert result[0, 0, 1, 0, 0] == 1
+        assert set(result.unique().tolist()) <= {0.0, 1.0}
     def test_frame_zero_causal_mapping(self): assert mask_to_latent_denoise_mask(torch.cat([torch.ones(1, 2, 2), torch.zeros(8, 2, 2)]), torch.zeros(1, 2, 2, 1, 1))[0, 0, 0, 0, 0] == 1
     def test_later_group_uses_temporal_max(self):
         mask = torch.zeros(9, 2, 2); mask[5] = 1; assert mask_to_latent_denoise_mask(mask, torch.zeros(1, 2, 2, 1, 1))[0, 0, 1, 0, 0] == 1
@@ -86,127 +120,287 @@ class TestInpaintV2MaskConversion:
     def test_half_and_full_mask_direction(self): assert torch.all(blend_half_latents(torch.ones(1, 2, 1, 1, 1), torch.zeros(1, 2, 1, 1, 1), torch.ones(1, 1, 1, 1, 1)) == 1)
 
 
-class TestInpaintV2LatentBridge:
-    def test_stage1_receives_anchor_and_full_green_reference(self, monkeypatch: pytest.MonkeyPatch):
-        h = _V2Harness(monkeypatch); h.run(); s = next(v for n, v in h.calls if n == "stage1")
-        assert s["audio"] is None and s["video"].conditionings[0] == "anchor" and s["video"].conditionings[-1][0] == "green"
+class TestInpaintLatentBridge:
+    def test_stage1_receives_anchor_and_keyframe_guide(self, monkeypatch: pytest.MonkeyPatch):
+        h = _InpaintHarness(monkeypatch); h.run(); s = next(v for n, v in h.calls if n == "stage1")
+        guide = s["video"].conditionings[-1]
+        assert s["video"].conditionings[0] == "anchor"
+        assert isinstance(guide, InpaintTargetGuideAttention)
+        inner = guide.inner
+        assert inner[0] == "keyframe"
+        assert inner[1]["frame_idx"] == 0 and inner[1]["num_pixel_frames"] == 9
+        assert inner[1]["strength"] == 1.0
     def test_half_latent_composition(self, monkeypatch: pytest.MonkeyPatch):
-        h = _V2Harness(monkeypatch); h.run(); assert torch.equal(next(v for n, v in h.calls if n == "upsample"), torch.full((1, 2, 2, 1, 1), 3.0))
+        h = _InpaintHarness(monkeypatch); h.run(); assert torch.equal(next(v for n, v in h.calls if n == "upsample"), torch.full((1, 2, 2, 1, 1), 7.0))
     def test_upsampler_called_once_with_exact_blend(self, monkeypatch: pytest.MonkeyPatch):
-        h = _V2Harness(monkeypatch); h.run(); assert [n for n, _ in h.calls].count("upsample") == 1
+        h = _InpaintHarness(monkeypatch); h.run(); assert [n for n, _ in h.calls].count("upsample") == 1
     def test_no_intermediate_decode_or_reencode(self, monkeypatch: pytest.MonkeyPatch):
-        h = _V2Harness(monkeypatch); h.run(); names = [n for n, _ in h.calls]; assert names.index("upsample") < names.index("decode") and names.count("encode") == 2
-    def test_video_condition_by_mask_applied_last_before_noiser(self, monkeypatch: pytest.MonkeyPatch):
-        h = _V2Harness(monkeypatch); h.run(); assert next(v for n, v in h.calls if n == "stage2")["video"].conditionings[-1][0] == "preserve"
+        h = _InpaintHarness(monkeypatch); h.run(); names = [n for n, _ in h.calls]; assert names.index("upsample") < names.index("decode") and names.count("encode") == 2
+    def test_stage2_uses_only_the_preserve_conditioning(self, monkeypatch: pytest.MonkeyPatch):
+        h = _InpaintHarness(monkeypatch); h.run()
+        conditionings = next(v for n, v in h.calls if n == "stage2")["video"].conditionings
+        assert len(conditionings) == 1 and conditionings[0][0] == "preserve"
+        assert conditionings[0][1]["latent"] is h.stage2_initial
+        assert conditionings[0][1]["strength"] == 1.0
+    def test_green_guide_gate_bypasses_blank_prompt_images_and_empty_mask(self, monkeypatch: pytest.MonkeyPatch):
+        wrapped = _InpaintHarness(monkeypatch, mask_active=True); wrapped.run()
+        guide = next(v for n, v in wrapped.calls if n == "stage1")["video"].conditionings[-1]
+        assert isinstance(guide, InpaintTargetGuideAttention) and guide.target_mask is wrapped.blend_masks[0]
+        wrapped_stage1 = next(v for n, v in wrapped.calls if n == "stage1")
+        wrapped_stage2 = next(v for n, v in wrapped.calls if n == "stage2")
+        ancestral = next(cell.cell_contents for cell in wrapped_stage1["loop"].__closure__ if isinstance(cell.cell_contents, torch.Generator))
+        assert wrapped.prompt_batches == [["p", OFFICIAL_NEGATIVE_PROMPT]] and callable(wrapped_stage1["loop"]) and wrapped_stage2["loop"] is None and wrapped_stage1["noiser"]["generator"] is not ancestral
+        for prompt, images, active in [("", [], True), ("  ", [], True), ("p", [SimpleNamespace(path="x", frame_idx=0, strength=1.0)], True), ("p", [], False)]:
+            harness = _InpaintHarness(monkeypatch, prompt=prompt, images=images, mask_active=active); harness.run()
+            guide = next(v for n, v in harness.calls if n == "stage1")["video"].conditionings[-1]
+            stage1 = next(v for n, v in harness.calls if n == "stage1")
+            stage2 = next(v for n, v in harness.calls if n == "stage2")
+            assert guide[0] == "keyframe" and harness.prompt_batches == [[prompt]] and "loop" not in stage1 and stage2["loop"] is None
 
 
-class TestInpaintV2Stage2:
-    def test_official_sigmas_and_noise_scale(self, monkeypatch: pytest.MonkeyPatch):
-        h = _V2Harness(monkeypatch); h.run(); s = next(v for n, v in h.calls if n == "stage2"); assert torch.equal(s["sigmas"], torch.tensor([0.9, .5, 0.])) and s["video"].noise_scale == pytest.approx(.9)
-    def test_stage1_and_stage2_are_video_only(self, monkeypatch: pytest.MonkeyPatch):
-        h = _V2Harness(monkeypatch); h.run(); assert all(v["audio"] is None for n, v in h.calls if n.startswith("stage"))
+class TestInpaintTargetGuideAttention:
+    class _Tools:
+        class target_shape:
+            @staticmethod
+            def token_count() -> int: return 8
+        class patchifier:
+            @staticmethod
+            def patchify(mask: torch.Tensor) -> torch.Tensor:
+                return mask.flatten()[torch.tensor([5, 0, 7, 2, 4, 1, 6, 3])].view(1, 8, 1)
+
+    class _Inner:
+        def __init__(self, guide_count: int = 8) -> None: self.guide_count = guide_count
+        def apply_to(self, state: _State, _tools: Any) -> _State:
+            return _State(torch.cat((state.latent, torch.zeros(1, self.guide_count, 1)), dim=1))
+
+    def test_asymmetric_mask_local_target_to_guide_isolation_in_patchifier_order(self):
+        mask = torch.tensor([[[[[0., 1.], [0., 0.]], [[0., 1.], [0., 1.]]]]])
+        result = InpaintTargetGuideAttention(self._Inner(), mask).apply_to(_State(torch.arange(8.).view(1, 8, 1)), self._Tools())
+        assert result.attention_mask is not None and result.attention_mask.shape == (1, 16, 16)
+        masked = torch.tensor([True, False, True, False, False, True, False, False])
+        assert torch.all(~result.attention_mask[0, :8, 8:][masked])
+        assert torch.all(result.attention_mask[0, 8:, :8])
+        assert torch.all(result.attention_mask[0, :8, :8]) and torch.all(result.attention_mask[0, 8:, 8:]) and torch.all(result.attention_mask[0, :8, 8:][~masked])
+
+    @pytest.mark.parametrize("state,mask,inner", [
+        (_State(torch.zeros(2, 8, 1)), torch.zeros(1, 1, 2, 2, 2), _Inner()),
+        (_State(torch.zeros(1, 8, 1)), torch.zeros(2, 1, 2, 2, 2), _Inner()),
+        (_State(torch.zeros(1, 7, 1)), torch.zeros(1, 1, 2, 2, 2), _Inner()),
+        (_State(torch.zeros(1, 8, 1), attention_mask=torch.ones(1, 8, 8)), torch.zeros(1, 1, 2, 2, 2), _Inner()),
+        (_State(torch.zeros(1, 8, 1)), torch.zeros(1, 1, 1, 1, 1), _Inner()),
+        (_State(torch.zeros(1, 8, 1)), torch.zeros(1, 1, 2, 2, 2), _Inner(7)),
+    ])
+    def test_rejects_invalid_batch_shape_existing_mask_original_or_guide_count(self, state: _State, mask: torch.Tensor, inner: Any):
+        with pytest.raises(ValueError): InpaintTargetGuideAttention(inner, mask).apply_to(state, self._Tools())
+
+
+class TestInpaintStage2:
+    def test_accepted_stage2_sigmas_and_noise_scale(self, monkeypatch: pytest.MonkeyPatch):
+        h = _InpaintHarness(monkeypatch); h.run(); s = next(v for n, v in h.calls if n == "stage2")
+        assert torch.allclose(s["sigmas"], torch.tensor([0.55, 0.55 * 0.421875 / 0.725, 0.0]))
+        assert s["video"].noise_scale == pytest.approx(0.55) and s["video"].initial_latent is h.stage2_initial
+    def test_full_prompt_context_is_shared_by_video_only_stages(self, monkeypatch: pytest.MonkeyPatch):
+        h = _InpaintHarness(monkeypatch); h.run()
+        stage1 = next(v for n, v in h.calls if n == "stage1")
+        stage2 = next(v for n, v in h.calls if n == "stage2")
+        expected = h.video_encoding
+        assert torch.equal(stage1["denoiser"][0], expected)
+        assert torch.equal(stage1["video"].context, expected)
+        assert torch.equal(stage2["denoiser"][0], expected)
+        assert torch.equal(stage2["video"].context, expected)
+        assert stage1["denoiser"][1] is None and stage1["audio"] is None
+        assert stage2["denoiser"][1] is None and stage2["audio"] is None
+        assert all(encoded["audio"] is None for encoded in h.encoded)
     def test_ordinary_euler_preserves_clean_tokens(self, monkeypatch: pytest.MonkeyPatch):
-        h = _V2Harness(monkeypatch); h.run(); assert next(v for n, v in h.calls if n == "stage2")["loop"] is None
-        context = _V2Harness(monkeypatch, context=True); context.run(); assert callable(next(v for n, v in context.calls if n == "stage2")["loop"])
+        h = _InpaintHarness(monkeypatch); h.run(); assert next(v for n, v in h.calls if n == "stage2")["loop"] is None
+        context = _InpaintHarness(monkeypatch, context=True); context.run(); assert callable(next(v for n, v in context.calls if n == "stage2")["loop"])
     def test_context_video_pyramid_fusion(self, monkeypatch: pytest.MonkeyPatch):
         import ltx_pipelines.utils.samplers as samplers
         monkeypatch.setattr(samplers, "post_process_latent", lambda value, *_: value + 100)
-        loop, windows = inpaint_v2._context_loop(5, 2, 9, 1, 1), ((0, 5), (3, 8), (4, 9)); latent = torch.arange(9.).view(1, 9, 1)
+        loop, windows = latent_inpaint._context_loop(5, 2, 9, 1, 1), ((0, 5), (3, 8), (4, 9)); latent = torch.arange(9.).view(1, 9, 1)
         state = _State(latent, torch.zeros_like(latent), torch.zeros_like(latent), torch.zeros(1, 1, 9, 1)); calls: list[torch.Tensor] = []; steps: list[torch.Tensor] = []
         def denoiser(_t: Any, sliced: _State, audio: Any, _s: Any, _i: int) -> tuple[Any, None]: calls.append(sliced.latent); assert audio is None; return type("R", (), {"denoised": torch.full_like(sliced.latent, 10 + sliced.latent[0, 0, 0] // 3 * 10)})(), None
         stepper = type("Stepper", (), {"step": lambda _, _before, after, *_args: steps.append(after) or after})()
         result, audio = loop(torch.tensor([1., .5, 0.]), state, None, stepper, object(), denoiser)
         expected = torch.tensor([110, 110, 110, 113.3333, 117.5, 120, 120, 120, 120]).view(1, 9, 1)
-        assert inpaint_v2._windows(9, 5, 2) == windows and len(calls) == 6 and len(steps) == 2 and audio is None and torch.allclose(steps[0], expected, atol=.001) and torch.equal(result.latent, steps[-1]) and all(torch.equal(call, source[:, start:end]) for source, group in ((latent, calls[:3]), (steps[0], calls[3:])) for call, (start, end) in zip(group, windows))
+        assert latent_inpaint._windows(9, 5, 2) == windows and len(calls) == 6 and len(steps) == 2 and audio is None and torch.allclose(steps[0], expected, atol=.001) and torch.equal(result.latent, steps[-1]) and all(torch.equal(call, source[:, start:end]) for source, group in ((latent, calls[:3]), (steps[0], calls[3:])) for call, (start, end) in zip(group, windows))
     def test_context_rejects_appended_tokens_or_attention_mask(self):
         state = _State(torch.zeros(1, 10, 1), torch.zeros(1, 10, 1), torch.zeros(1, 10, 1), torch.zeros(1, 1, 10, 1))
-        with pytest.raises(ValueError, match="target-only"): inpaint_v2._context_loop(5, 2, 9, 1, 1)(torch.tensor([1., 0.]), state, None, None, None, None)
+        with pytest.raises(ValueError, match="target-only"): latent_inpaint._context_loop(5, 2, 9, 1, 1)(torch.tensor([1., 0.]), state, None, None, None, None)
         attention = _State(torch.zeros(1, 9, 1), torch.zeros(1, 9, 1), torch.zeros(1, 9, 1), torch.zeros(1, 1, 9, 1), torch.ones(1, 9))
-        with pytest.raises(ValueError, match="target-only"): inpaint_v2._context_loop(5, 2, 9, 1, 1)(torch.tensor([1., 0.]), attention, None, None, None, None)
+        with pytest.raises(ValueError, match="target-only"): latent_inpaint._context_loop(5, 2, 9, 1, 1)(torch.tensor([1., 0.]), attention, None, None, None, None)
     def test_preview_does_not_mutate_handoff(self, monkeypatch: pytest.MonkeyPatch):
-        h = _V2Harness(monkeypatch, preview=True); h.run(); decoded = next(v for n, v in h.calls if n == "decode"); upsampled = next(v for n, v in h.calls if n == "upsample"); assert torch.equal(decoded, torch.full_like(decoded, 7.0)) and torch.equal(upsampled, torch.full_like(upsampled, 3.0))
+        h = _InpaintHarness(monkeypatch, preview=True); h.run(); decoded = next(v for n, v in h.calls if n == "decode"); upsampled = next(v for n, v in h.calls if n == "upsample"); assert torch.equal(decoded, torch.full_like(decoded, 7.0)) and torch.equal(upsampled, torch.full_like(upsampled, 7.0))
     def test_final_decode_crop_and_encode_are_video_only(self, monkeypatch: pytest.MonkeyPatch):
-        h = _V2Harness(monkeypatch); h.run(); assert h.encoded[-1]["audio"] is None and h.encoded[-1]["total_frames"] == 3 and h.encoded[-1]["video"].shape[0] == 3
+        h = _InpaintHarness(monkeypatch); h.run(); assert h.encoded[-1]["audio"] is None and h.encoded[-1]["total_frames"] == 3 and h.encoded[-1]["video"].shape[0] == 3
 
 
-class TestInpaintV2Isolation:
-    def test_v1_v2_v1_state_isolation(self, monkeypatch: pytest.MonkeyPatch):
-        h = _V2Harness(monkeypatch); h.stage_2.cached_marker = "v1"; h.calls.append(("v1", None)); h.run(); h.calls.append(("v1", None)); assert h.stage_2.cached_marker == "v1" and [name for name, _ in h.calls if name == "v1"] == ["v1", "v1"]
-    def test_exception_cleanup_leaves_no_stage_state(self, monkeypatch: pytest.MonkeyPatch):
-        h = _V2Harness(monkeypatch); h.upsampler = lambda _: (_ for _ in ()).throw(RuntimeError("boom"))
-        with pytest.raises(RuntimeError, match="boom"): h.run()
-        assert not hasattr(h.stage_2, "_ltx_desktop_context_loop")
+class TestStage1CfgPpAncestralLoop:
+    @staticmethod
+    def _install_fakes(monkeypatch: pytest.MonkeyPatch, records: dict[str, list[Any]]) -> None:
+        from ltx_pipelines.utils import denoisers, samplers
+
+        class _Denoiser:
+            def __init__(self, context: torch.Tensor, _audio: None) -> None: self.context = context
+            def __call__(self, _transformer: Any, state: _State, audio: None, sigmas: torch.Tensor, step: int) -> tuple[Any, None]:
+                records["denoise"].append((self.context, state, audio, sigmas, step))
+                return SimpleNamespace(denoised=state.latent + self.context), None
+
+        class _Stepper:
+            def __init__(self, **_kwargs: Any) -> None: pass
+            def step(self, **kwargs: Any) -> torch.Tensor:
+                records["step"].append(kwargs)
+                return kwargs["denoised_sample"] + kwargs["uncond_denoised"] + (kwargs["noise"] if kwargs["noise"] is not None else 0)
+
+        monkeypatch.setattr(denoisers, "SimpleDenoiser", _Denoiser)
+        monkeypatch.setattr(samplers, "EulerCfgPpDiffusionStep", _Stepper)
+        monkeypatch.setattr(samplers, "post_process_latent", lambda value, mask, clean: records["post"].append((value, mask, clean)) or value * mask + clean * (1 - mask))
+
+    def test_positive_x0_is_processed_negative_is_raw_and_terminal_uses_positive_once(self, monkeypatch: pytest.MonkeyPatch):
+        records: dict[str, list[Any]] = {"denoise": [], "post": [], "step": []}; self._install_fakes(monkeypatch, records)
+        state = _State(torch.zeros(1, 2, 1), torch.ones(1, 2, 1), torch.full((1, 2, 1), 3.0))
+        result, audio = _stage1_cfg_pp_ancestral_loop(torch.tensor(1.0), torch.tensor(2.0), torch.Generator().manual_seed(5))(
+            sigmas=torch.tensor([1.0, 0.5, 0.0]), video_state=state, audio_state=None,
+            stepper=object(), transformer=object(), denoiser=object(),
+        )
+        assert audio is None and len(records["denoise"]) == 4 and len(records["post"]) == 3 and len(records["step"]) == 1
+        for index in range(0, 4, 2):
+            positive, negative = records["denoise"][index:index + 2]
+            assert positive[1] is negative[1] and positive[2] is negative[2] is None and positive[3] is negative[3] and positive[4] == negative[4]
+        for index, step in enumerate(records["step"]):
+            positive_post, x_next_post = records["post"][2 * index:2 * index + 2]
+            negative_state = records["denoise"][2 * index + 1][1]
+            assert step["denoised_sample"] is not step["uncond_denoised"]
+            assert torch.equal(step["denoised_sample"], positive_post[0])
+            assert torch.equal(step["uncond_denoised"], negative_state.latent + 2)
+            assert torch.equal(x_next_post[0], step["denoised_sample"] + step["uncond_denoised"] + (step["noise"] if step["noise"] is not None else 0))
+        second_step_state = records["denoise"][2][1]
+        terminal_positive = records["post"][-1]
+        assert torch.equal(terminal_positive[0], second_step_state.latent + 1)
+        assert torch.equal(result.latent, terminal_positive[0] * terminal_positive[1] + terminal_positive[2] * (1 - terminal_positive[1]))
+        assert result is not state and second_step_state is not state and result is not second_step_state and records["denoise"][0][1] is state
+
+    def test_terminal_fractional_mask_blends_clean_tokens_once(self, monkeypatch: pytest.MonkeyPatch):
+        records: dict[str, list[Any]] = {"denoise": [], "post": [], "step": []}; self._install_fakes(monkeypatch, records)
+        state = _State(torch.zeros(1, 1, 1), torch.full((1, 1, 1), 0.5), torch.full((1, 1, 1), 10.0))
+        result, _ = _stage1_cfg_pp_ancestral_loop(torch.tensor(4.0), torch.tensor(2.0), torch.Generator().manual_seed(5))(
+            torch.tensor([1.0, 0.5, 0.0]), state, None, object(), object(), object(),
+        )
+        terminal_state = records["denoise"][-2][1]
+        expected = (terminal_state.latent + 4.0) * 0.5 + 5.0
+        assert len(records["step"]) == 1 and len(records["post"]) == 3
+        assert torch.equal(result.latent, expected)
+        assert not torch.equal(result.latent, result.latent * 0.5 + 5.0)
+
+    def test_post_step_restore_preserves_clean_tokens_for_next_step(self, monkeypatch: pytest.MonkeyPatch):
+        records: dict[str, list[Any]] = {"denoise": [], "post": [], "step": []}; self._install_fakes(monkeypatch, records)
+        state = _State(torch.zeros(1, 2, 1), torch.tensor([[[1.0], [0.0]]]), torch.tensor([[[3.0], [7.0]]]))
+        result, _ = _stage1_cfg_pp_ancestral_loop(torch.tensor(1.0), torch.tensor(2.0), torch.Generator().manual_seed(5))(
+            torch.tensor([1.0, 0.5, 0.0]), state, None, object(), object(), object(),
+        )
+        assert records["post"][1][0][0, 1, 0] != state.clean_latent[0, 1, 0]
+        assert records["denoise"][2][1].latent[0, 1, 0] == state.clean_latent[0, 1, 0]
+        assert result.latent[0, 1, 0] == state.clean_latent[0, 1, 0]
+
+    def test_rng_is_seeded_separately_and_advances_between_ancestral_steps(self, monkeypatch: pytest.MonkeyPatch):
+        def run(seed: int) -> tuple[torch.Tensor, list[torch.Tensor]]:
+            records: dict[str, list[Any]] = {"denoise": [], "post": [], "step": []}; self._install_fakes(monkeypatch, records)
+            initial = torch.Generator().manual_seed(seed + 1)
+            ancestral = torch.Generator().manual_seed(seed + 1)
+            result, _ = _stage1_cfg_pp_ancestral_loop(torch.tensor(1.0), torch.tensor(2.0), ancestral)(
+                torch.tensor([1.0, 0.75, 0.5, 0.0]), _State(torch.zeros(1, 2, 1), torch.ones(1, 2, 1), torch.zeros(1, 2, 1)), None, object(), object(), object(),
+            )
+            noises = [step["noise"] for step in records["step"] if step["noise"] is not None]
+            assert initial is not ancestral
+            return result.latent, noises
+
+        first, first_noises = run(4); second, second_noises = run(4)
+        assert torch.equal(first, second) and len(first_noises) == 2 and all(torch.equal(a, b) for a, b in zip(first_noises, second_noises))
+        assert not torch.equal(first_noises[0], first_noises[1])
 
 
-# ── Visual/manual acceptance gate for inpaint parity ──
-#
-# To validate a live inpaint output:
-#   1. Generate fixed seed 42 sample (seed uniform across runs).
-#   2. Export a triptych: [original_frame | effective_dilated_mask | output_frame].
-#      Effective mask = stage2 (full-res) mask dilated via derive_stage_radii(30)[1].
-#   3. Outside effective mask: mean absolute diff < 5/255 (~0.0196) between
-#      output and original (per-pixel, background must be preserved).
-#   4. Inside effective mask: mean absolute diff > 20/255 (~0.0784) when prompt
-#      should alter content (model must actually change the masked region).
-#   5. Output has audio stream when model/audio context produces audio.
-#      Verify with: ffprobe -v error -show_entries stream=codec_type
-#   6. Sampler status: default Euler via SimpleDenoiser/DiffusionStage.
-#      Comfy workflow uses euler_cfg_pp (stage1) and euler_ancestral_cfg_pp
-#      (stage2) via LTXVCFGGuider — not implemented in installed ltx_pipelines.
-#      Report honestly; do not claim parity without an existing implementation.
-#
-# The test below (test_outside_mask_preserved_with_bright_generated) is the
-# automated version of these checks at unit-test level, fast and deterministic.
-
-# ponytail: bare assert self-check — verify spatial resize preserves frame count
-_VIDEO = torch.rand(1, 3, 17, 384, 768)
-_RESIZED = LTXIcLoraPipeline._resize_video_spatial(_VIDEO, 192, 384)
-assert _RESIZED.shape == (1, 3, 17, 192, 384), (
-    f"_resize_video_spatial shape mismatch: {_RESIZED.shape}"
-)
-del _VIDEO, _RESIZED
-
-# ponytail: STAGE_2_DISTILLED_SIGMA_VALUES[1:] → [0.725, 0.421875, 0.0]
-# Full source: [0.909375, 0.725, 0.421875, 0.0]; [1:] drops 0.909375.
-
-
-def test_green_preprocessing_completes_before_prompt_encoding():
-    """Source/mask/green CPU preprocessing completes before model-backed prompt encoding.
-
-    Regression invariant: video decode, mask dilation, and green composite all
-    finish on CPU before self.pipeline.prompt_encoder runs, preventing
-    preprocessing from overlapping model VRAM residency.
-    """
-    import os
-    pipe_path = os.path.join(
-        os.path.dirname(__file__),
-        "..",
-        "services/ic_lora_pipeline/ltx_ic_lora_pipeline.py",
+class TestIcLoraStageConstruction:
+    @pytest.mark.parametrize(
+        "transformer_format",
+        ["gguf", "safetensors"],
     )
-    with open(pipe_path) as f:
-        source = f.read()
+    def test_upstream_stage2_builders_have_loras_before_installers(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        transformer_format: str,
+    ) -> None:
+        import ltx_pipelines.ic_lora as upstream
+        import services.ic_lora_pipeline.ltx_ic_lora_pipeline as pipeline_module
+        from services.patches import gguf_loader_fix
 
-    start = source.find("def generate_inpaint(")
-    assert start != -1, "generate_inpaint method not found"
-    end = source.find("def _encode_video_conditioning(", start)
-    assert end != -1, "generate_inpaint method end not found"
-    method_body = source[start:end]
+        events: list[str] = []
 
-    video_pos = method_body.find("iter_video_frames_to_model_domain")
-    dilate_pos = method_body.find("mask_stage1_full_cpu = dilate_video_mask(")
-    green_pos = method_body.find("green_half_cpu = green_composite_preprocess(")
-    prompt_pos = method_body.find("self.pipeline.prompt_encoder")
+        class _Builder:
+            def __init__(self, stage_name: str, builder_name: str, loras: tuple[Any, ...] = ()) -> None:
+                self.stage_name = stage_name
+                self.builder_name = builder_name
+                self.loras = loras
 
-    assert video_pos != -1, "iter_video_frames_to_model_domain not found in generate_inpaint"
-    assert dilate_pos != -1, "mask_stage1_full_cpu = dilate_video_mask( not found in generate_inpaint"
-    assert green_pos != -1, "green_half_cpu = green_composite_preprocess( not found in generate_inpaint"
-    assert prompt_pos != -1, "self.pipeline.prompt_encoder not found in generate_inpaint"
+            def with_loras(self, loras: tuple[Any, ...]) -> "_Builder":
+                events.append(f"builder:{self.stage_name}:{self.builder_name}")
+                return _Builder(self.stage_name, self.builder_name, loras)
 
-    assert video_pos < dilate_pos < green_pos < prompt_pos, (
-        f"preprocessing order broken: video={video_pos}, dilation={dilate_pos}, "
-        f"green={green_pos}, prompt={prompt_pos} — "
-        "source/mask/green CPU preprocessing must complete before prompt encoding"
-    )
+        class _Stage:
+            def __init__(self, name: str, *, has_streaming_builder: bool = False) -> None:
+                self._transformer_builder = _Builder(name, "main")
+                if has_streaming_builder:
+                    self._streaming_builder = _Builder(name, "streaming")
+
+        class _UpstreamPipeline:
+            def __init__(self, **kwargs: Any) -> None:
+                self.dtype = torch.float32
+                self.device = kwargs["device"]
+                self.stage_1 = _Stage("stage_1")
+                self.stage_2 = _Stage("stage_2", has_streaming_builder=True)
+                self.loras = kwargs["loras"]
+
+        def _memory_plan(*_args: Any, **_kwargs: Any) -> None:
+            events.append("memory_plan")
+            assert _args[0].stage_2 is not _args[0].stage_1
+
+        def _installer(*_args: Any, **_kwargs: Any) -> None:
+            events.append("installer")
+            assert _args[0].stage_2 is not _args[0].stage_1
+
+        monkeypatch.setattr(upstream, "ICLoraPipeline", _UpstreamPipeline)
+        monkeypatch.setattr(pipeline_module, "device_supports_fp8", lambda _: False)
+        monkeypatch.setattr(pipeline_module, "attach_memory_plan_to_stages", _memory_plan)
+        monkeypatch.setattr(gguf_loader_fix, "install_gguf_loader", _installer)
+        monkeypatch.setattr(gguf_loader_fix, "install_gguf_component_paths", _installer)
+        monkeypatch.setattr(gguf_loader_fix, "install_kijai_transformer_config_patch", _installer)
+
+        components = SimpleNamespace(
+            transformer_format=transformer_format,
+            video_vae_path="video" if transformer_format == "safetensors" else None,
+            audio_vae_path="audio",
+            gemma_root=None,
+        )
+        result = LTXIcLoraPipeline(
+            checkpoint_path="checkpoint",
+            gemma_root=None,
+            upsampler_path="upsampler",
+            lora_paths=["lora-a", "lora-b"],
+            device=torch.device("cpu"),
+            offload_mode="caller",  # type: ignore[arg-type]
+            components=components,
+            memory_plan=SimpleNamespace(offload_mode="planned"),
+        )
+
+        assert result.pipeline.stage_2 is not result.pipeline.stage_1
+        expected_loras = tuple(result.pipeline.loras)
+        assert result.pipeline.stage_1._transformer_builder.loras == ()
+        assert result.pipeline.stage_2._transformer_builder.loras == expected_loras
+        assert result.pipeline.stage_2._streaming_builder.loras == expected_loras
+        assert events[:2] == ["builder:stage_2:main", "builder:stage_2:streaming"]
+        assert "memory_plan" in events
+        assert "installer" in events
+        assert events.index("builder:stage_2:main") < events.index("memory_plan")
+        assert events.index("builder:stage_2:main") < events.index("installer")
 
 
 class TestVaeFrameCount:
@@ -235,43 +429,6 @@ class TestVaeFrameCount:
     def test_small_rounds_down(self):
         assert _vae_compatible_frame_count(10) == 9
         assert _vae_compatible_frame_count(16) == 9
-
-
-class TestVaePaddedFrameCount:
-    """_vae_padded_frame_count returns next 8n+1 stably (no re-pad when already compatible)."""
-
-    def test_exact_divisible(self):
-        assert _vae_padded_frame_count(193) == 193
-        assert _vae_padded_frame_count(97) == 97
-        assert _vae_padded_frame_count(65) == 65
-
-    def test_pads_up(self):
-        assert _vae_padded_frame_count(196) == 201
-        assert _vae_padded_frame_count(200) == 201
-        assert _vae_padded_frame_count(100) == 105
-        assert _vae_padded_frame_count(66) == 73
-
-    def test_minimum(self):
-        assert _vae_padded_frame_count(1) == 1
-        assert _vae_padded_frame_count(0) == 1
-        assert _vae_padded_frame_count(-1) == 1
-
-    def test_small_exact(self):
-        assert _vae_padded_frame_count(9) == 9
-        assert _vae_padded_frame_count(17) == 17
-
-    def test_small_pads_up(self):
-        assert _vae_padded_frame_count(10) == 17
-        assert _vae_padded_frame_count(16) == 17
-
-    def test_sequence_padding(self):
-        """Verify padding behavior for 1..25: already-compatible stays, others pad to next."""
-        for n in range(1, 26):
-            result = _vae_padded_frame_count(n)
-            assert (result - 1) % 8 == 0, f"{n} → {result}, not 8n+1"
-            assert result >= n, f"{n} → {result} < {n}"
-            if (n - 1) % 8 == 0:
-                assert result == n, f"{n} already 8n+1, should stay, got {result}"
 
 
 class TestCompositeInOutpainting:
@@ -350,7 +507,7 @@ class TestCompositeInOutpainting:
 
 
 class TestInpaintUtilities:
-    """Tests for official inpaint utility functions (green composite, dilation, Laplacian blend)."""
+    """Tests for the green-composite and mask-dilation utilities used by latent inpaint."""
 
     def test_green_composite_applies_bg_color(self):
         """White mask region should be #66FF00 green, black mask region keeps original."""
@@ -645,303 +802,6 @@ class TestDeriveStageRadii:
         assert s1 == 16, f"Expected s1=16, got {s1}"
         assert s2 == 31, f"Expected s2=31, got {s2}"
 
-    def test_blend1_low_res_dilation_is_5(self):
-        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import INPAINT_BLEND1_LOW_RES_DILATION
-        assert INPAINT_BLEND1_LOW_RES_DILATION == 5, (
-            f"Expected 5, got {INPAINT_BLEND1_LOW_RES_DILATION}"
-        )
-
-    def test_blend_constants_are_separate_from_radii(self):
-        """INPAINT_BLEND1 docs blend constant independent of stage radii derived from mask_grow_px."""
-        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import (
-            INPAINT_BLEND1_LOW_RES_DILATION,
-            derive_stage_radii,
-        )
-        s1, s2 = derive_stage_radii(30)
-        assert INPAINT_BLEND1_LOW_RES_DILATION != s1, (
-            "Blend1 constant should differ from stage1 radius (separate controls)"
-        )
-
-
-class TestApplyRawMaskGuard:
-    """_apply_raw_mask_guard clamps generated pixels outside raw (undilated) user mask back to original.
-
-    Grayscale mask preserves anti-aliased feathering; no threshold.
-    """
-
-    def test_outside_raw_mask_equals_original(self):
-        """Pixels outside the raw user mask must equal original, even if generated differs."""
-        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
-
-        F, H, W = (5, 64, 96)
-        # Generated: bright everywhere
-        blend = torch.full((F, H, W, 3), 0.95)
-        # Original: dark everywhere
-        orig = torch.full((F, H, W, 3), 0.05)
-        # Raw mask: small white square in center, rest black
-        raw_mask = torch.zeros(F, H, W)
-        raw_mask[:, H // 2 - 4 : H // 2 + 4, W // 2 - 4 : W // 2 + 4] = 1.0
-
-        result = LTXIcLoraPipeline._apply_raw_mask_guard(blend, raw_mask, orig)
-
-        # Outside raw mask: result must equal original exactly
-        outside = (1.0 - raw_mask).unsqueeze(-1).expand(-1, -1, -1, 3)
-        outside_diff = (result - orig).abs() * outside
-        assert outside_diff.max() < 1e-6, (
-            "Pixels outside raw mask must equal original exactly"
-        )
-
-        # Inside raw mask: result must be blend (bright generated)
-        inside = raw_mask.unsqueeze(-1).expand(-1, -1, -1, 3)
-        inside_diff = (result - blend).abs() * inside
-        assert inside_diff.max() < 1e-6, (
-            "Pixels inside raw mask must carry blend forward"
-        )
-
-    def test_grayscale_mask_feathers_edge(self):
-        """Anti-aliased mask values (e.g. 0.5) produce intermediate blend, not hard threshold."""
-        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
-
-        F, H, W = (2, 64, 96)
-        blend = torch.full((F, H, W, 3), 0.9)
-        orig = torch.full((F, H, W, 3), 0.1)
-        # Half-gray mask = 50/50 everywhere
-        raw_mask = torch.full((F, H, W), 0.5)
-
-        result = LTXIcLoraPipeline._apply_raw_mask_guard(blend, raw_mask, orig)
-
-        # 0.9 * 0.5 + 0.1 * 0.5 = 0.5
-        expected = torch.full((F, H, W, 3), 0.5)
-        assert torch.allclose(result, expected, atol=1e-6), (
-            f"Grayscale mask should produce 50/50 blend, got mean {result.mean().item():.4f}"
-        )
-
-    def test_all_black_mask_returns_original(self):
-        """All-black (no generation) mask = pure original."""
-        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
-
-        F, H, W = (3, 64, 64)
-        blend = torch.full((F, H, W, 3), 0.99)
-        orig = torch.full((F, H, W, 3), 0.01)
-        raw_mask = torch.zeros(F, H, W)
-
-        result = LTXIcLoraPipeline._apply_raw_mask_guard(blend, raw_mask, orig)
-        assert torch.allclose(result, orig, atol=1e-6), (
-            "All-black mask must return original exactly"
-        )
-
-    def test_all_white_mask_returns_blend(self):
-        """All-white (full generation) mask = passes blend through."""
-        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
-
-        F, H, W = (3, 64, 64)
-        blend = torch.full((F, H, W, 3), 0.99)
-        orig = torch.full((F, H, W, 3), 0.01)
-        raw_mask = torch.ones(F, H, W)
-
-        result = LTXIcLoraPipeline._apply_raw_mask_guard(blend, raw_mask, orig)
-        assert torch.allclose(result, blend, atol=1e-6), (
-            "All-white mask must pass blend through"
-        )
-
-    def test_blur_radius_creates_feathered_edge(self):
-        """blur_radius > 0 softens mask edge: far outside=orig, far inside=blend,
-        edge zone has intermediate values.
-        """
-        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
-
-        F, H, W = 1, 32, 64
-        orig = torch.full((F, H, W, 3), 0.05)
-        blend = torch.full((F, H, W, 3), 0.95)
-        raw_mask = torch.zeros(F, H, W)
-        raw_mask[:, :, W // 2:] = 1.0  # left half orig, right half blend
-
-        no_blur = LTXIcLoraPipeline._apply_raw_mask_guard(blend, raw_mask, orig, blur_radius=0)
-        blurred = LTXIcLoraPipeline._apply_raw_mask_guard(blend, raw_mask, orig, blur_radius=4)
-
-        # Far outside (col 0): both match original
-        assert torch.allclose(no_blur[:, :, 0, :], orig[:, :, 0, :], atol=1e-6)
-        assert torch.allclose(blurred[:, :, 0, :], orig[:, :, 0, :], atol=1e-6)
-
-        # Far inside (col W-1): both match blend
-        assert torch.allclose(no_blur[:, :, W - 1, :], blend[:, :, W - 1, :], atol=1e-6)
-        assert torch.allclose(blurred[:, :, W - 1, :], blend[:, :, W - 1, :], atol=1e-6)
-
-        # Transition zone left of edge: no_blur still at orig, blurred is intermediate
-        col_t = W // 2 - 3
-        v_nb = no_blur[0, 0, col_t, 0].item()
-        v_bl = blurred[0, 0, col_t, 0].item()
-        assert abs(v_nb - 0.05) < 1e-6, f"no_blur at col {col_t} should be 0.05, got {v_nb:.4f}"
-        assert 0.05 < v_bl < 0.95, f"blurred at col {col_t} should be intermediate, got {v_bl:.4f}"
-        assert abs(v_bl - v_nb) > 0.01, f"blurred should differ from no_blur at col {col_t}"
-
-    # ── Chunking / OOM guard tests ──
-
-    def test_chunking_matches_expected_math(self):
-        """Chunked GPU→CPU result matches expected composite formula for blur_radius=0 and 1.
-
-        Uses chunk_size=2 to exercise multi-chunk path even on small tensors.
-        """
-        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
-
-        F, H, W = 6, 32, 48
-        blend = torch.full((F, H, W, 3), 0.9)   # bright gen
-        orig = torch.full((F, H, W, 3), 0.1)    # dark original
-        mask = torch.full((F, H, W), 0.5)         # 50/50 everywhere
-
-        # blur_radius=0 → direct grayscale composite: 0.9*0.5 + 0.1*0.5 = 0.5
-        result = LTXIcLoraPipeline._apply_raw_mask_guard(blend, mask, orig, blur_radius=0, chunk_size=2)
-        assert result.device.type == "cpu", f"Expected CPU, got {result.device}"
-        expected = torch.full((F, H, W, 3), 0.5)
-        assert torch.allclose(result, expected, atol=1e-6), (
-            f"blur=0 chunk result should be 0.5, got mean {result.mean().item():.6f}"
-        )
-
-        # blur_radius=1 → threshold to binary (0.5>0.5=False=0), so all-black => orig
-        result_b1 = LTXIcLoraPipeline._apply_raw_mask_guard(blend, mask, orig, blur_radius=1, chunk_size=3)
-        assert result_b1.device.type == "cpu", f"Expected CPU, got {result_b1.device}"
-        expected_b1 = orig.clone()
-        assert torch.allclose(result_b1, expected_b1, atol=1e-6), (
-            f"blur=1 with 0.5 mask thresholded to 0 should return orig, "
-            f"got mean {result_b1.mean().item():.6f}"
-        )
-
-    def test_chunking_loop_source_assert(self):
-        """Source text asserts the chunking loop and .cpu() accumulation exist."""
-        from pathlib import Path
-        source = Path(__file__).resolve().parents[1] / "services" / "ic_lora_pipeline" / "ltx_ic_lora_pipeline.py"
-        text = source.read_text()
-        assert "chunk_size:" in text, "_apply_raw_mask_guard must have chunk_size parameter"
-        assert "chunks.append(chunk_result.detach().cpu())" in text, (
-            "Loop must accumulate chunk results via .cpu() detach to free GPU memory"
-        )
-        assert "torch.cat(chunks, dim=0)" in text, (
-            "Final result must torch.cat CPU chunks"
-        )
-        assert "for start in range(0, num_frames, chunk_size):" in text, (
-            "Must iterate over frame dimension in chunks"
-        )
-
-    def test_chunk_size_greater_than_frames_still_works(self):
-        """chunk_size > num_frames (single chunk) produces same result as chunk_size=2."""
-        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
-
-        F, H, W = 3, 16, 24
-        blend = torch.rand(F, H, W, 3)
-        orig = torch.rand(F, H, W, 3)
-        mask = torch.rand(F, H, W)
-
-        r1 = LTXIcLoraPipeline._apply_raw_mask_guard(blend, mask, orig, blur_radius=0, chunk_size=999)
-        r2 = LTXIcLoraPipeline._apply_raw_mask_guard(blend, mask, orig, blur_radius=0, chunk_size=2)
-        assert torch.allclose(r1, r2, atol=1e-6), (
-            "Single chunk must match multi-chunk result"
-        )
-
-    def test_chunking_preserves_device_of_input_on_default(self):
-        """Default chunk_size=8 works; result is CPU regardless of input device."""
-        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
-
-        F, H, W = 9, 16, 24
-        blend = torch.full((F, H, W, 3), 0.85, device="cpu")
-        orig = torch.full((F, H, W, 3), 0.15, device="cpu")
-        mask = torch.full((F, H, W), 0.6, device="cpu")
-
-        result = LTXIcLoraPipeline._apply_raw_mask_guard(blend, mask, orig)
-        assert result.device.type == "cpu", f"Expected CPU default, got {result.device}"
-        assert result.shape == (F, H, W, 3), f"Shape mismatch: {result.shape}"
-        assert 0.0 <= result.min() <= result.max() <= 1.0, (
-            f"Values out of [0,1]: [{result.min():.4f}, {result.max():.4f}]"
-        )
-
-
-class TestInpaintRuntimeParity:
-    """Stage2 sigma, seed, and audio preservation parity checks."""
-
-    def test_stage2_sigmas_slice(self):
-        """STAGE_2_DISTILLED_SIGMAS[1:] → [0.725, 0.421875, 0.0] (3 steps)."""
-        from ltx_pipelines.utils.constants import STAGE_2_DISTILLED_SIGMA_VALUES
-        sliced = STAGE_2_DISTILLED_SIGMA_VALUES[1:]
-        assert sliced == [0.725, 0.421875, 0.0], (
-            f"Stage 2 sigma slice: {sliced}"
-        )
-        assert len(sliced) == 3, (
-            f"Expected 3 steps, got {len(sliced)}"
-        )
-
-    def test_stage1_seed_offsets_by_one(self):
-        """Official: stage1 uses seed+1, stage2 uses seed.
-
-        Default seed 42 → stage2=42, stage1=43.
-        """
-        # ponytail: seed mapping is inline in generate_inpaint;
-        # verify logically: stage2 seed == base, stage1 == base + 1.
-        base = 42
-        assert base + 1 == 43, "seed+1 convention"
-        assert base == 42, "seed convention"
-
-    def test_audio_initial_latent_in_stage2(self):
-        """Stage 2 audio ModalitySpec passes initial_latent from stage 1.
-
-        Verify the string 'initial_latent=audio_state_s1.latent' exists
-        in the pipeline source as a regression catch.
-        """
-        import os
-        pipe_path = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "services/ic_lora_pipeline/ltx_ic_lora_pipeline.py",
-        )
-        with open(pipe_path) as f:
-            source = f.read()
-        assert "initial_latent=audio_state_s1.latent" in source, (
-            "Stage 2 audio must receive initial_latent from stage 1"
-        )
-
-    def test_stage2_guided_by_encoded_blend_not_green_guide(self):
-        """Stage 2 must NOT call _encode_green_guide_conditioning — it is
-        guided by encoded_blend as initial_latent instead.
-
-        Correct flow:
-        - Stage 1 uses _encode_green_guide_conditioning (via green_half).
-        - Stage 1 blend is VAE-encoded to encoded_blend.
-        - Stage 2 receives encoded_blend as initial_latent — no IC-LoRA
-        green guide conditioning at stage2.
-        """
-        import os
-        pipe_path = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "services/ic_lora_pipeline/ltx_ic_lora_pipeline.py",
-        )
-        with open(pipe_path) as f:
-            source = f.read()
-
-        # Only stage1 calls _encode_green_guide_conditioning
-        assert source.count("self._encode_green_guide_conditioning") == 1, (
-            "_encode_green_guide_conditioning must be called only by stage1, "
-            "not stage2"
-        )
-        # stage2_conditionings block must not contain _encode_green_guide_conditioning
-        # or green_half — it uses combined_image_conditionings with stage1_ltx_images
-        cond_blocks = source.split("stage2_conditionings")
-        assert len(cond_blocks) >= 2, "Must find stage2 conditionings block"
-        stage2_block = cond_blocks[1].split("video_state_s2")[0]
-        assert "_encode_green_guide_conditioning" not in stage2_block, (
-            "Stage 2 conditionings must NOT call _encode_green_guide_conditioning"
-        )
-        assert "green_half" not in stage2_block, (
-            "Stage 2 conditionings must NOT reference green_half tensor"
-        )
-        # Stage 2 receives encoded_blend as initial_latent (inside the
-        # video_state_s2 pipeline call, after the second stage2_conditionings
-        # occurrence which is in conditionings=)
-        assert len(cond_blocks) >= 3, "stage2_conditionings must appear as assignment + usage"
-        stage2_pipeline_block = cond_blocks[2]
-        assert "initial_latent=encoded_blend" in stage2_pipeline_block, (
-            "Stage 2 must pass encoded_blend as initial_latent — "
-            "was the green-leak root cause fix"
-        )
-
 # ponytail: bare assert self-check — GPU bicubic upsample preserves shape and [0,1] range
 _STAGE1 = torch.rand(17, 3, 96, 128)  # (F, 3, H_half, W_half)
 _STAGE1_FULL = torch.nn.functional.interpolate(
@@ -954,101 +814,6 @@ assert _STAGE1_FULL.min() >= 0.0 and _STAGE1_FULL.max() <= 1.0, (
     f"range: [{_STAGE1_FULL.min()}, {_STAGE1_FULL.max()}]"
 )
 del _STAGE1, _STAGE1_FULL
-
-
-def test_resize_video_mask_spatial():
-    """(F, H, W) mask half-resized → (F, H_half, W_half)."""
-    from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
-    import torch
-    mask = torch.zeros(17, 384, 768)
-    mask[:, 32, 32] = 1.0
-    resized = LTXIcLoraPipeline._resize_video_mask_spatial(mask, 192, 384)
-    assert resized.shape == (17, 192, 384), (
-        f"Expected (17, 192, 384), got {resized.shape}"
-    )
-    # ponytail: nearest neighbor preserves binary values
-    assert resized.dtype == mask.dtype, f"dtype changed: {mask.dtype} → {resized.dtype}"
-
-
-def test_resize_video_mask_spatial_single_frame():
-    """(1, H, W) mask should still work."""
-    from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
-    import torch
-    mask = torch.rand(1, 64, 64)
-    resized = LTXIcLoraPipeline._resize_video_mask_spatial(mask, 32, 32)
-    assert resized.shape == (1, 32, 32), f"Expected (1, 32, 32), got {resized.shape}"
-
-
-def test_resize_video_mask_spatial_preserves_values():
-    """Check nearest neighbor respects value boundaries."""
-    from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
-    import torch
-    mask = torch.zeros(3, 128, 128)
-    mask[:, 64:96, 64:96] = 1.0
-    resized = LTXIcLoraPipeline._resize_video_mask_spatial(mask, 64, 64)
-    assert resized.min() >= 0.0 and resized.max() <= 1.0, (
-        f"Values out of [0, 1]: [{resized.min()}, {resized.max()}]"
-    )
-    assert resized.shape == (3, 64, 64), f"Expected (3, 64, 64), got {resized.shape}"
-
-
-class TestResizeVideoSpatial:
-    """Verify _resize_video_spatial handles 5D (B, C, F, H, W) tensors correctly.
-
-    The old bug: F.interpolate with 5D input expects 3 spatial dims;
-    passing size=(h, w) crashed with spatial dimension mismatch.
-    """
-
-    def test_shape_preserves_frames(self):
-        """(1, 3, 17, 384, 768) → (1, 3, 17, 192, 384)."""
-        video = torch.rand(1, 3, 17, 384, 768)
-        resized = LTXIcLoraPipeline._resize_video_spatial(video, 192, 384, mode="bilinear")
-        assert resized.shape == (1, 3, 17, 192, 384), (
-            f"Expected (1, 3, 17, 192, 384), got {resized.shape}"
-        )
-
-    def test_frame_count_preserved(self):
-        """Frame dimension identical after resize — old bug dropped frames."""
-        video = torch.rand(1, 3, 17, 384, 768)
-        resized = LTXIcLoraPipeline._resize_video_spatial(video, 192, 384, mode="bilinear")
-        assert resized.shape[2] == video.shape[2], (
-            f"Frame count changed: {video.shape[2]} → {resized.shape[2]}"
-        )
-
-    def test_channel_count_preserved(self):
-        """Channel dimension preserved."""
-        video = torch.rand(1, 3, 17, 384, 768)
-        resized = LTXIcLoraPipeline._resize_video_spatial(video, 192, 384)
-        assert resized.shape[1] == 3, f"Channels changed: {resized.shape[1]}"
-
-    def test_batch_dim_preserved(self):
-        """Batch dimension preserved."""
-        video = torch.rand(2, 3, 17, 64, 64)
-        resized = LTXIcLoraPipeline._resize_video_spatial(video, 32, 32)
-        assert resized.shape[0] == 2, f"Batch changed: {resized.shape[0]}"
-
-    def test_bilinear_produces_smooth_results(self):
-        """Bilinear mode produces non-binary output (smooth)."""
-        video = torch.rand(1, 1, 3, 64, 64)
-        resized = LTXIcLoraPipeline._resize_video_spatial(video, 32, 32, mode="bilinear")
-        # bilinear downscale should produce values between 0 and 1 with fractional values
-        assert resized.min() >= -0.05 and resized.max() <= 1.05, (
-            f"Values out of expected range: [{resized.min()}, {resized.max()}]"
-        )
-
-    def test_identity_resize(self):
-        """Same input/output spatial dims should preserve values."""
-        video = torch.rand(1, 3, 5, 64, 64)
-        resized = LTXIcLoraPipeline._resize_video_spatial(video, 64, 64, mode="bilinear", align_corners=False)
-        assert resized.shape == video.shape, f"Shape changed: {resized.shape} vs {video.shape}"
-
-    def test_nearest_mode_binary_preserving(self):
-        """Nearest mode preserves binary values."""
-        video = torch.randint(0, 2, (1, 1, 5, 64, 64)).float()
-        resized = LTXIcLoraPipeline._resize_video_spatial(video, 32, 32, mode="nearest")
-        assert set(resized.unique().tolist()).issubset({0.0, 1.0}), (
-            f"Nearest mode produced non-binary values: {resized.unique()}"
-        )
 
 
 class TestEncodeVideoConditioning:
@@ -1096,49 +861,6 @@ class TestEncodeVideoConditioning:
         finally:
             _media_io.decode_video_by_frame = _orig_decode
             _media_io.video_preprocess = _orig_preprocess
-
-
-class TestFramesChwToBcfhw:
-    """Verify _frames_chw_to_bcfhw converts (F, C, H, W) → (1, C, F, H, W)."""
-
-    def test_basic_layout(self):
-        """(F, 3, H, W) → (1, 3, F, H, W) — channels first, not F first."""
-        frames = torch.rand(17, 3, 96, 128)
-        result = LTXIcLoraPipeline._frames_chw_to_bcfhw(frames)
-        assert result.shape == (1, 3, 17, 96, 128), (
-            f"Expected (1, 3, 17, 96, 128), got {result.shape}"
-        )
-
-    def test_single_frame(self):
-        """Single frame (1, 3, H, W) → (1, 3, 1, H, W)."""
-        frame = torch.rand(1, 3, 64, 64)
-        result = LTXIcLoraPipeline._frames_chw_to_bcfhw(frame)
-        assert result.shape == (1, 3, 1, 64, 64), (
-            f"Expected (1, 3, 1, 64, 64), got {result.shape}"
-        )
-
-    def test_values_preserved(self):
-        """Pixel values at each (C, F, H, W) position identical after permute."""
-        frames = torch.arange(17 * 3 * 96 * 128, dtype=torch.float32).reshape(17, 3, 96, 128)
-        result = LTXIcLoraPipeline._frames_chw_to_bcfhw(frames)
-        for f in range(17):
-            for c in range(3):
-                assert torch.allclose(result[0, c, f], frames[f, c]), (
-                    f"Value mismatch at frame={f}, channel={c}"
-                )
-
-    def test_would_not_cause_vae_channel_mismatch(self):
-        """Regression: old .unsqueeze(0) gave (1, F, 3, H, W).
-        VAE expects (B, C, F, H, W) — (1, 3, F, H, W)."""
-        frames = torch.rand(17, 3, 96, 128)
-        result = LTXIcLoraPipeline._frames_chw_to_bcfhw(frames)
-        # VAE conv1 weight: [128, 48, 3, 3, 3] expects 48 channels at dim 1
-        assert result.shape[1] == 3, f"Channel dim should be 3, got {result.shape[1]}"
-        assert result.shape[0] == 1, f"Batch dim should be 1, got {result.shape[0]}"
-        # Old code .unsqueeze(0) gave shape[1]==F, shape[2]==3 — verify we don't regress
-        assert result.shape[1] < result.shape[2] or result.shape[1] == 3, (
-            "Channels dimension must be smaller than frames dimension or exactly 3"
-        )
 
 
 class TestInpaintBlendOutsideMaskPreservation:
@@ -1277,215 +999,6 @@ class TestInpaintBlendOutsideMaskPreservation:
         )
 
 
-class TestInpaintFixedBlendContract:
-    def test_removed_parameters_absent(self):
-        from inspect import signature
-        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import LTXIcLoraPipeline
-
-        parameters = signature(LTXIcLoraPipeline.generate_inpaint).parameters
-        assert "laplacian_blend_grow" not in parameters
-        assert "final_mask_blur_px" not in parameters
-
-    def test_fixed_low_res_dilation_is_5(self):
-        from services.ic_lora_pipeline.ltx_ic_lora_pipeline import INPAINT_BLEND1_LOW_RES_DILATION
-
-        assert INPAINT_BLEND1_LOW_RES_DILATION == 5
-
-
-class TestEncodeGreenGuideConditioning:
-    """_encode_green_guide_conditioning encodes tensor directly, no file I/O.
-
-    Proves:
-    - Accepts (1, 3, F, H, W) tensor on device
-    - Returns list[VideoConditionByReferenceLatent]
-    - Has expected strength and downscale_factor=1
-    - Uses direct encoder call, no path-based decode
-    """
-
-    def test_direct_tensor_encode_returns_correct_shapes(self):
-        """Fake encoder produces known output; verify VideoConditionByReferenceLatent created with correct fields."""
-        import os as _os
-        import sys as _sys
-        _site = _os.path.expanduser("~/.local/share/LTXDesktop/python/lib/python3.13/site-packages")
-        _sys.path.insert(0, _site)
-        import services.ic_lora_pipeline.ltx_ic_lora_pipeline as _pmod
-
-        class _FakeEnc:
-            def __call__(self, video: torch.Tensor) -> torch.Tensor:
-                # Simulate video encoder: (1, 3, F, H, W) → (1, 16, F, H//8, W//8)
-                _, _, f, h, w = video.shape
-                return torch.zeros(1, 16, f, h // 8, w // 8)
-
-        class _FakePipeline:
-            device = torch.device("cpu")
-            dtype = torch.bfloat16
-
-        pipe = _pmod.LTXIcLoraPipeline.__new__(_pmod.LTXIcLoraPipeline)
-        pipe.pipeline = _FakePipeline()
-
-        # (1, 3, 5, 64, 128) tensor
-        tensor = torch.rand(1, 3, 5, 64, 128)
-        strength = 0.8
-
-        result = pipe._encode_green_guide_conditioning(
-            enc=_FakeEnc(),
-            tensor=tensor,
-            strength=strength,
-        )
-
-        assert len(result) == 1, f"Expected 1 conditioning item, got {len(result)}"
-        item = result[0]
-
-        # Verify it's a VideoConditionByReferenceLatent
-        from ltx_core.conditioning import VideoConditionByReferenceLatent
-        assert isinstance(item, VideoConditionByReferenceLatent), (
-            f"Expected VideoConditionByReferenceLatent, got {type(item)}"
-        )
-
-        # Latent shape: encoder output (1, 16, 5, 8, 16)
-        assert item.latent.shape == (1, 16, 5, 8, 16), (
-            f"Latent shape mismatch: {item.latent.shape}"
-        )
-
-        # downscale_factor must be 1 (official LTXAddVideoICLoRAGuideAdvanced widget)
-        assert item.downscale_factor == 1, (
-            f"Expected downscale_factor=1, got {item.downscale_factor}"
-        )
-
-        # strength matches input
-        assert item.strength == strength, (
-            f"Expected strength={strength}, got {item.strength}"
-        )
-
-    def test_no_file_path_or_decode(self):
-        """No video_path or decode_video_by_frame in call chain — pure tensor encode."""
-        import os as _os
-        import sys as _sys
-        _site = _os.path.expanduser("~/.local/share/LTXDesktop/python/lib/python3.13/site-packages")
-        _sys.path.insert(0, _site)
-        import services.ic_lora_pipeline.ltx_ic_lora_pipeline as _pmod
-
-        class _FakeEnc:
-            def __call__(self, video: torch.Tensor) -> torch.Tensor:
-                return torch.zeros(1, 16, video.shape[2], 8, 8)
-
-        class _FakePipeline:
-            device = torch.device("cpu")
-            dtype = torch.bfloat16
-
-        pipe = _pmod.LTXIcLoraPipeline.__new__(_pmod.LTXIcLoraPipeline)
-        pipe.pipeline = _FakePipeline()
-
-        # Just proves no crash — the method takes a tensor, not a path
-        tensor = torch.rand(1, 3, 3, 64, 64)
-        result = pipe._encode_green_guide_conditioning(
-            enc=_FakeEnc(),
-            tensor=tensor,
-            strength=1.0,
-        )
-        assert len(result) == 1
-        assert result[0].latent.shape == (1, 16, 3, 8, 8)
-
-    def test_casts_float32_to_pipeline_dtype(self):
-        """float32 tensor input must be cast to pipeline dtype (bfloat16) before encoder call.
-
-        Regression: green_composite_preprocess can promote bfloat16→float32 via float32
-        _bg_tensor; without cast, VAE conv sees float32 input and bfloat16 weights → crash.
-        """
-        import os as _os
-        import sys as _sys
-        _site = _os.path.expanduser("~/.local/share/LTXDesktop/python/lib/python3.13/site-packages")
-        _sys.path.insert(0, _site)
-        import services.ic_lora_pipeline.ltx_ic_lora_pipeline as _pmod
-
-        class _FakeEnc:
-            def __call__(self, video: torch.Tensor) -> torch.Tensor:
-                assert video.dtype == torch.bfloat16, (
-                    f"Encoder got {video.dtype}, expected bfloat16"
-                )
-                return torch.zeros(1, 16, video.shape[2], 8, 8, dtype=torch.bfloat16)
-
-        class _FakePipeline:
-            device = torch.device("cpu")
-            dtype = torch.bfloat16
-
-        pipe = _pmod.LTXIcLoraPipeline.__new__(_pmod.LTXIcLoraPipeline)
-        pipe.pipeline = _FakePipeline()
-
-        # Float32 input — simulates output of green_composite_preprocess after promotion
-        tensor = torch.rand(1, 3, 3, 64, 64, dtype=torch.float32)
-        result = pipe._encode_green_guide_conditioning(
-            enc=_FakeEnc(),
-            tensor=tensor,
-            strength=0.9,
-        )
-        assert len(result) == 1
-        assert result[0].latent.dtype == torch.bfloat16
-        assert result[0].latent.shape == (1, 16, 3, 8, 8)
-
-    def test_uses_tiled_encode_when_available_with_default_tiling_config_fallback_to_direct_call(self):
-        """_encode_green_guide_conditioning uses .tiled_encode(default_tiling_config()) when available,
-        falls back to enc() call when encoder lacks tiled API."""
-        import os as _os
-        import sys as _sys
-        _site = _os.path.expanduser("~/.local/share/LTXDesktop/python/lib/python3.13/site-packages")
-        _sys.path.insert(0, _site)
-        from pathlib import Path
-        import services.ic_lora_pipeline.ltx_ic_lora_pipeline as _pmod
-
-        # Source-text assertion: the method must reference both tiled_encode and default_tiling_config
-        source = Path(_pmod.__file__).read_text()
-        # Verify _encode_green_guide_conditioning contains tiled_encode branch
-        assert "tiled_encode" in source, "Missing tiled_encode reference in pipeline source"
-        assert "default_tiling_config" in source, (
-            "Missing default_tiling_config reference in pipeline source"
-        )
-
-        # Runtime test 1: encoder with tiled_encode uses it
-        class _FakeTiledEnc:
-            def __call__(self, video):
-                raise AssertionError("direct call should not be used when tiled_encode exists")
-            def tiled_encode(self, video, tiling_config):
-                _, _, f, h, w = video.shape
-                return torch.zeros(1, 16, f, h // 8, w // 8)
-
-        class _FakePipeline:
-            device = torch.device("cpu")
-            dtype = torch.bfloat16
-
-        pipe = _pmod.LTXIcLoraPipeline.__new__(_pmod.LTXIcLoraPipeline)
-        pipe.pipeline = _FakePipeline()
-
-        tensor = torch.rand(1, 3, 5, 64, 128)
-        result = pipe._encode_green_guide_conditioning(
-            enc=_FakeTiledEnc(), tensor=tensor, strength=0.8,
-        )
-        assert len(result) == 1
-        assert result[0].latent.shape == (1, 16, 5, 8, 16), (
-            f"tiled_encode: {result[0].latent.shape}"
-        )
-
-        # Runtime test 2: encoder without tiled_encode falls back to direct call
-        class _FakeDirectEnc:
-            def __call__(self, video):
-                _, _, f, h, w = video.shape
-                return torch.zeros(1, 16, f, h // 8, w // 8)
-
-        pipe2 = _pmod.LTXIcLoraPipeline.__new__(_pmod.LTXIcLoraPipeline)
-        pipe2.pipeline = _FakePipeline()
-
-        result2 = pipe2._encode_green_guide_conditioning(
-            enc=_FakeDirectEnc(), tensor=tensor, strength=0.7,
-        )
-        assert len(result2) == 1
-        assert result2[0].latent.shape == (1, 16, 5, 8, 16), (
-            f"direct fallback: {result2[0].latent.shape}"
-        )
-        assert result2[0].strength == 0.7, (
-            f"Expected strength=0.7, got {result2[0].strength}"
-        )
-
-
 class TestBlendOutputToUint8:
     """Smoke: (F, H, W, 3) float [0,1] → uint8 [0,255] conversion, shape preserved."""
 
@@ -1497,208 +1010,6 @@ class TestBlendOutputToUint8:
         assert out.dtype == torch.uint8, f"Expected uint8, got {out.dtype}"
         assert out.min() >= 0, f"Min value {out.min()} below 0"
         assert out.max() <= 255, f"Max value {out.max()} above 255"
-
-
-class TestStage1UpsampleDevicePath:
-    """Validate blend_stage1 to upsample pipeline device/dtype/range.
-
-    After fix: laplacian_pyramid_blend returns tensor on requested device
-    (no forced .cpu()), and interpolate input is explicitly moved to device.
-    """
-
-    def test_blend_upsample_shape_dtype_range(self):
-        """blend(F, H, W, 3) -> permute -> interpolate -> _frames_chw_to_bcfhw -> *2-1
-        gives (1, 3, F, H, W), bfloat16, [-1, 1]."""
-        from services.ic_lora_pipeline.official_inpaint import laplacian_pyramid_blend
-
-        F, H, W = 5, 64, 64
-        img_a = torch.rand(F, H, W, 3)
-        img_b = torch.rand(F, H, W, 3)
-        mask = (torch.rand(F, H, W) > 0.5).float()
-
-        blend = laplacian_pyramid_blend(img_a, img_b, mask, max_level=3, mask_low_res_dilation=0)
-
-        bchw = blend.permute(0, 3, 1, 2)  # (F, 3, H, W)
-        up_h, up_w = H * 2, W * 2
-        up = torch.nn.functional.interpolate(
-            bchw, size=(up_h, up_w), mode="bicubic", align_corners=False,
-        ).clamp(0.0, 1.0)
-        up = up.to(dtype=torch.bfloat16)
-
-        bcfhw = LTXIcLoraPipeline._frames_chw_to_bcfhw(up)
-        result = bcfhw * 2.0 - 1.0
-
-        assert result.shape == (1, 3, F, up_h, up_w), (
-            f"Expected (1, 3, {F}, {up_h}, {up_w}), got {result.shape}"
-        )
-        assert result.dtype == torch.bfloat16, f"Expected bfloat16, got {result.dtype}"
-        assert result.min() >= -1.0 and result.max() <= 1.0, (
-            f"Range: [{result.min()}, {result.max()}], expected [-1, 1]"
-        )
-
-    def test_laplacian_blend_returns_requested_device(self):
-        """When device= is set, laplacian_pyramid_blend returns tensor on that device.
-
-        When device=None, result stays on input device (CPU).
-        CUDA branch is conditional; CPU branch always runs.
-        """
-        from services.ic_lora_pipeline.official_inpaint import laplacian_pyramid_blend
-
-        F, H, W = 3, 32, 32
-        img_a = torch.rand(F, H, W, 3)
-        img_b = torch.rand(F, H, W, 3)
-        mask = (torch.rand(F, H, W) > 0.5).float()
-
-        # Baseline: device=None returns CPU
-        blend_cpu = laplacian_pyramid_blend(img_a, img_b, mask, max_level=3, mask_low_res_dilation=0)
-        assert blend_cpu.device == torch.device("cpu"), (
-            f"Without device arg, expected cpu, got {blend_cpu.device}"
-        )
-
-        if torch.cuda.is_available():
-            device = torch.device("cuda")
-            blend_gpu = laplacian_pyramid_blend(
-                img_a, img_b, mask, max_level=3, mask_low_res_dilation=0, device=device,
-            )
-            assert blend_gpu.device.type == "cuda", (
-                f"Expected CUDA device, got {blend_gpu.device}"
-            )
-            # Interpolate input stays on the same device as blend
-            bchw = blend_gpu.permute(0, 3, 1, 2)
-            assert bchw.device == blend_gpu.device, (
-                f"permute changed device from {blend_gpu.device} to {bchw.device}"
-            )
-
-
-class TestInpaintVramOffload:
-    """Source-order / lifecycle assertions for CPU-first inpaint preprocessing.
-
-    No model call (prompt_encoder / image_conditioner / stage_1 / stage_2 /
-    video_decoder / audio_decoder) may run until ``green_half_cpu`` is fully
-    created from source video + dilated mask on CPU float32.
-    """
-
-    @staticmethod
-    def _inpaint_body() -> str:
-        """Isolate the ``generate_inpaint`` method body as source text."""
-        import os
-        pipe_path = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "services/ic_lora_pipeline/ltx_ic_lora_pipeline.py",
-        )
-        with open(pipe_path) as f:
-            source = f.read()
-        start = source.find("def generate_inpaint(")
-        assert start != -1, "generate_inpaint not found"
-        end = source.find("def _encode_video_conditioning(", start)
-        assert end != -1, "next method (_encode_video_conditioning) not found"
-        return source[start:end]
-
-    def test_cpu_green_composite_precedes_all_model_calls(self):
-        """green_half_cpu = green_composite_preprocess( precedes every model call."""
-        body = self._inpaint_body()
-        green_pos = body.find("green_half_cpu = green_composite_preprocess(")
-        assert green_pos != -1, "green_half_cpu = green_composite_preprocess( not found"
-        for call in (
-            "self.pipeline.prompt_encoder(",
-            "self.pipeline.image_conditioner(",
-            "self.pipeline.stage_1(",
-            "self.pipeline.stage_2(",
-            "self.pipeline.video_decoder(",
-        ):
-            pos = body.find(call)
-            assert pos != -1, f"{call} not found"
-            assert green_pos < pos, (
-                f"green_half_cpu at {green_pos} must precede {call} at {pos}"
-            )
-
-    def test_source_and_mask_preprocess_on_cpu_float32(self):
-        """Source + mask decode on cpu_device; video_preprocess calls use float32, cpu_device."""
-        body = self._inpaint_body()
-        assert "cpu_device = torch.device(\"cpu\")" in body
-        # source decode uses cpu_device
-        assert "iter_video_frames_to_model_domain(video_path, frame_cap=num_frames, device=cpu_device)" in body
-        # mask decode uses cpu_device
-        assert "decode_video_by_frame(path=mask_path, frame_cap=num_frames_vae_padded, device=cpu_device)" in body
-        # both video_preprocess calls contain torch.float32, cpu_device
-        assert "video_preprocess(video_gen, height, width, torch.float32, cpu_device)" in body
-        assert "video_preprocess(mask_gen, height, width, torch.float32, cpu_device)" in body
-
-    def test_dead_full_res_and_stage2_mask_are_not_retained(self):
-        """del video_full_cpu after video_half_cpu = and before green_half_cpu =; no mask_stage2_full."""
-        body = self._inpaint_body()
-        video_half_pos = body.find("video_half_cpu =")
-        assert video_half_pos != -1, "video_half_cpu = not found"
-        del_full_pos = body.find("del video_full_cpu")
-        assert del_full_pos != -1, "del video_full_cpu not found"
-        green_pos = body.find("green_half_cpu = green_composite_preprocess(")
-        assert green_pos != -1, "green_half_cpu = green_composite_preprocess( not found"
-        assert video_half_pos < del_full_pos < green_pos, (
-            f"del video_full_cpu ({del_full_pos}) must be between "
-            f"video_half_cpu = ({video_half_pos}) and green_half_cpu = ({green_pos})"
-        )
-        assert "mask_stage2_full" not in body, "mask_stage2_full must not appear in method body"
-
-    def test_green_gpu_copy_is_short_lived_before_stage1(self):
-        """green_half_gpu copy precedes image_conditioner; del follows conditionings, precedes stage_1."""
-        body = self._inpaint_body()
-        gpu_copy = "green_half_gpu = green_half_cpu.to(device=device, dtype=dtype)"
-        gpu_pos = body.find(gpu_copy)
-        assert gpu_pos != -1, f"{gpu_copy!r} not found"
-        ic_pos = body.find("self.pipeline.image_conditioner(")
-        assert ic_pos != -1, "image_conditioner call not found"
-        assert gpu_pos < ic_pos, "green_half_gpu copy must precede image_conditioner"
-        del_line = "del green_half_gpu, green_half_cpu"
-        del_pos = body.find(del_line)
-        assert del_pos != -1, f"{del_line!r} not found"
-        # del follows the conditionings build (image_conditioner) and precedes stage_1
-        assert ic_pos < del_pos, "del green_half_gpu/green_half_cpu must follow image_conditioner"
-        stage1_pos = body.find("self.pipeline.stage_1(")
-        assert stage1_pos != -1, "stage_1 call not found"
-        assert del_pos < stage1_pos, "del green_half_gpu/green_half_cpu must precede stage_1"
-
-    def test_stage1_blend_uses_cpu_masters_and_deletes_them(self):
-        """video_half_frames_01_cpu + mask_s1_blend_cpu passed to blend; no whole-tensor .to; deleted after."""
-        body = self._inpaint_body()
-        blend_call_pos = body.find("laplacian_pyramid_blend(")
-        assert blend_call_pos != -1, "laplacian_pyramid_blend call not found"
-        # bound the argument region to the closing paren of the blend call
-        blend_close = body.find(")", blend_call_pos)
-        assert blend_close != -1, "blend call closing paren not found"
-        blend_args = body[blend_call_pos:blend_close]
-        assert "video_half_frames_01_cpu" in blend_args, "video_half_frames_01_cpu not passed to blend"
-        assert "mask_s1_blend_cpu" in blend_args, "mask_s1_blend_cpu not passed to blend"
-        # no whole-tensor GPU reload of the CPU masters
-        assert "video_half_cpu = video_half_cpu.to(" not in body, (
-            "video_half_cpu must not be reloaded to GPU as a whole tensor"
-        )
-        assert "mask_stage1_half_cpu = mask_stage1_half_cpu.to(" not in body, (
-            "mask_stage1_half_cpu must not be reloaded to GPU as a whole tensor"
-        )
-        # delete line follows the blend call
-        del_line = "del video_half_cpu, mask_stage1_half_cpu, video_half_frames_01_cpu, mask_s1_blend_cpu"
-        del_pos = body.find(del_line)
-        assert del_pos != -1, f"{del_line!r} not found"
-        assert blend_close < del_pos, "delete of CPU masters must follow the blend call"
-
-    def test_empty_cache_guarded_by_cuda_check(self):
-        """Every torch.cuda.empty_cache() in the method is guarded by a nearby if device.type == cuda."""
-        body = self._inpaint_body()
-        needle = "torch.cuda.empty_cache()"
-        start = 0
-        count = 0
-        while True:
-            pos = body.find(needle, start)
-            if pos == -1:
-                break
-            count += 1
-            preceding = body[max(0, pos - 200):pos]
-            assert 'if device.type == "cuda":' in preceding, (
-                f"torch.cuda.empty_cache() at {pos} not guarded by 'if device.type == \"cuda\":'"
-            )
-            start = pos + len(needle)
-        assert count > 0, "no torch.cuda.empty_cache() calls found in method body"
 
 
 class TestHdrVideoOnly:
